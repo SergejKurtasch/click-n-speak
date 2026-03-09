@@ -5,6 +5,14 @@ import numpy as np
 class WhisperTranscriber:
     def __init__(self, model_name="mlx-community/whisper-large-v3-mlx"):
         self.model_name = model_name
+        # Common hallucinations/noise results to filter out (no trailing punctuation)
+        self.hallucinations = {
+            "thank you", "thank you for watching", "thanks for watching",
+            "благодарю", "благодарю за внимание", "подпишитесь на канал",
+            "продолжение следует", "продолжение следует...", "you", "bye", 
+            "subscribe", "thanks", "redacted", "captioning by", "translated by",
+            "insert", "direct"
+        }
         print(f"Initializing Whisper model: {model_name}...")
 
     def transcribe(self, audio_data, initial_prompt=None, condition_on_previous_text=True):
@@ -32,7 +40,17 @@ class WhisperTranscriber:
             end_time = time.time()
             print(f"Transcription finished in {end_time - start_time:.2f} seconds.")
             
-            return result.get("text", "").strip()
+            text = result.get("text", "").strip()
+            
+            # Filtering hallucinations
+            clean_text = text.lower().strip(" .!?,")
+            if clean_text in self.hallucinations or not clean_text:
+                if text:
+                    print(f"Filtered out hallucination: '{text}'")
+                return ""
+            
+            # Final cleanup: strip leading/trailing dots, ellipses and spaces
+            return text.strip(" .…")
         except Exception as e:
             print(f"Transcription error: {e}")
             return ""
