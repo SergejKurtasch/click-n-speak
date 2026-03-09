@@ -1,16 +1,22 @@
 import subprocess
 
+import threading
+
+def _run_notification(script):
+    try:
+        subprocess.run(["osascript", "-e", script], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to send notification: {e}")
+
 def send_notification(title, subtitle, info_text):
-    """Sends a native macOS notification using AppleScript."""
+    """Sends a native macOS notification using AppleScript (non-blocking)."""
     content = f"{subtitle} - {info_text}" if subtitle else info_text
     escaped_title = title.replace('"', '\\"')
     escaped_content = content.replace('"', '\\"')
     
     script = f'display notification "{escaped_content}" with title "{escaped_title}"'
-    try:
-        subprocess.run(["osascript", "-e", script], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to send notification: {e}")
+    # Run in a separate thread to avoid blocking the hotkey listener
+    threading.Thread(target=_run_notification, args=(script,), daemon=True).start()
 
 def copy_to_clipboard(text):
     """Copies text to the macOS clipboard."""
@@ -21,8 +27,9 @@ def copy_to_clipboard(text):
         print(f"Failed to copy to clipboard: {e}")
 
 def play_sound(sound_name="/System/Library/Sounds/Tink.aiff"):
-    """Plays a system sound."""
+    """Plays a system sound (non-blocking)."""
     try:
-        subprocess.run(["afplay", sound_name], check=False)
+        # Popen is non-blocking
+        subprocess.Popen(["afplay", sound_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         print(f"Failed to play sound {sound_name}: {e}")
