@@ -1,7 +1,7 @@
 import sys
 import os
 
-print("--- SVoiceRec Verification ---")
+print("--- Click-n-speak Verification ---")
 
 # 1. Check Python version
 print(f"Python Version: {sys.version}")
