@@ -1,6 +1,6 @@
 import time
 from pynput.keyboard import Controller
-from utils import copy_to_clipboard, send_notification
+from .utils import copy_to_clipboard, send_notification
 
 def inject_text(text):
     """
@@ -24,7 +24,3 @@ def inject_text(text):
         print(f"Direct injection failed: {e}. Falling back to clipboard.")
         copy_to_clipboard(text)
         send_notification("SVoiceRec", "Error", "Injection failed. Text copied to clipboard. Check Accessibility permissions.")
-
-if __name__ == "__main__":
-    # Test
-    inject_text("Hello from SVoiceRec!")
