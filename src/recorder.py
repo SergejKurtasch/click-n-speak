@@ -123,6 +123,10 @@ class AudioRecorder:
         self._stop_event.clear()
         
         try:
+            # Play sound BEFORE starting the stream to avoid recording it
+            play_sound("/System/Library/Sounds/Tink.aiff")
+            time.sleep(0.2) # Small buffer to let the beep finish mostly
+            
             self.stream = sd.InputStream(
                 device=self.device_id,
                 samplerate=self.sample_rate,
@@ -130,7 +134,6 @@ class AudioRecorder:
                 callback=self._callback
             )
             self.stream.start()
-            play_sound("/System/Library/Sounds/Tink.aiff")
         except Exception as e:
             print(f"Could not start audio stream: {e}")
             self.recording = False
