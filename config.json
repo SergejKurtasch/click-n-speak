@@ -1,0 +1,9 @@
+{
+    "hotkey": "<alt>+<space>",
+    "model_name": "mlx-community/whisper-large-v3-mlx",
+    "languages": ["ru", "en", "de"],
+    "initial_prompt": "Русский текст. Deutscher Text. English text. Переключаемся.",
+    "condition_on_previous_text": true,
+    "sample_rate": 16000,
+    "chunk_duration": 30
+}
