@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 from .recorder import AudioRecorder
 from .transcriber import WhisperTranscriber
 from .hotkey_handler import HotkeyHandler
@@ -21,6 +22,8 @@ class SVoiceRecApp:
         )
         self.is_recording = False
         self.is_processing = False
+        self.last_toggle_time = 0.0
+        self.debounce_interval = 0.3 # seconds
 
     def load_config(self, path):
         if not os.path.exists(path):
@@ -36,6 +39,13 @@ class SVoiceRecApp:
             self.config = {}
 
     def toggle_recording(self):
+        current_time = time.time()
+        if current_time - self.last_toggle_time < self.debounce_interval:
+            print("Ignoring hotkey: debounce interval not met.")
+            return
+        
+        self.last_toggle_time = current_time
+
         if self.is_processing:
             print("Still processing previous recording. Please wait.")
             return
