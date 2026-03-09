@@ -7,3 +7,4 @@ scipy
 pyobjc-framework-Quartz
 pyobjc-framework-Cocoa
 python-dotenv
+rumps

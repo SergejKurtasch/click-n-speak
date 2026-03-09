@@ -1,7 +1,7 @@
 import os
-import time
 import sys
 from src.app import SVoiceRecApp
+from src.menu_bar import ClickNSpeakApp
 from src.utils import send_notification
 
 def main():
@@ -9,19 +9,23 @@ def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     
     try:
-        app = SVoiceRecApp("config.json")
-        print("Click-n-speak is running...")
-        send_notification("Click-n-speak", "Started", "Press the hotkey to start recording.")
+        # Initialize the core application logic
+        logic_app = SVoiceRecApp("config.json")
+        
+        # Initialize the Menu Bar interface
+        menu_app = ClickNSpeakApp(logic_app)
+        
+        # Link them
+        logic_app.set_menu_bar(menu_app)
+        
+        print("Click-n-speak is running in the menu bar...")
+        send_notification("Click-n-speak", "Started", "Press the hotkey to start recording or use the menu bar icon.")
         
         # Start hotkey listener
-        app.hotkey_handler.start()
+        logic_app.hotkey_handler.start()
         
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("Shutting down...")
-            app.stop()
+        # Run the Menu Bar app (this is the main loop)
+        menu_app.run()
             
     except Exception as e:
         print(f"Failed to start application: {e}")
