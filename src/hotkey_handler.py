@@ -1,5 +1,4 @@
 from pynput import keyboard
-import threading
 
 class HotkeyHandler:
     def __init__(self, hotkey_str="<alt>+<space>", on_trigger=None):
@@ -27,17 +26,3 @@ class HotkeyHandler:
     def stop(self):
         if self.listener:
             self.listener.stop()
-
-if __name__ == "__main__":
-    import time
-    def test_callback():
-        print("Callback executed!")
-    
-    handler = HotkeyHandler(on_trigger=test_callback)
-    handler.start()
-    print("Press Option+Space to test. Press Ctrl+C to exit.")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        handler.stop()

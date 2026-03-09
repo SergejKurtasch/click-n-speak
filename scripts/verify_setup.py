@@ -28,6 +28,13 @@ if os.path.exists(config_path):
 else:
     print(f"[FAIL] {config_path} not found.")
 
+# 4. Check src directory
+src_path = "src"
+if os.path.isdir(src_path) and os.path.exists(os.path.join(src_path, "__init__.py")):
+    print(f"[OK] {src_path} package found.")
+else:
+    print(f"[FAIL] {src_path} package not found or missing __init__.py.")
+
 # 4. Check AppleScript permissions (can only be checked by running)
 print("\n[INFO] To enable text injection, you will need to grant 'Accessibility' permissions to your terminal/Python when prompted.")
 print("[INFO] To enable recording, you will need to grant 'Microphone' permissions.")
