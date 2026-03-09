@@ -5,12 +5,24 @@ import time
 from .utils import play_sound
 
 class AudioRecorder:
-    def __init__(self, sample_rate=16000, device_id=None):
+    def __init__(self, sample_rate=16000, device_id=None, silence_threshold=0.01, silence_duration=1.0, 
+                 target_speech_duration=8.0, max_speech_duration=12.0):
         self.sample_rate = sample_rate
         self.recording = False
-        self.audio_data = []
+        self.audio_data = [] # Current chunk data
         self.stream = None
         self._stop_event = threading.Event()
+        
+        # Silence detection parameters
+        self.silence_threshold = silence_threshold
+        self.silence_duration = silence_duration # Normal pause
+        self.target_speech_duration = target_speech_duration # Start looking for micro-pauses
+        self.max_speech_duration = max_speech_duration # Force split
+        
+        self.silence_counter = 0
+        self.chunk_callback = None
+        self.has_speech_in_chunk = False
+        self.current_chunk_duration = 0 # Track time since last split
         
         # If device_id is provided in config, use it. Otherwise, try to find built-in.
         if device_id is not None:
@@ -37,16 +49,77 @@ class AudioRecorder:
     def _callback(self, indata, frames, time_info, status):
         if status:
             print(f"Error in audio stream: {status}")
-        if self.recording:
-            self.audio_data.append(indata.copy())
+        
+        if not self.recording:
+            return
 
-    def start(self):
+        # Append data to current chunk
+        self.audio_data.append(indata.copy())
+
+        # Check for silence
+        # RMS energy
+        energy = np.sqrt(np.mean(indata**2))
+        
+        # Update current chunk duration
+        chunk_increment = frames / self.sample_rate
+        self.current_chunk_duration += chunk_increment
+
+        if energy < self.silence_threshold:
+            self.silence_counter += chunk_increment
+        else:
+            self.silence_counter = 0
+            self.has_speech_in_chunk = True
+
+        # Adaptive silence threshold:
+        # 1. Normal: 1.0s (default)
+        # 2. After target_speech_duration: 0.4s (micro-pause)
+        # 3. After max_speech_duration: 0s (force split)
+        
+        effective_silence_duration = self.silence_duration
+        trigger_type = "Normal"
+        
+        if self.current_chunk_duration >= self.max_speech_duration:
+            effective_silence_duration = 0 # Force split immediately
+            trigger_type = "FORCE (Max duration)"
+        elif self.current_chunk_duration >= self.target_speech_duration:
+            effective_silence_duration = 0.4 # Micro-pause threshold
+            trigger_type = "MICRO (Target duration)"
+
+        # If silence duration exceeded and we have some audio, trigger chunk callback
+        if self.silence_counter >= effective_silence_duration:
+            if len(self.audio_data) > 0 and self.has_speech_in_chunk:
+                duration = sum(len(x) for x in self.audio_data) / self.sample_rate
+                if duration > 0.5:
+                    print(f"Triggering {trigger_type} chunk: {self.current_chunk_duration:.2f}s total, {self.silence_counter:.2f}s silence")
+                    self._trigger_chunk()
+            
+            # Reset chunk state even if it was just noise
+            self.audio_data = []
+            self.silence_counter = 0
+            self.has_speech_in_chunk = False
+            self.current_chunk_duration = 0
+
+    def _trigger_chunk(self):
+        if not self.audio_data:
+            return
+            
+        chunk = np.concatenate(self.audio_data, axis=0).flatten()
+        
+        if self.chunk_callback:
+            # Run callback in a separate thread to not block the audio stream
+            threading.Thread(target=self.chunk_callback, args=(chunk,), daemon=True).start()
+
+    def start(self, chunk_callback=None):
         if self.recording:
             return
         
         print(f"Starting recording on device {self.device_id if self.device_id is not None else 'default'}...")
         self.audio_data = []
         self.recording = True
+        self.chunk_callback = chunk_callback
+        self.silence_counter = 0
+        self.has_speech_in_chunk = False
+        self.current_chunk_duration = 0
         self._stop_event.clear()
         
         try:
