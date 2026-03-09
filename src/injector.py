@@ -23,4 +23,4 @@ def inject_text(text):
     except Exception as e:
         print(f"Direct injection failed: {e}. Falling back to clipboard.")
         copy_to_clipboard(text)
-        send_notification("SVoiceRec", "Error", "Injection failed. Text copied to clipboard. Check Accessibility permissions.")
+        send_notification("Click-n-speak", "Error", "Injection failed. Text copied to clipboard. Check Accessibility permissions.")

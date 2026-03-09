@@ -57,7 +57,7 @@ class SVoiceRecApp:
 
     def start_recording(self):
         self.is_recording = True
-        send_notification("SVoiceRec", "Recording...", "Speak now. Press the hotkey again to finish.")
+        send_notification("Click-n-speak", "Recording...", "Speak now. Press the hotkey again to finish.")
         self.recorder.start()
 
     def stop_recording_and_process(self):
@@ -67,7 +67,7 @@ class SVoiceRecApp:
         audio_data = self.recorder.stop()
         if audio_data is None or len(audio_data) == 0:
             print("No audio recorded.")
-            send_notification("SVoiceRec", "Finish", "No audio recorded.")
+            send_notification("Click-n-speak", "Finish", "No audio recorded.")
             self.is_processing = False
             return
 
@@ -76,7 +76,7 @@ class SVoiceRecApp:
 
     def process_audio(self, audio_data):
         try:
-            send_notification("SVoiceRec", "Processing...", "Transcribing your speech.")
+            send_notification("Click-n-speak", "Processing...", "Transcribing your speech.")
             
             text = self.transcriber.transcribe(
                 audio_data, 
@@ -87,13 +87,13 @@ class SVoiceRecApp:
             if text:
                 print(f"Transcribed Text: {text}")
                 inject_text(text)
-                send_notification("SVoiceRec", "Success", "Text injected successfully.")
+                send_notification("Click-n-speak", "Success", "Text injected successfully.")
             else:
-                send_notification("SVoiceRec", "Finish", "Could not transcribe audio.")
+                send_notification("Click-n-speak", "Finish", "Could not transcribe audio.")
                 
         except Exception as e:
             print(f"Error during processing: {e}")
-            send_notification("SVoiceRec", "Error", f"Failed to process audio: {str(e)}")
+            send_notification("Click-n-speak", "Error", f"Failed to process audio: {str(e)}")
         finally:
             self.is_processing = False
 

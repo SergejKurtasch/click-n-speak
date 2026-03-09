@@ -10,8 +10,8 @@ def main():
     
     try:
         app = SVoiceRecApp("config.json")
-        print("SVoiceRec is running...")
-        send_notification("SVoiceRec", "Started", "Press the hotkey to start recording.")
+        print("Click-n-speak is running...")
+        send_notification("Click-n-speak", "Started", "Press the hotkey to start recording.")
         
         # Start hotkey listener
         app.hotkey_handler.start()
