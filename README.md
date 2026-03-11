@@ -19,7 +19,12 @@ Click-n-speak is a lightweight, local, and cross-platform (focused on macOS) spe
 - **Sounddevice** - For listening to microphone streams.
 - **Rumps** - For the native macOS menu bar interface.
 
-## 🚀 Installation & Setup (Development)
+## 🚀 Quick Start (Recommended)
+
+You can download the latest pre-built version for macOS from the [Releases](https://github.com/SergejKurtasch/click-n-speak/releases) page. 
+Simply download the **Click-n-speak.dmg**, open it, and drag the app to your **Applications** folder.
+
+## 🛠 Installation & Setup (Development)
 
 1. **Clone the repository:**
    ```bash
@@ -49,11 +54,12 @@ Click-n-speak is a lightweight, local, and cross-platform (focused on macOS) spe
 To distribute Click-n-speak as a standalone macOS application:
 
 1. Ensure all dependencies (plus `py2app`) are installed in your `venv`.
-2. Run the build script to safely package everything (bypassing macOS SIP constraints):
+2. Run the build and DMG scripts:
    ```bash
    bash scripts/build.sh
+   bash scripts/make_dmg.sh
    ```
-3. The packaged app will be available in the `dist/` directory as `Click-n-speak.app`.
+3. The packaged app will be available in the `dist/` directory as `Click-n-speak.dmg`.
 
 ### ⚠️ Important: macOS Accessibility Permissions
 For the bundled `Click-n-speak.app` to listen to global hotkeys and inject text, you **must** grant it permissions in macOS System Settings:
