@@ -1,7 +1,9 @@
 import rumps
 import json
 import os
-from .utils import send_notification
+import sys
+import subprocess
+from .utils import send_notification, log_info, log_error
 
 class ClickNSpeakApp(rumps.App):
     def __init__(self, main_app):
@@ -26,7 +28,8 @@ class ClickNSpeakApp(rumps.App):
         
         # Languages
         langs = ["ru", "en", "de", "es", "fr"]
-        primary = self.config.get("languages", ["ru"])[0]
+        lang_list = self.config.get("languages", ["ru"])
+        primary = lang_list[0] if lang_list else "ru"
         
         self.menu.add("Primary Language")
         for l in langs:
@@ -54,6 +57,12 @@ class ClickNSpeakApp(rumps.App):
         
         self.menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
         self.menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
+        
+        # Autostart option
+        autostart_item = rumps.MenuItem("Launch at Login", callback=self.toggle_autostart)
+        autostart_item.state = 1 if self.config.get("autostart", False) else 0
+        self.menu.add(autostart_item)
+        
         self.menu.add(None)
 
     def change_model(self, sender):
@@ -67,7 +76,7 @@ class ClickNSpeakApp(rumps.App):
         if not new_model:
             return
 
-        print(f"Switching model to {new_model}")
+        log_info(f"Switching model to {new_model}")
         self.main_app.update_config({"model_name": new_model})
         
         # Update UI: uncheck others in the "Model" submenu
@@ -78,7 +87,7 @@ class ClickNSpeakApp(rumps.App):
 
     def change_language(self, sender):
         new_lang = sender.title.lower()
-        print(f"Setting primary language to {new_lang}")
+        log_info(f"Setting primary language to {new_lang}")
         
         # Get current languages and update the first one
         current_langs = self.config.get("languages", ["ru"])
@@ -106,8 +115,9 @@ class ClickNSpeakApp(rumps.App):
         main_prompt = prompts.get(new_lang, "")
         # Get up to 2 extra languages from config for context
         other_langs = []
-        if isinstance(current_langs, list) and len(current_langs) > 1:
-            other_langs = current_langs[1:3]
+        cl = self.config.get("languages", ["ru"])
+        if isinstance(cl, list) and len(cl) > 1:
+            other_langs = cl[1:3]
             
         extra_prompts_list = []
         for l in other_langs:
@@ -137,10 +147,12 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.update_recorder_settings(silence_duration=val)
 
     def open_config(self, _):
-        os.system("open config.json")
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.json')
+        os.system(f'open "{config_path}"')
 
     def reload_config(self, _):
-        self.main_app.load_config("config.json")
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.json')
+        self.main_app.load_config(config_path)
         send_notification("Click-n-speak", "Config Reloaded", "New settings applied.")
         # Re-setup menu (simplest way to update states)
         self.menu.clear()
@@ -148,10 +160,44 @@ class ClickNSpeakApp(rumps.App):
 
     def save_config(self):
         try:
-            with open("config.json", "w") as f:
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.json')
+            with open(config_path, "w") as f:
                 json.dump(self.config, f, indent=4)
         except Exception as e:
-            print(f"Error saving config: {e}")
+            log_error(f"Error saving config: {e}")
+
+    def toggle_autostart(self, sender):
+        current_state = sender.state == 1
+        new_state = not current_state
+        
+        # Get the path to the .app bundle if running as a bundle, or the script otherwise
+        # In a py2app bundle, sys.frozen is set, but we want the .app path
+        if getattr(sys, "frozen", False) == "macosx_app":
+            # Path to Click-n-speak.app
+            app_path = os.path.abspath(os.path.join(sys.executable, "../../.."))
+        else:
+            # Fallback for development (not very useful for actual login items, but for testing)
+            app_path = os.path.abspath(sys.argv[0])
+            
+        app_name = "Click-n-speak"
+        
+        try:
+            if new_state:
+                cmd = f'tell application "System Events" to make login item at end with properties {{path:"{app_path}", name:"{app_name}", hidden:false}}'
+                subprocess.run(['osascript', '-e', cmd], check=True)
+                send_notification(app_name, "Autostart Enabled", "The app will launch at login.")
+            else:
+                cmd = f'tell application "System Events" to delete login item "{app_name}"'
+                subprocess.run(['osascript', '-e', cmd], check=True)
+                send_notification(app_name, "Autostart Disabled", "The app will no longer launch at login.")
+            
+            sender.state = 1 if new_state else 0
+            self.config["autostart"] = new_state
+            self.save_config()
+            
+        except Exception as e:
+            log_error(f"Error toggling autostart: {e}")
+            send_notification(app_name, "Error", "Could not update login items.")
 
     def set_status(self, recording=False, processing=False):
         if recording:

@@ -1,17 +1,3 @@
 {
-    "hotkey": "<alt>+<space>",
-    "model_name": "mlx-community/whisper-large-v3-mlx",
-    "languages": [
-        "ru",
-        "en",
-        "de"
-    ],
-    "initial_prompt": "Русский язык. English language. Deutsche Sprache.",
-    "condition_on_previous_text": true,
-    "sample_rate": 16000,
-    "chunk_duration": 30,
-    "silence_threshold": 0.01,
-    "silence_duration": 1.0,
-    "target_speech_duration": 8.0,
-    "max_speech_duration": 12.0
+    "autostart": true
 }

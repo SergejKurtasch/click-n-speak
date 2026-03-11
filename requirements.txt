@@ -6,5 +6,7 @@ numpy
 scipy
 pyobjc-framework-Quartz
 pyobjc-framework-Cocoa
-python-dotenv
+pyobjc-framework-ApplicationServices
+tokenizers
+huggingface-hub
 rumps

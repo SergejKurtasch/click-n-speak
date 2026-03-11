@@ -2,7 +2,7 @@ import sounddevice as sd
 import numpy as np
 import threading
 import time
-from .utils import play_sound
+from .utils import play_sound, log_info, log_error
 
 class AudioRecorder:
     def __init__(self, sample_rate=16000, device_id=None, silence_threshold=0.01, silence_duration=1.0, 
@@ -38,17 +38,17 @@ class AudioRecorder:
                 name = dev.get('name', '')
                 # On macOS, internal mics usually have "MacBook" and "Microphone" in the name
                 if 'MacBook' in name and 'Microphone' in name and dev.get('max_input_channels', 0) > 0:
-                    print(f"Found built-in microphone: {name} (ID: {i})")
+                    log_info(f"Found built-in microphone: {name} (ID: {i})")
                     return i
         except Exception as e:
-            print(f"Error querying audio devices: {e}")
+            log_error(f"Error querying audio devices: {e}")
         
         # If not found or error, return None to use system default
         return None
 
     def _callback(self, indata, frames, time_info, status):
         if status:
-            print(f"Error in audio stream: {status}")
+            log_error(f"Error in audio stream: {status}")
         
         if not self.recording:
             return
@@ -90,7 +90,7 @@ class AudioRecorder:
             if len(self.audio_data) > 0 and self.has_speech_in_chunk:
                 duration = sum(len(x) for x in self.audio_data) / self.sample_rate
                 if duration > 0.5:
-                    print(f"Triggering {trigger_type} chunk: {self.current_chunk_duration:.2f}s total, {self.silence_counter:.2f}s silence")
+                    log_info(f"Triggering {trigger_type} chunk: {self.current_chunk_duration:.2f}s total, {self.silence_counter:.2f}s silence")
                     self._trigger_chunk()
             
             # Reset chunk state even if it was just noise
@@ -113,7 +113,7 @@ class AudioRecorder:
         if self.recording:
             return
         
-        print(f"Starting recording on device {self.device_id if self.device_id is not None else 'default'}...")
+        log_info(f"Starting recording on device {self.device_id if self.device_id is not None else 'default'}...")
         self.audio_data = []
         self.recording = True
         self.chunk_callback = chunk_callback
@@ -135,21 +135,21 @@ class AudioRecorder:
             )
             self.stream.start()
         except Exception as e:
-            print(f"Could not start audio stream: {e}")
+            log_error(f"Could not start audio stream: {e}")
             self.recording = False
 
     def stop(self):
         if not self.recording:
             return None
         
-        print("Stopping recording...")
+        log_info("Stopping recording...")
         self.recording = False
         if self.stream:
             try:
                 self.stream.stop()
                 self.stream.close()
             except Exception as e:
-                print(f"Error closing audio stream: {e}")
+                log_error(f"Error closing audio stream: {e}")
         
         play_sound("/System/Library/Sounds/Pop.aiff")
         
