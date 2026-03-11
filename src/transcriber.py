@@ -1,6 +1,7 @@
 import mlx_whisper
 import time
 import numpy as np
+from .utils import log_info, log_error
 
 class WhisperTranscriber:
     def __init__(self, model_name="mlx-community/whisper-large-v3-mlx"):
@@ -14,7 +15,7 @@ class WhisperTranscriber:
             "insert", "direct", "by the amara", "y cómo va a funcionar",
             "subtitles", "watching", "subscribe"
         }
-        print(f"Initializing Whisper model: {model_name}...")
+        log_info(f"Initializing Whisper model: {model_name}...")
 
     def transcribe(self, audio_data, initial_prompt=None, allowed_languages=None, condition_on_previous_text=True):
         """
@@ -24,7 +25,7 @@ class WhisperTranscriber:
         if audio_data is None or len(audio_data) == 0:
             return ""
 
-        print("Transcribing...")
+        log_info("Transcribing...")
         start_time = time.time()
         
         try:
@@ -39,7 +40,7 @@ class WhisperTranscriber:
             )
             
             end_time = time.time()
-            print(f"Transcription finished in {end_time - start_time:.2f} seconds.")
+            log_info(f"Transcription finished in {end_time - start_time:.2f} seconds.")
             
             text = result.get("text", "").strip()
             if not text:
@@ -58,7 +59,7 @@ class WhisperTranscriber:
                             is_allowed = True
                             break
                     if not is_allowed:
-                        print(f"Filtered out unauthorized language '{detected_lang}': '{text}'")
+                        log_info(f"Filtered out unauthorized language '{detected_lang}': '{text}'")
                         return ""
 
             # Check for suspicious characters (like excessive CJK characters in non-CJK context)
@@ -69,23 +70,23 @@ class WhisperTranscriber:
             # Unicode range for CJK: \u4e00-\u9fff
             asian_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
             if asian_chars > 2 and asian_chars > (len(text) / 3):
-                print(f"Filtered out suspicious Asian characters: '{text}'")
+                log_info(f"Filtered out suspicious Asian characters: '{text}'")
                 return ""
 
             # Filtering hallucinations using substring matching
             for phrase in self.hallucination_phrases:
                 if phrase in clean_text_lower:
-                    print(f"Filtered out hallucination containing '{phrase}': '{text}'")
+                    log_info(f"Filtered out hallucination containing '{phrase}': '{text}'")
                     return ""
             
             # Special case for "you" or "you." as it's a very common Whisper hallucination
             # if it's the ONLY word in the result.
             if clean_text_lower.strip(" .") == "you":
-                print(f"Filtered out likely 'you' hallucination: '{text}'")
+                log_info(f"Filtered out likely 'you' hallucination: '{text}'")
                 return ""
             
             # Final cleanup: strip leading/trailing dots, ellipses and spaces
             return text.strip(" .…")
         except Exception as e:
-            print(f"Transcription error: {e}")
+            log_error(f"Transcription error: {e}")
             return ""

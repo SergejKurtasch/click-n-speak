@@ -7,7 +7,7 @@ from .recorder import AudioRecorder
 from .transcriber import WhisperTranscriber
 from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
-from .utils import send_notification
+from .utils import send_notification, log_info, log_error
 
 class SVoiceRecApp:
     def __init__(self, config_path="config.json"):
@@ -35,12 +35,12 @@ class SVoiceRecApp:
         # Streaming state
         self.chunk_queue = queue.Queue()
         self.transcribed_parts = []
-        self.worker_thread: threading.Thread | None = None
+        self.worker_thread = None  # type: threading.Thread | None
         self.stop_worker = threading.Event()
 
     def load_config(self, path):
         if not os.path.exists(path):
-            print(f"Warning: Configuration file {path} not found. Using defaults.")
+            log_info(f"Warning: Configuration file {path} not found. Using defaults.")
             self.load_config_data({})
             return
 
@@ -49,7 +49,7 @@ class SVoiceRecApp:
                 data = json.load(f)
                 self.load_config_data(data)
         except Exception as e:
-            print(f"Error loading config: {e}. Using defaults.")
+            log_error(f"Error loading config: {e}. Using defaults.")
             self.load_config_data({})
 
     def load_config_data(self, data):
@@ -61,16 +61,29 @@ class SVoiceRecApp:
             if self.transcriber.model_name != model:
                 self.update_transcriber(model)
 
+    def update_config(self, updates):
+        """Update config with a dict of key-value pairs, save and reload."""
+        self.config.update(updates)
+        self.load_config_data(self.config)
+        # Persist to disk
+        try:
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.json')
+            with open(config_path, 'w') as f:
+                import json as _json
+                _json.dump(self.config, f, indent=4)
+        except Exception as e:
+            log_error(f"Error saving config: {e}")
+
     def toggle_recording(self):
         current_time = time.time()
         if current_time - self.last_toggle_time < self.debounce_interval:
-            print("Ignoring hotkey: debounce interval not met.")
+            log_info("Ignoring hotkey: debounce interval not met.")
             return
         
         self.last_toggle_time = current_time
 
         if self.is_processing:
-            print("Still processing previous recording. Please wait.")
+            log_info("Still processing previous recording. Please wait.")
             return
 
         if not self.is_recording:
@@ -82,7 +95,7 @@ class SVoiceRecApp:
         self.menu_bar = menu_bar
 
     def update_transcriber(self, model_name):
-        print(f"Updating transcriber to {model_name}...")
+        log_info(f"Updating transcriber to {model_name}...")
         self.transcriber = WhisperTranscriber(model_name=model_name)
 
     def update_recorder_settings(self, **kwargs):
@@ -95,14 +108,15 @@ class SVoiceRecApp:
             self.recorder.silence_duration = self.config.get('silence_duration', 1.0)
             self.recorder.target_speech_duration = self.config.get('target_speech_duration', 8.0)
             self.recorder.max_speech_duration = self.config.get('max_speech_duration', 12.0)
-            print("Recorder settings updated.")
+            log_info("Recorder settings updated.")
 
     def start_recording(self):
         self.is_recording = True
-        if self.menu_bar:
+        mb = self.menu_bar
+        if mb is not None:
             try:
-                self.menu_bar.set_status(recording=True)
-            except:
+                mb.set_status(recording=True)
+            except Exception:
                 pass
         self.transcribed_parts = []
         self.stop_worker.clear()
@@ -127,7 +141,7 @@ class SVoiceRecApp:
             self.chunk_queue.put(audio_data)
 
     def chunk_worker(self):
-        print("Chunk worker started.")
+        log_info("Chunk worker started.")
         while not self.stop_worker.is_set() or not self.chunk_queue.empty():
             try:
                 # Use a timeout to occasionally check the stop_worker event
@@ -137,8 +151,8 @@ class SVoiceRecApp:
             except queue.Empty:
                 continue
             except Exception as e:
-                print(f"Error in chunk worker: {e}")
-        print("Chunk worker stopped.")
+                log_error(f"Error in chunk worker: {e}")
+        log_info("Chunk worker stopped.")
 
     def process_chunk(self, audio_chunk):
         # Determine initial prompt from previously transcribed text (limit context to prevent drift)
@@ -160,7 +174,7 @@ class SVoiceRecApp:
         )
         
         if text:
-            print(f"Partial Transcription: {text}")
+            log_info(f"Partial Transcription: {text}")
             self.transcribed_parts.append(text)
             # Keep parts manageable
             if len(self.transcribed_parts) > 10:
@@ -171,8 +185,9 @@ class SVoiceRecApp:
     def stop_recording_and_process(self):
         self.is_recording = False
         self.is_processing = True
-        if self.menu_bar is not None:
-            self.menu_bar.set_status(recording=False, processing=True)
+        mb = self.menu_bar
+        if mb is not None:
+            mb.set_status(recording=False, processing=True)
         
         # Stop recording and get the last (remaining) chunk
         last_audio = self.recorder.stop()
@@ -187,8 +202,9 @@ class SVoiceRecApp:
         
         # Cleanup
         self.is_processing = False
-        if self.menu_bar is not None:
-            self.menu_bar.set_status(recording=False, processing=False)
+        mb = self.menu_bar
+        if mb is not None:
+            mb.set_status(recording=False, processing=False)
         send_notification("Click-n-speak", "Finish", "Transcription complete.")
 
     def stop(self):

@@ -12,6 +12,15 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+*.zip
+*.log
+
+# Build Artifacts
+build/
+dist/
+build_new/
+empty_package/
+.eggs/
 
 # Project specific
 logs/
