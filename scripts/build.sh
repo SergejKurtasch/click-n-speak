@@ -15,16 +15,22 @@ echo "=== Click-n-speak Build Script ==="
 echo "Step 1: Cleaning previous build..."
 # Strip macOS Sequoia's com.apple.provenance xattr that prevents deletion of signed bundles
 xattr -r -d com.apple.provenance build dist 2>/dev/null || true
-find build dist -name ".DS_Store" -delete 2>/dev/null || true
 chmod -R u+w build dist 2>/dev/null || true
 rm -rf build dist .eggs 2>/dev/null || true
+
+# If it still exists, try to at least clear its contents
 if [ -d "dist" ]; then
-    echo "  ERROR: Could not clean dist/. Run manually:"
+    rm -rf dist/* 2>/dev/null || true
+fi
+
+# Final check: we only fail if an actual .app is blocking us
+if [ -d "dist/${APP_NAME}.app" ]; then
+    echo "  ERROR: Could not clean dist/${APP_NAME}.app. Run manually:"
     echo "    sudo xattr -r -d com.apple.provenance dist && sudo rm -rf dist"
     exit 1
 fi
 
-PYTHON_EXEC="python3"
+PYTHON_EXEC="./venv/bin/python"
 
 # Step 2: Run py2app using /tmp to bypass macOS provenance restrictions
 echo "Step 2: Running py2app in /tmp..."

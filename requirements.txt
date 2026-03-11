@@ -10,3 +10,4 @@ pyobjc-framework-ApplicationServices
 tokenizers
 huggingface-hub
 rumps
+py2app
