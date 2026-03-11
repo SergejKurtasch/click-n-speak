@@ -30,7 +30,7 @@ if [ -d "dist/${APP_NAME}.app" ]; then
     exit 1
 fi
 
-PYTHON_EXEC="./venv/bin/python"
+PYTHON_EXEC="$(pwd)/venv/bin/python"
 
 # Step 2: Run py2app using /tmp to bypass macOS provenance restrictions
 echo "Step 2: Running py2app in /tmp..."
