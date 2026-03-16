@@ -5,9 +5,10 @@ Usage:
     python setup.py py2app
 """
 
-import sys
-import os
 import glob
+import os
+import sys
+
 from setuptools import setup
 
 # Aggressively increase recursion limit for deep module graphs
@@ -19,6 +20,7 @@ sys.setrecursionlimit(10000)
 # We sign manually in scripts/build.sh after all post-build fixups are done.
 try:
     import py2app.util
+
     py2app.util.codesign_adhoc = lambda *args, **kwargs: None
 except (ImportError, AttributeError):
     pass
@@ -27,20 +29,22 @@ except (ImportError, AttributeError):
 def find_native_dylibs():
     """Find native .dylib files that need to be included in the Frameworks dir."""
     dylibs = []
-    
+
     # 1. Find libportaudio.dylib from sounddevice
     try:
         import sounddevice
+
         sd_dir = os.path.dirname(sounddevice.__file__)
         candidates = [
-            os.path.join(sd_dir, '_sounddevice_data', 'portaudio-binaries', 'libportaudio.dylib'),
+            os.path.join(sd_dir, "_sounddevice_data", "portaudio-binaries", "libportaudio.dylib"),
         ]
         import importlib.util
-        spec = importlib.util.find_spec('_sounddevice_data')
+
+        spec = importlib.util.find_spec("_sounddevice_data")
         if spec and spec.submodule_search_locations:
             for loc in spec.submodule_search_locations:
-                candidates.append(os.path.join(loc, 'portaudio-binaries', 'libportaudio.dylib'))
-        
+                candidates.append(os.path.join(loc, "portaudio-binaries", "libportaudio.dylib"))
+
         for path in candidates:
             if os.path.isfile(path):
                 print(f"Found PortAudio library: {path}")
@@ -48,11 +52,12 @@ def find_native_dylibs():
                 break
     except ImportError:
         print("WARNING: sounddevice not found, skipping PortAudio")
-    
+
     # 2. Find libmlx*.dylib from mlx package
     try:
         import importlib.util
-        mlx_spec = importlib.util.find_spec('mlx')
+
+        mlx_spec = importlib.util.find_spec("mlx")
         mlx_dirs = []
         if mlx_spec and mlx_spec.submodule_search_locations:
             mlx_dirs = list(mlx_spec.submodule_search_locations)
@@ -60,68 +65,89 @@ def find_native_dylibs():
             # Fallback: try import and check __file__
             try:
                 import mlx
+
                 if mlx.__file__:
                     mlx_dirs = [os.path.dirname(mlx.__file__)]
             except Exception:
                 pass
-        
+
         for mlx_dir in mlx_dirs:
-            mlx_lib_dir = os.path.join(mlx_dir, 'lib')
+            mlx_lib_dir = os.path.join(mlx_dir, "lib")
             if os.path.isdir(mlx_lib_dir):
-                for dylib in glob.glob(os.path.join(mlx_lib_dir, 'libmlx*.dylib')):
+                for dylib in glob.glob(os.path.join(mlx_lib_dir, "libmlx*.dylib")):
                     print(f"Found MLX library: {dylib}")
                     dylibs.append(dylib)
     except Exception as e:
         print(f"WARNING: Could not find MLX dylibs: {e}")
-    
+
     return dylibs
 
 
-APP = ['main.py']
-DATA_FILES = [
-    'config.json'
-]
+APP = ["main.py"]
+DATA_FILES = ["config.json"]
 
 # Build frameworks list dynamically
 frameworks_list = find_native_dylibs()
 
 OPTIONS = {
-    'argv_emulation': False,  # CRITICAL: True causes launch issues in py2app
-    'plist': {
-        'LSUIElement': True,
-        'CFBundleName': 'Click-n-speak',
-        'CFBundleDisplayName': 'Click-n-speak',
-        'CFBundleIdentifier': 'com.sergej.clicknspeak',
-        'CFBundleVersion': '0.2.0',
-        'CFBundleShortVersionString': '0.2.0',
-        'NSMicrophoneUsageDescription': 'This app needs access to your microphone to transcribe speech.',
-        'NSAppleEventsUsageDescription': 'This app needs to control other apps to inject transcribed text.',
+    "argv_emulation": False,  # CRITICAL: True causes launch issues in py2app
+    "plist": {
+        "LSUIElement": True,
+        "CFBundleName": "Click-n-speak",
+        "CFBundleDisplayName": "Click-n-speak",
+        "CFBundleIdentifier": "com.sergej.clicknspeak",
+        "CFBundleVersion": "0.2.0",
+        "CFBundleShortVersionString": "0.2.0",
+        "NSMicrophoneUsageDescription": "This app needs access to your microphone to transcribe speech.",
+        "NSAppleEventsUsageDescription": "This app needs to control other apps to inject transcribed text.",
     },
-    'packages': [
-        'rumps', 'src', '_sounddevice_data',
+    "packages": [
+        "rumps",
+        "src",
+        "_sounddevice_data",
     ],
-    'includes': [
-        'pynput.keyboard._darwin',
-        'pynput.mouse._darwin',
-        'AppKit', 'ApplicationServices', 'Quartz', 'Foundation',
-        'mlx_whisper', 'mlx', 'sounddevice', 'numpy', 'pynput',
-        'huggingface_hub', 'tokenizers', 'requests', 'urllib3', 'certifi',
+    "includes": [
+        "pynput.keyboard._darwin",
+        "pynput.mouse._darwin",
+        "AppKit",
+        "ApplicationServices",
+        "Quartz",
+        "Foundation",
+        "mlx_whisper",
+        "mlx",
+        "sounddevice",
+        "numpy",
+        "pynput",
+        "huggingface_hub",
+        "tokenizers",
+        "requests",
+        "urllib3",
+        "certifi",
         # Used by huggingface_hub
-        'charset_normalizer',
+        "charset_normalizer",
     ],
-    'frameworks': frameworks_list,
-    'excludes': [
+    "frameworks": frameworks_list,
+    "excludes": [
         # GUI frameworks not used
-        'tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
+        "tkinter",
+        "PyQt5",
+        "PyQt6",
+        "PySide2",
+        "PySide6",
         # Heavy transitive dependencies NOT needed for this app
-        'torch', 'torchgen', 'sympy', 'llvmlite',
-        'rich', 'click',
-        'dotenv', 'python-dotenv',
+        "torch",
+        "torchgen",
+        "sympy",
+        "llvmlite",
+        "rich",
+        "click",
+        "dotenv",
+        "python-dotenv",
     ],
 }
 
 setup(
     app=APP,
     data_files=DATA_FILES,
-    options={'py2app': OPTIONS},
+    options={"py2app": OPTIONS},
 )

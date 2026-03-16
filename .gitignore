@@ -25,3 +25,6 @@ empty_package/
 # Project specific
 logs/
 temp/
+
+.pre-commit-config.yaml
+pyproject.toml

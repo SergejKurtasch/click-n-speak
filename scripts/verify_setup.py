@@ -1,5 +1,5 @@
-import sys
 import os
+import sys
 
 print("--- Click-n-speak Verification ---")
 
@@ -7,7 +7,7 @@ print("--- Click-n-speak Verification ---")
 print(f"Python Version: {sys.version}")
 
 # 2. Check dependencies
-required = ['mlx_whisper', 'mlx', 'pynput', 'sounddevice', 'numpy', 'AppKit']
+required = ["mlx_whisper", "mlx", "pynput", "sounddevice", "numpy", "AppKit"]
 missing = []
 for lib in required:
     try:
@@ -36,7 +36,9 @@ else:
     print(f"[FAIL] {src_path} package not found or missing __init__.py.")
 
 # 4. Check AppleScript permissions (can only be checked by running)
-print("\n[INFO] To enable text injection, you will need to grant 'Accessibility' permissions to your terminal/Python when prompted.")
+print(
+    "\n[INFO] To enable text injection, you will need to grant 'Accessibility' permissions to your terminal/Python when prompted."
+)
 print("[INFO] To enable recording, you will need to grant 'Microphone' permissions.")
 
 print("\nVerification complete.")

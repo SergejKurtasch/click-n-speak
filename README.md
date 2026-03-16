@@ -21,7 +21,7 @@ Click-n-speak is a lightweight, local, and cross-platform (focused on macOS) spe
 
 ## 🚀 Quick Start (Recommended)
 
-You can download the latest pre-built version for macOS from the [Releases](https://github.com/SergejKurtasch/click-n-speak/releases) page. 
+You can download the latest pre-built version for macOS from the [Releases](https://github.com/SergejKurtasch/click-n-speak/releases) page.
 Simply download the **Click-n-speak.dmg**, open it, and drag the app to your **Applications** folder.
 
 ## 🛠 Installation & Setup (Development)

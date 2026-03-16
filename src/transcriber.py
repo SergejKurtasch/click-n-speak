@@ -1,19 +1,35 @@
-import mlx_whisper
 import time
-import numpy as np
-from .utils import log_info, log_error
+
+import mlx_whisper
+
+from .utils import log_error, log_info
+
 
 class WhisperTranscriber:
     def __init__(self, model_name="mlx-community/whisper-large-v3-mlx"):
         self.model_name = model_name
         # Common hallucinations/noise results to filter out (substring matches)
         self.hallucination_phrases = {
-            "thank you", "thanks for watching", "благодарю", "подпишитесь",
-            "продолжение следует", "subtitles by", "amara.org",
-            "the amara.org community", "captioning by", "translated by", 
-            "don't forget to", "you for watching", "a s s u b t i t l e s",
-            "insert", "direct", "by the amara", "y cómo va a funcionar",
-            "subtitles", "watching", "subscribe"
+            "thank you",
+            "thanks for watching",
+            "благодарю",
+            "подпишитесь",
+            "продолжение следует",
+            "subtitles by",
+            "amara.org",
+            "the amara.org community",
+            "captioning by",
+            "translated by",
+            "don't forget to",
+            "you for watching",
+            "a s s u b t i t l e s",
+            "insert",
+            "direct",
+            "by the amara",
+            "y cómo va a funcionar",
+            "subtitles",
+            "watching",
+            "subscribe",
         }
         log_info(f"Initializing Whisper model: {model_name}...")
 
@@ -27,7 +43,7 @@ class WhisperTranscriber:
 
         log_info("Transcribing...")
         start_time = time.time()
-        
+
         try:
             # MLX Whisper transcribe options (verbose=True to get language info in logs if needed)
             result = mlx_whisper.transcribe(
@@ -36,12 +52,12 @@ class WhisperTranscriber:
                 initial_prompt=initial_prompt,
                 condition_on_previous_text=condition_on_previous_text,
                 task="transcribe",
-                verbose=False
+                verbose=False,
             )
-            
+
             end_time = time.time()
             log_info(f"Transcription finished in {end_time - start_time:.2f} seconds.")
-            
+
             text = result.get("text", "").strip()
             if not text:
                 return ""
@@ -65,10 +81,10 @@ class WhisperTranscriber:
             # Check for suspicious characters (like excessive CJK characters in non-CJK context)
             # This is common for Whisper hallucinations
             clean_text_lower = text.lower()
-            
+
             # Simple check for Chinese characters (common hallucination)
             # Unicode range for CJK: \u4e00-\u9fff
-            asian_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+            asian_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
             if asian_chars > 2 and asian_chars > (len(text) / 3):
                 log_info(f"Filtered out suspicious Asian characters: '{text}'")
                 return ""
@@ -78,13 +94,13 @@ class WhisperTranscriber:
                 if phrase in clean_text_lower:
                     log_info(f"Filtered out hallucination containing '{phrase}': '{text}'")
                     return ""
-            
+
             # Special case for "you" or "you." as it's a very common Whisper hallucination
             # if it's the ONLY word in the result.
             if clean_text_lower.strip(" .") == "you":
                 log_info(f"Filtered out likely 'you' hallucination: '{text}'")
                 return ""
-            
+
             # Final cleanup: strip leading/trailing dots, ellipses and spaces
             return text.strip(" .…")
         except Exception as e:

@@ -62,7 +62,7 @@ if spec and spec.submodule_search_locations:
 
 if [ -n "${MLX_SRC}" ] && [ -d "${MLX_SRC}" ]; then
     echo "  Found mlx source at: ${MLX_SRC}"
-    
+
     # Remove the incomplete mlx from the zip
     echo "  Removing incomplete mlx from python311.zip..."
     cd "${LIB_DIR}"
@@ -81,12 +81,12 @@ if os.path.exists(zip_path):
     print('  Removed mlx/ entries from zip')
 "
     cd - > /dev/null
-    
+
     # Copy the entire mlx package to the lib directory
     echo "  Copying full mlx package..."
     rm -rf "${LIB_DIR}/mlx"
     cp -R "${MLX_SRC}" "${LIB_DIR}/mlx"
-    
+
     # Also ensure lib-dynload/mlx/lib has the dylib (for @rpath resolution)
     MLX_CORE_DIR="${LIB_DIR}/lib-dynload/mlx"
     if [ -d "${MLX_CORE_DIR}" ]; then
@@ -97,7 +97,7 @@ if os.path.exists(zip_path):
             echo "  Copied libmlx.dylib to lib-dynload/mlx/lib/"
         fi
     fi
-    
+
     echo "  ✅ MLX package copied successfully"
 else
     echo "  ⚠️  WARNING: Could not find mlx source directory!"
