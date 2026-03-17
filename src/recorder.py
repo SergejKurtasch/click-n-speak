@@ -4,7 +4,15 @@ import time
 import numpy as np
 import sounddevice as sd
 
-from .utils import SOUND_RECORDING_START, SOUND_RECORDING_STOP, log_error, log_info, play_sound
+from .utils import (
+    SOUND_RECORDING_START,
+    SOUND_RECORDING_STOP,
+    log_error,
+    log_info,
+    open_microphone_settings,
+    play_sound,
+    send_notification,
+)
 
 
 class AudioRecorder:
@@ -140,12 +148,21 @@ class AudioRecorder:
             time.sleep(0.2)  # Small buffer to let the beep finish mostly
 
             self.stream = sd.InputStream(
-                device=self.device_id, samplerate=self.sample_rate, channels=1, callback=self._callback
+                device=self.device_id,
+                samplerate=self.sample_rate,
+                channels=1,
+                callback=self._callback,
             )
             self.stream.start()
         except Exception as e:
             log_error(f"Could not start audio stream: {e}")
             self.recording = False
+            send_notification(
+                "Click-n-speak",
+                "Microphone access required",
+                "Please allow microphone access for Click-n-speak in System Settings → Privacy & Security → Microphone.",
+            )
+            open_microphone_settings()
 
     def stop(self):
         if not self.recording:

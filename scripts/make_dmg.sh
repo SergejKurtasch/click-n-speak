@@ -9,10 +9,10 @@ TMP_DIR="/tmp/dmg_build"
 
 echo "🚀 Starting DMG creation for ${APP_NAME}..."
 
-# 1. Check if the app exists
+# 1. Check if the app exists (launcher .app from build_launcher.sh)
 if [ ! -d "$APP_BUNDLE" ]; then
-    echo "❌ Error: ${APP_BUNDLE} not found. Running build script first..."
-    bash scripts/build.sh
+    echo "❌ Error: ${APP_BUNDLE} not found. Running launcher build first..."
+    bash "$(dirname "$0")/build_launcher.sh"
 fi
 
 # 2. Cleanup previous runs

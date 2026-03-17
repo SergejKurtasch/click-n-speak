@@ -1,7 +1,9 @@
 #!/bin/bash
+#!/bin/bash
 # Script to create a macOS .icns file from a base PNG image
 
-BASE_IMAGE="icon_base.png"
+# Optional first argument overrides the default base image path.
+BASE_IMAGE="${1:-icon_base.png}"
 ICONSET="icon.iconset"
 
 if [ ! -f "$BASE_IMAGE" ]; then

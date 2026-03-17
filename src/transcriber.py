@@ -1,8 +1,39 @@
+import re
 import time
 
 import mlx_whisper
 
 from .utils import log_error, log_info
+
+# Consecutive same-word repeats at or above this count are treated as hallucination
+CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD = 2
+
+# Strip leading/trailing punctuation so "hundred", "hundred!", "hundred." count as same word
+_WORD_NORMALIZE = re.compile(r"^[\W_]+|[\W_]+$")
+
+
+def _normalize_word(w: str) -> str:
+    """Lowercase and strip punctuation for repetition comparison."""
+    return _WORD_NORMALIZE.sub("", w.lower())
+
+
+def _has_consecutive_word_repetition(text: str, threshold: int = CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD) -> bool:
+    """Return True if the same word appears at least `threshold` times in a row (hallucination indicator)."""
+    words = text.split()
+    if len(words) < threshold:
+        return False
+    count = 1
+    prev = _normalize_word(words[0])
+    for i in range(1, len(words)):
+        curr = _normalize_word(words[i])
+        if curr and curr == prev:
+            count += 1
+            if count >= threshold:
+                return True
+        else:
+            count = 1
+            prev = curr
+    return False
 
 
 class WhisperTranscriber:
@@ -99,6 +130,11 @@ class WhisperTranscriber:
             # if it's the ONLY word in the result.
             if clean_text_lower.strip(" .") == "you":
                 log_info(f"Filtered out likely 'you' hallucination: '{text}'")
+                return ""
+
+            # Consecutive same-word repetition (e.g. "word word word") is a common hallucination
+            if _has_consecutive_word_repetition(text, CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD):
+                log_info(f"Filtered out hallucination (consecutive word repetition): '{text}'")
                 return ""
 
             # Final cleanup: strip leading/trailing dots, ellipses and spaces

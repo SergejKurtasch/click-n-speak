@@ -4,9 +4,12 @@ import sys
 
 import rumps
 
+from .updater import check_for_update
 from .utils import (
     escape_applescript_string,
     get_config_path,
+    get_log_file_path,
+    get_menu_icon_path,
     log_error,
     log_info,
     save_config_to_disk,
@@ -16,7 +19,8 @@ from .utils import (
 
 class ClickNSpeakApp(rumps.App):
     def __init__(self, main_app):
-        super(ClickNSpeakApp, self).__init__("🎙️")
+        icon_path = str(get_menu_icon_path())
+        super(ClickNSpeakApp, self).__init__("", icon=icon_path)
         self.main_app = main_app
         self.config = main_app.config
 
@@ -63,7 +67,9 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(None)  # Separator
 
         self.menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
+        self.menu.add(rumps.MenuItem("Open Log File", callback=self.open_log_file))
         self.menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
+        self.menu.add(rumps.MenuItem("Check for Updates", callback=self.check_for_updates))
 
         # Autostart option
         autostart_item = rumps.MenuItem("Launch at Login", callback=self.toggle_autostart)
@@ -153,6 +159,15 @@ class ClickNSpeakApp(rumps.App):
         """Opens config.json in the default editor (no shell)."""
         subprocess.run(["open", str(get_config_path())], check=True)
 
+    def open_log_file(self, _: rumps.MenuItem) -> None:
+        """Opens the app log file in the default editor (all recognition requests are logged there)."""
+        log_path = get_log_file_path()
+        if log_path.exists():
+            subprocess.run(["open", str(log_path)], check=True)
+        else:
+            log_info("Log file not created yet (no logs written).")
+            send_notification("Click-n-speak", "Log file", "Log file not created yet. It will appear after the app logs something.")
+
     def reload_config(self, _: rumps.MenuItem) -> None:
         """Reloads config from disk and refreshes the menu."""
         self.main_app.load_config(str(get_config_path()))
@@ -165,18 +180,23 @@ class ClickNSpeakApp(rumps.App):
         """Persists current config to config.json."""
         save_config_to_disk(self.config)
 
+    def check_for_updates(self, _: rumps.MenuItem) -> None:
+        """Check GitHub for a newer release; notify and open release page if found."""
+        if check_for_update(open_url_if_new=True):
+            return
+        send_notification("Click-n-speak", "No updates", "You are running the latest version.")
+
     def toggle_autostart(self, sender):
         current_state = sender.state == 1
         new_state = not current_state
 
-        # Get the path to the .app bundle if running as a bundle, or the script otherwise
-        # In a py2app bundle, sys.frozen is set, but we want the .app path
-        if getattr(sys, "frozen", False) == "macosx_app":
-            # Path to Click-n-speak.app
-            app_path = os.path.abspath(os.path.join(sys.executable, "../../.."))
-        else:
-            # Fallback for development (not very useful for actual login items, but for testing)
-            app_path = os.path.abspath(sys.argv[0])
+        # Get the path to the .app bundle: launcher sets CLICK_N_SPEAK_APP; py2app sets sys.frozen
+        app_path = os.environ.get("CLICK_N_SPEAK_APP")
+        if not app_path:
+            if getattr(sys, "frozen", False) == "macosx_app":
+                app_path = os.path.abspath(os.path.join(sys.executable, "../../.."))
+            else:
+                app_path = os.path.abspath(sys.argv[0])
 
         app_name = "Click-n-speak"
         safe_path = escape_applescript_string(app_path)
@@ -201,9 +221,10 @@ class ClickNSpeakApp(rumps.App):
             send_notification(app_name, "Error", "Could not update login items.")
 
     def set_status(self, recording=False, processing=False):
+        # Keep the icon static; only adjust the title as a subtle status marker.
         if recording:
-            self.title = "🔴"
+            self.title = " ●"
         elif processing:
-            self.title = "⏳"
+            self.title = " ⏳"
         else:
-            self.title = "🎙️"
+            self.title = ""
