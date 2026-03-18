@@ -67,6 +67,16 @@ def get_log_file_path() -> Path:
     return Path(os.path.expanduser("~/Library/Logs/Click-n-speak.log"))
 
 
+def get_phrases_file_path() -> Path:
+    """Returns the path to the phrase history file (project root in dev, Application Support when run from .app)."""
+    app_bundle = os.environ.get("CLICK_N_SPEAK_APP")
+    if not app_bundle:
+        return ROOT / "phrase_history.txt"
+    support_dir = APPLICATION_SUPPORT_DIR
+    support_dir.mkdir(parents=True, exist_ok=True)
+    return support_dir / "phrase_history.txt"
+
+
 def escape_applescript_string(s: str) -> str:
     """Escapes a string for safe use inside AppleScript double-quoted literals."""
     return s.replace("\\", "\\\\").replace('"', '\\"')

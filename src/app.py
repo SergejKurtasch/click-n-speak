@@ -6,6 +6,7 @@ import time
 
 from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
+from .phrase_history import append_phrase
 from .recorder import AudioRecorder
 from .transcriber import WhisperTranscriber
 from .utils import log_error, log_exception, log_info, save_config_to_disk, send_notification
@@ -292,6 +293,16 @@ class SVoiceRecApp:
                     mb.set_status(recording=False, processing=False)
                 except Exception as e:
                     log_error(f"Failed to set menu bar status: {e}")
+
+            full_phrase = " ".join(self.transcribed_parts).strip()
+            if full_phrase:
+                append_phrase(full_phrase)
+                if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
+                    try:
+                        mb.refresh_last_phrases_submenu()
+                    except Exception as e:
+                        log_error(f"Failed to refresh Last 5 phrases submenu: {e}")
+
             send_notification("Click-n-speak", "Finish", "Transcription complete.")
         except Exception as e:
             self.is_processing = False

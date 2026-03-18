@@ -5,9 +5,11 @@ import sys
 import rumps
 
 from .log_analyzer import generate_terms_hint_from_log
+from .phrase_history import get_last_phrases
 from .updater import check_for_update
 from .utils import (
     build_initial_prompt,
+    copy_to_clipboard,
     escape_applescript_string,
     get_config_path,
     get_log_file_path,
@@ -70,6 +72,9 @@ class ClickNSpeakApp(rumps.App):
 
         self.menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
         self.menu.add(rumps.MenuItem("Open Log File", callback=self.open_log_file))
+        self._last_phrases_parent = rumps.MenuItem("Last 5 phrases")
+        self.menu.add(self._last_phrases_parent)
+        self._refresh_last_phrases_submenu()
         self.menu.add(rumps.MenuItem("Show Initial Prompt", callback=self.show_initial_prompt))
         self.menu.add(rumps.MenuItem("Update Initial Prompt from Logs", callback=self.update_initial_prompt_from_logs))
         self.menu.add(rumps.MenuItem("Revert Initial Prompt", callback=self.revert_initial_prompt))
@@ -162,6 +167,28 @@ class ClickNSpeakApp(rumps.App):
 
         # Update app settings
         self.main_app.update_recorder_settings(silence_duration=val)
+
+    def _refresh_last_phrases_submenu(self) -> None:
+        """Rebuild the 'Last 5 phrases' submenu from the phrase history file."""
+        parent = self._last_phrases_parent
+        for key in list(parent.keys()):
+            del parent[key]
+        phrases = get_last_phrases(5)
+        if not phrases:
+            parent.add(rumps.MenuItem("No phrases yet", callback=None))
+            return
+        max_title_len = 56
+        for _ts, text in phrases:
+            title = (text[: max_title_len - 1] + "…") if len(text) > max_title_len else text
+            if not title:
+                title = "(empty)"
+            parent.add(
+                rumps.MenuItem(f"📋 {title}", callback=lambda s, t=text: copy_to_clipboard(t))
+            )
+
+    def refresh_last_phrases_submenu(self) -> None:
+        """Public method for app to refresh the Last 5 phrases submenu after a new phrase is saved."""
+        self._refresh_last_phrases_submenu()
 
     def open_config(self, _: rumps.MenuItem) -> None:
         """Opens config.json in the default editor (no shell)."""
