@@ -4,8 +4,10 @@ import sys
 
 import rumps
 
+from .log_analyzer import generate_terms_hint_from_log
 from .updater import check_for_update
 from .utils import (
+    build_initial_prompt,
     escape_applescript_string,
     get_config_path,
     get_log_file_path,
@@ -68,6 +70,9 @@ class ClickNSpeakApp(rumps.App):
 
         self.menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
         self.menu.add(rumps.MenuItem("Open Log File", callback=self.open_log_file))
+        self.menu.add(rumps.MenuItem("Show Initial Prompt", callback=self.show_initial_prompt))
+        self.menu.add(rumps.MenuItem("Update Initial Prompt from Logs", callback=self.update_initial_prompt_from_logs))
+        self.menu.add(rumps.MenuItem("Revert Initial Prompt", callback=self.revert_initial_prompt))
         self.menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
         self.menu.add(rumps.MenuItem("Check for Updates", callback=self.check_for_updates))
 
@@ -139,7 +144,10 @@ class ClickNSpeakApp(rumps.App):
                 extra_prompts_list.append(p)
         extra_prompts = " ".join(extra_prompts_list)
 
-        self.config["initial_prompt"] = f"{main_prompt} {extra_prompts}".strip()
+        language_hint = f"{main_prompt} {extra_prompts}".strip()
+        self.config["language_hint"] = language_hint
+        self.config["initial_prompt"] = build_initial_prompt(self.config)
+        self.save_config()
         self.main_app.load_config_data(self.config)
 
     def set_sensitivity(self, sender):
@@ -175,6 +183,70 @@ class ClickNSpeakApp(rumps.App):
         # Re-setup menu (simplest way to update states)
         self.menu.clear()
         self.setup_menu()
+
+    def show_initial_prompt(self, _: rumps.MenuItem) -> None:
+        """Shows the current initial prompt in a read-only window."""
+        current_prompt = str(self.config.get("initial_prompt", ""))
+        previous_prompt = str(self.config.get("previous_initial_prompt", ""))
+        if previous_prompt:
+            body = f"Current initial prompt:\n\n{current_prompt}\n\nPrevious version:\n\n{previous_prompt}"
+        else:
+            body = f"Current initial prompt:\n\n{current_prompt}"
+        window = rumps.Window(
+            message=body,
+            title="Initial Prompt",
+            default_text="",
+            ok="Close",
+            cancel=None,
+        )
+        window.run()
+
+    def update_initial_prompt_from_logs(self, _: rumps.MenuItem) -> None:
+        """Builds a new initial prompt from recent logs and applies it."""
+        terms_hint = generate_terms_hint_from_log()
+        if not terms_hint:
+            send_notification(
+                "Click-n-speak",
+                "Initial Prompt",
+                "Could not generate terms from logs. Speak more with technical terms and try again.",
+            )
+            return
+
+        previous = str(self.config.get("initial_prompt", "")).strip()
+        if previous:
+            self.config["previous_initial_prompt"] = previous
+
+        self.config["terms_hint"] = terms_hint
+        self.config["initial_prompt"] = build_initial_prompt(self.config)
+        self.save_config()
+        self.main_app.load_config_data(self.config)
+        send_notification(
+            "Click-n-speak",
+            "Initial Prompt",
+            "Initial prompt has been updated from logs.",
+        )
+
+    def revert_initial_prompt(self, _: rumps.MenuItem) -> None:
+        """Reverts initial_prompt to the previous version if available."""
+        previous_prompt = str(self.config.get("previous_initial_prompt", "")).strip()
+        if not previous_prompt:
+            send_notification(
+                "Click-n-speak",
+                "Initial Prompt",
+                "No previous initial prompt to revert to.",
+            )
+            return
+
+        current_prompt = str(self.config.get("initial_prompt", "")).strip()
+        self.config["initial_prompt"] = previous_prompt
+        self.config["previous_initial_prompt"] = current_prompt
+        self.save_config()
+        self.main_app.load_config_data(self.config)
+        send_notification(
+            "Click-n-speak",
+            "Initial Prompt",
+            "Initial prompt has been reverted to the previous version.",
+        )
 
     def save_config(self) -> None:
         """Persists current config to config.json."""

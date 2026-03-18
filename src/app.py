@@ -8,7 +8,7 @@ from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
 from .recorder import AudioRecorder
 from .transcriber import WhisperTranscriber
-from .utils import log_error, log_info, save_config_to_disk, send_notification
+from .utils import log_error, log_exception, log_info, save_config_to_disk, send_notification
 
 
 class SVoiceRecApp:
@@ -71,21 +71,31 @@ class SVoiceRecApp:
         save_config_to_disk(self.config)
 
     def toggle_recording(self):
-        current_time = time.time()
-        if current_time - self.last_toggle_time < self.debounce_interval:
-            log_info("Ignoring hotkey: debounce interval not met.")
-            return
+        """Hotkey callback: toggles recording state with debounce and safety logging."""
+        try:
+            current_time = time.time()
+            if current_time - self.last_toggle_time < self.debounce_interval:
+                log_info("Ignoring hotkey: debounce interval not met.")
+                return
 
-        self.last_toggle_time = current_time
+            self.last_toggle_time = current_time
 
-        if self.is_processing:
-            log_info("Still processing previous recording. Please wait.")
-            return
+            log_info(
+                f"Hotkey pressed. is_recording={self.is_recording}, "
+                f"is_processing={self.is_processing}"
+            )
 
-        if not self.is_recording:
-            self.start_recording()
-        else:
-            self.stop_recording_and_process()
+            if self.is_processing:
+                log_info("Still processing previous recording. Please wait.")
+                return
+
+            if not self.is_recording:
+                self.start_recording()
+            else:
+                self.stop_recording_and_process()
+        except Exception as e:
+            # Catch-all to avoid crashing the app from the hotkey thread
+            log_exception(f"Unhandled exception in toggle_recording: {e}")
 
     def set_menu_bar(self, menu_bar):
         self.menu_bar = menu_bar
@@ -107,6 +117,7 @@ class SVoiceRecApp:
             log_info("Recorder settings updated.")
 
     def start_recording(self):
+        log_info("Starting recording...")
         self.is_recording = True
         mb = self.menu_bar
         if mb is not None:
@@ -118,19 +129,52 @@ class SVoiceRecApp:
         self.stop_worker.clear()
 
         # Clear the queue just in case
+        cleared = 0
         while not self.chunk_queue.empty():
             try:
                 self.chunk_queue.get_nowait()
+                cleared += 1
             except queue.Empty:
                 break
+        if cleared:
+            log_info(f"Cleared {cleared} pending audio chunks before starting.")
 
         # Start worker thread for chunk processing
         self.worker_thread = threading.Thread(target=self.chunk_worker)
         if self.worker_thread:
+            log_info("Starting chunk worker thread.")
             self.worker_thread.start()
 
-        send_notification("Click-n-speak", "Recording...", "Speak now. Press the hotkey again to finish.")
-        self.recorder.start(chunk_callback=self.on_chunk_received)
+        send_notification(
+            "Click-n-speak",
+            "Recording...",
+            "Speak now. Press the hotkey again to finish.",
+        )
+
+        try:
+            self.recorder.start(chunk_callback=self.on_chunk_received)
+            log_info(
+                "AudioRecorder started with settings: "
+                f"sample_rate={self.recorder.sample_rate}, "
+                f"silence_threshold={self.recorder.silence_threshold}, "
+                f"silence_duration={self.recorder.silence_duration}, "
+                f"target_speech_duration={self.recorder.target_speech_duration}, "
+                f"max_speech_duration={self.recorder.max_speech_duration}"
+            )
+        except Exception as e:
+            self.is_recording = False
+            log_exception(f"Failed to start AudioRecorder: {e}")
+            mb = self.menu_bar
+            if mb is not None:
+                try:
+                    mb.set_status(recording=False, processing=False)
+                except Exception as err:
+                    log_error(f"Failed to reset menu bar status after recorder error: {err}")
+            send_notification(
+                "Click-n-speak",
+                "Error",
+                "Could not start recording. See log for details.",
+            )
 
     def on_chunk_received(self, audio_data):
         if self.is_recording:
@@ -142,72 +186,129 @@ class SVoiceRecApp:
             try:
                 # Use a timeout to occasionally check the stop_worker event
                 audio_chunk = self.chunk_queue.get(timeout=0.5)
+                log_info(
+                    f"Chunk worker received audio chunk of length={len(audio_chunk)}"
+                )
                 self.process_chunk(audio_chunk)
                 self.chunk_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
-                log_error(f"Error in chunk worker: {e}")
+                # Any unhandled exception here could silently kill the worker;
+                # log full traceback to diagnose rare crashes.
+                log_exception(f"Error in chunk worker loop: {e}")
         log_info("Chunk worker stopped.")
 
     def process_chunk(self, audio_chunk):
-        # Determine initial prompt from previously transcribed text (limit context to prevent drift)
-        if self.transcribed_parts:
-            full_context = " ".join(self.transcribed_parts)
-            # Use string methods to avoid indexing issues with some linters
-            if len(full_context) > 200:
-                context = full_context[-200:]  # type: ignore
+        """Transcribe a single audio chunk and inject text; heavily logged for debugging."""
+        try:
+            # Determine initial prompt from previously transcribed text (limit context to prevent drift)
+            if self.transcribed_parts:
+                full_context = " ".join(self.transcribed_parts)
+                # Use string methods to avoid indexing issues with some linters
+                if len(full_context) > 200:
+                    context = full_context[-200:]  # type: ignore
+                else:
+                    context = full_context
             else:
-                context = full_context
-        else:
-            context = str(self.config.get("initial_prompt", ""))
+                context = str(self.config.get("initial_prompt", ""))
 
-        text = self.transcriber.transcribe(
-            audio_chunk,
-            initial_prompt=context,
-            allowed_languages=self.config.get("languages", []),
-            condition_on_previous_text=self.config.get("condition_on_previous_text", True),
-        )
+            allowed_languages = self.config.get("languages", [])
+            condition_on_previous_text = self.config.get(
+                "condition_on_previous_text", True
+            )
 
-        if text:
-            log_info(f"Partial Transcription: {text}")
-            self.transcribed_parts.append(text)
-            # Keep parts manageable
-            if len(self.transcribed_parts) > 10:
-                self.transcribed_parts.pop(0)
-            # Inject partial text immediately
-            inject_text(text + " ")
+            log_info(
+                "Processing audio chunk: "
+                f"len={len(audio_chunk)}, "
+                f"allowed_languages={allowed_languages}, "
+                f"condition_on_previous_text={condition_on_previous_text}, "
+                f"context_len={len(context)}"
+            )
+
+            text = self.transcriber.transcribe(
+                audio_chunk,
+                initial_prompt=context,
+                allowed_languages=allowed_languages,
+                condition_on_previous_text=condition_on_previous_text,
+            )
+
+            if text:
+                log_info(f"Partial Transcription: {text}")
+                self.transcribed_parts.append(text)
+                # Keep parts manageable
+                if len(self.transcribed_parts) > 10:
+                    self.transcribed_parts.pop(0)
+                # Inject partial text immediately
+                inject_text(text + " ")
+            else:
+                log_info("Transcriber returned empty text for this chunk.")
+        except Exception as e:
+            log_exception(f"Unhandled exception in process_chunk: {e}")
 
     def stop_recording_and_process(self):
-        self.is_recording = False
-        self.is_processing = True
-        mb = self.menu_bar
-        if mb is not None:
+        log_info("Stopping recording and finalizing transcription...")
+        try:
+            self.is_recording = False
+            self.is_processing = True
+            mb = self.menu_bar
+            if mb is not None:
+                try:
+                    mb.set_status(recording=False, processing=True)
+                except Exception as e:
+                    log_error(f"Failed to set menu bar status: {e}")
+
+            # Stop recording and get the last (remaining) chunk
             try:
-                mb.set_status(recording=False, processing=True)
+                last_audio = self.recorder.stop()
+                if last_audio is None:
+                    log_info("Recorder.stop() returned None (no final audio chunk).")
+                else:
+                    log_info(f"Recorder.stop() returned final chunk len={len(last_audio)}.")
             except Exception as e:
-                log_error(f"Failed to set menu bar status: {e}")
+                last_audio = None
+                log_exception(f"Error during recorder.stop(): {e}")
 
-        # Stop recording and get the last (remaining) chunk
-        last_audio = self.recorder.stop()
+            if last_audio is not None and len(last_audio) > 0:
+                self.chunk_queue.put(last_audio)
+                log_info("Final audio chunk enqueued for processing.")
 
-        if last_audio is not None and len(last_audio) > 0:
-            self.chunk_queue.put(last_audio)
+            # Signal worker to finish and wait for it
+            self.stop_worker.set()
+            if self.worker_thread is not None:
+                log_info("Waiting for chunk worker thread to finish...")
+                try:
+                    self.worker_thread.join(timeout=30)
+                except Exception as e:
+                    log_exception(f"Error while joining worker_thread: {e}")
+                if self.worker_thread.is_alive():
+                    log_error("Worker thread did not finish within timeout.")
 
-        # Signal worker to finish and wait for it
-        self.stop_worker.set()
-        if self.worker_thread is not None:
-            self.worker_thread.join()
-
-        # Cleanup
-        self.is_processing = False
-        mb = self.menu_bar
-        if mb is not None:
-            try:
-                mb.set_status(recording=False, processing=False)
-            except Exception as e:
-                log_error(f"Failed to set menu bar status: {e}")
-        send_notification("Click-n-speak", "Finish", "Transcription complete.")
+            # Cleanup
+            self.is_processing = False
+            mb = self.menu_bar
+            if mb is not None:
+                try:
+                    mb.set_status(recording=False, processing=False)
+                except Exception as e:
+                    log_error(f"Failed to set menu bar status: {e}")
+            send_notification("Click-n-speak", "Finish", "Transcription complete.")
+        except Exception as e:
+            self.is_processing = False
+            log_exception(f"Unhandled exception in stop_recording_and_process: {e}")
+            mb = self.menu_bar
+            if mb is not None:
+                try:
+                    mb.set_status(recording=False, processing=False)
+                except Exception as err:
+                    log_error(
+                        f"Failed to reset menu bar status after stop error: {err}"
+                    )
+            send_notification(
+                "Click-n-speak",
+                "Error",
+                "An error occurred while finishing transcription. See log for details.",
+            )
 
     def stop(self):
         self.stop_worker.set()

@@ -103,6 +103,11 @@ def log_error(message: str) -> None:
     logger.error(message)
 
 
+def log_exception(message: str) -> None:
+    """Log an error message with full traceback."""
+    logger.exception(message)
+
+
 def save_config_to_disk(config: dict) -> None:
     """Writes config dict to config.json in project root. Logs errors."""
     import json
@@ -112,6 +117,19 @@ def save_config_to_disk(config: dict) -> None:
             json.dump(config, f, indent=4)
     except OSError as e:
         log_error(f"Error saving config: {e}")
+
+
+def build_initial_prompt(config: dict) -> str:
+    """Builds the effective initial_prompt string from config."""
+    language_hint = str(config.get("language_hint", "")).strip()
+    terms_hint = str(config.get("terms_hint", "")).strip()
+    if language_hint and terms_hint:
+        return f"{language_hint} {terms_hint}".strip()
+    if language_hint:
+        return language_hint
+    if terms_hint:
+        return terms_hint
+    return str(config.get("initial_prompt", "")).strip()
 
 
 def _run_notification(script: str) -> None:

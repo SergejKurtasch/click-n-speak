@@ -3,7 +3,7 @@ import time
 
 import mlx_whisper
 
-from .utils import log_error, log_info
+from .utils import log_error, log_exception, log_info
 
 # Consecutive same-word repeats at or above this count are treated as hallucination
 CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD = 2
@@ -72,7 +72,14 @@ class WhisperTranscriber:
         if audio_data is None or len(audio_data) == 0:
             return ""
 
-        log_info("Transcribing...")
+        log_info(
+            "Transcribing audio chunk with Whisper: "
+            f"len={len(audio_data)}, "
+            f"model={self.model_name}, "
+            f"allowed_languages={allowed_languages}, "
+            f"condition_on_previous_text={condition_on_previous_text}, "
+            f"initial_prompt_len={len(initial_prompt) if initial_prompt else 0}"
+        )
         start_time = time.time()
 
         try:
@@ -140,5 +147,6 @@ class WhisperTranscriber:
             # Final cleanup: strip leading/trailing dots, ellipses and spaces
             return text.strip(" .…")
         except Exception as e:
-            log_error(f"Transcription error: {e}")
+            # Log full traceback to help diagnose rare crashes inside mlx_whisper
+            log_exception(f"Transcription error with model {self.model_name}: {e}")
             return ""
