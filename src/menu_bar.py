@@ -320,10 +320,10 @@ class ClickNSpeakApp(rumps.App):
             send_notification(app_name, "Error", "Could not update login items.")
 
     def set_status(self, recording=False, processing=False):
-        # Keep the icon static; only adjust the title as a subtle status marker.
+        # Make the state highly visible in the menu bar.
         if recording:
-            self.title = " ●"
+            self.title = "● ЗАПИСЬ"
         elif processing:
-            self.title = " ⏳"
+            self.title = "● РАСПОЗН."
         else:
             self.title = ""

@@ -3,6 +3,7 @@ import os
 import queue
 import threading
 import time
+from typing import Optional
 
 from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
@@ -41,6 +42,53 @@ class SVoiceRecApp:
         self.transcribed_parts = []
         self.worker_thread = None  # type: threading.Thread | None
         self.stop_worker = threading.Event()
+
+        # Model warm-up state (cold-start optimization after app rebuild/restart)
+        self._model_warming = False
+        self.model_ready_event = threading.Event()
+        self._model_warmup_thread: Optional[threading.Thread] = None
+
+        # Delayed notification while waiting for transcription to finish
+        self._transcription_cycle_id = 0
+        self._delayed_transcribing_timer: Optional[threading.Timer] = None
+        self._still_working_delay_seconds = 12.0
+
+    def start_model_warmup(self) -> None:
+        """Start a background warm-up to reduce first-use latency."""
+        if self.model_ready_event.is_set() or self._model_warming:
+            return
+
+        self._model_warming = True
+        send_notification(
+            "Click-n-speak",
+            "Подготовка модели...",
+            "Загружаю/скачиваю Whisper-модель. Первый запуск может занять время.",
+        )
+        self._model_warmup_thread = threading.Thread(
+            target=self._model_warmup_worker, daemon=True
+        )
+        self._model_warmup_thread.start()
+
+    def _model_warmup_worker(self) -> None:
+        try:
+            log_info("Starting Whisper warm-up in background thread.")
+            self.transcriber.warmup()
+            log_info("Whisper warm-up finished.")
+            send_notification(
+                "Click-n-speak",
+                "Модель готова",
+                "Можно начинать диктовку.",
+            )
+        except Exception as e:
+            log_exception(f"Whisper warm-up failed: {e}")
+            send_notification(
+                "Click-n-speak",
+                "Подготовка модели не удалась",
+                "Запись продолжит работать, но первый распознающий запрос может быть медленнее.",
+            )
+        finally:
+            self.model_ready_event.set()
+            self._model_warming = False
 
     def load_config(self, path):
         if not os.path.exists(path):
@@ -88,6 +136,20 @@ class SVoiceRecApp:
 
             if self.is_processing:
                 log_info("Still processing previous recording. Please wait.")
+                return
+
+            # Do not start a new recording cycle while warm-up is in progress.
+            if (
+                not self.is_recording
+                and self._model_warming
+                and not self.model_ready_event.is_set()
+            ):
+                log_info("Ignoring hotkey: model warm-up in progress.")
+                send_notification(
+                    "Click-n-speak",
+                    "Подготовка модели...",
+                    "Подождите несколько секунд и попробуйте снова.",
+                )
                 return
 
             if not self.is_recording:
@@ -148,8 +210,8 @@ class SVoiceRecApp:
 
         send_notification(
             "Click-n-speak",
-            "Recording...",
-            "Speak now. Press the hotkey again to finish.",
+            "Запись...",
+            "Говорите. Нажмите горячую клавишу ещё раз, чтобы остановить.",
         )
 
         try:
@@ -259,6 +321,12 @@ class SVoiceRecApp:
                 except Exception as e:
                     log_error(f"Failed to set menu bar status: {e}")
 
+            send_notification(
+                "Click-n-speak",
+                "Распознаю...",
+                "Идёт распознавание речи. Подождите.",
+            )
+
             # Stop recording and get the last (remaining) chunk
             try:
                 last_audio = self.recorder.stop()
@@ -276,6 +344,36 @@ class SVoiceRecApp:
 
             # Signal worker to finish and wait for it
             self.stop_worker.set()
+
+            # Schedule a delayed "still working" notification if recognition is slow.
+            self._transcription_cycle_id += 1
+            cycle_id = self._transcription_cycle_id
+
+            if self._delayed_transcribing_timer is not None:
+                try:
+                    self._delayed_transcribing_timer.cancel()
+                except Exception:
+                    pass
+
+            def _delayed_notify() -> None:
+                try:
+                    if self._transcription_cycle_id != cycle_id:
+                        return
+                    if self.worker_thread is not None and self.worker_thread.is_alive():
+                        send_notification(
+                            "Click-n-speak",
+                            "Распознаю... всё ещё идёт",
+                            "Распознавание ещё выполняется. Подождите.",
+                        )
+                except Exception as e:
+                    log_exception(f"Delayed transcription notify failed: {e}")
+
+            self._delayed_transcribing_timer = threading.Timer(
+                self._still_working_delay_seconds, _delayed_notify
+            )
+            self._delayed_transcribing_timer.daemon = True
+            self._delayed_transcribing_timer.start()
+
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
                 try:
@@ -287,6 +385,11 @@ class SVoiceRecApp:
 
             # Cleanup
             self.is_processing = False
+            if self._delayed_transcribing_timer is not None:
+                try:
+                    self._delayed_transcribing_timer.cancel()
+                except Exception:
+                    pass
             mb = self.menu_bar
             if mb is not None:
                 try:
@@ -303,7 +406,11 @@ class SVoiceRecApp:
                     except Exception as e:
                         log_error(f"Failed to refresh Last 5 phrases submenu: {e}")
 
-            send_notification("Click-n-speak", "Finish", "Transcription complete.")
+            send_notification(
+                "Click-n-speak",
+                "Готово",
+                "Распознавание завершено. Можно диктовать снова.",
+            )
         except Exception as e:
             self.is_processing = False
             log_exception(f"Unhandled exception in stop_recording_and_process: {e}")

@@ -1,6 +1,7 @@
 import re
 import time
 
+import numpy as np
 import mlx_whisper
 
 from .utils import log_error, log_exception, log_info
@@ -39,6 +40,7 @@ def _has_consecutive_word_repetition(text: str, threshold: int = CONSECUTIVE_REP
 class WhisperTranscriber:
     def __init__(self, model_name="mlx-community/whisper-large-v3-mlx"):
         self.model_name = model_name
+        self._warmup_done = False
         # Common hallucinations/noise results to filter out (substring matches)
         self.hallucination_phrases = {
             "thank you",
@@ -63,6 +65,32 @@ class WhisperTranscriber:
             "subscribe",
         }
         log_info(f"Initializing Whisper model: {model_name}...")
+
+    def warmup(self, duration_seconds: float = 0.5, sample_rate: int = 16000) -> None:
+        """Warm up the MLX Whisper model to reduce the first-use latency.
+
+        This runs a tiny transcription on silence and discards the result.
+        """
+        if self._warmup_done:
+            return
+
+        if duration_seconds <= 0:
+            duration_seconds = 0.1
+
+        # Silence audio for a quick model initialization / compilation path.
+        audio_len = max(1, int(sample_rate * duration_seconds))
+        audio_data = np.zeros((audio_len,), dtype=np.float32)
+
+        log_info(
+            "Warming up Whisper model (silence transcription to initialize MLX)..."
+        )
+        _ = mlx_whisper.transcribe(
+            audio_data,
+            path_or_hf_repo=self.model_name,
+            task="transcribe",
+            verbose=False,
+        )
+        self._warmup_done = True
 
     def transcribe(self, audio_data, initial_prompt=None, allowed_languages=None, condition_on_previous_text=True):
         """

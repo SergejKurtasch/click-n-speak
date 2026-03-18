@@ -16,6 +16,15 @@ def _run_update_check_once() -> None:
         log_error(f"Update check failed: {e}")
 
 
+def _run_update_check_after_model_ready(model_ready_event: threading.Event) -> None:
+    """Run update check only after Whisper warm-up finishes."""
+    try:
+        model_ready_event.wait(timeout=600)
+        check_for_update(open_url_if_new=True)
+    except Exception as e:
+        log_error(f"Update check failed: {e}")
+
+
 def main() -> None:
     # Ensure we are in the right directory
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -33,14 +42,25 @@ def main() -> None:
         # Ensure accessibility permissions are requested and guide user if missing
         ensure_accessibility_permission()
 
+        # Start model warm-up early to reduce first-run transcription latency.
+        logic_app.start_model_warmup()
+
         log_info("Click-n-speak is running in the menu bar...")
-        send_notification("Click-n-speak", "Started", "Press the hotkey to start recording or use the menu bar icon.")
+        send_notification(
+            "Click-n-speak",
+            "Запущено",
+            "Нажмите горячую клавишу, чтобы начать запись, или используйте иконку в меню-баре.",
+        )
 
         # Start hotkey listener
         logic_app.hotkey_handler.start()
 
-        # Check for updates once per session in background
-        threading.Thread(target=_run_update_check_once, daemon=True).start()
+        # Check for updates once per session in background (after warm-up).
+        threading.Thread(
+            target=_run_update_check_after_model_ready,
+            args=(logic_app.model_ready_event,),
+            daemon=True,
+        ).start()
 
         # Run the Menu Bar app (this is the main loop)
         menu_app.run()
