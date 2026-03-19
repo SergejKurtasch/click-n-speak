@@ -1,4 +1,5 @@
 import os
+import queue
 import subprocess
 import sys
 
@@ -14,6 +15,8 @@ from .utils import (
     get_config_path,
     get_log_file_path,
     get_menu_icon_path,
+    get_primary_language,
+    get_ui_strings,
     log_error,
     log_info,
     save_config_to_disk,
@@ -30,6 +33,23 @@ class ClickNSpeakApp(rumps.App):
 
         # Build Menu
         self.setup_menu()
+
+    @rumps.timer(0.3)
+    def _drain_main_thread_queue(self, _):
+        """Drain logic app's main-thread job queue so UI updates run on the main thread."""
+        app = self.main_app
+        if not hasattr(app, "_main_thread_queue"):
+            return
+        while True:
+            try:
+                job = app._main_thread_queue.get_nowait()
+            except queue.Empty:
+                break
+            fn, args, kwargs = job
+            try:
+                fn(*args, **kwargs)
+            except Exception as e:
+                log_error(f"Main thread job failed: {e}")
 
     def setup_menu(self):
         # Model Selection
@@ -320,10 +340,11 @@ class ClickNSpeakApp(rumps.App):
             send_notification(app_name, "Error", "Could not update login items.")
 
     def set_status(self, recording=False, processing=False):
-        # Make the state highly visible in the menu bar.
+        # Make the state highly visible in the menu bar; language from primary setting.
+        s = get_ui_strings(get_primary_language(self.config))
         if recording:
-            self.title = "● ЗАПИСЬ"
+            self.title = s["menu_recording"]
         elif processing:
-            self.title = "● РАСПОЗН."
+            self.title = s["menu_processing"]
         else:
             self.title = ""

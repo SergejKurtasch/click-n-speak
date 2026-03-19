@@ -10,7 +10,15 @@ from .injector import inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
 from .transcriber import WhisperTranscriber
-from .utils import log_error, log_exception, log_info, save_config_to_disk, send_notification
+from .utils import (
+    get_primary_language,
+    get_ui_strings,
+    log_error,
+    log_exception,
+    log_info,
+    save_config_to_disk,
+    send_notification,
+)
 
 
 class SVoiceRecApp:
@@ -53,17 +61,17 @@ class SVoiceRecApp:
         self._delayed_transcribing_timer: Optional[threading.Timer] = None
         self._still_working_delay_seconds = 12.0
 
+        # Jobs to run on the main thread (menu bar / rumps) so UI updates are applied
+        self._main_thread_queue = queue.Queue()
+
     def start_model_warmup(self) -> None:
         """Start a background warm-up to reduce first-use latency."""
         if self.model_ready_event.is_set() or self._model_warming:
             return
 
         self._model_warming = True
-        send_notification(
-            "Click-n-speak",
-            "Подготовка модели...",
-            "Загружаю/скачиваю Whisper-модель. Первый запуск может занять время.",
-        )
+        s = get_ui_strings(get_primary_language(self.config))
+        send_notification("Click-n-speak", s["preparing_title"], s["preparing_body"])
         self._model_warmup_thread = threading.Thread(
             target=self._model_warmup_worker, daemon=True
         )
@@ -74,18 +82,12 @@ class SVoiceRecApp:
             log_info("Starting Whisper warm-up in background thread.")
             self.transcriber.warmup()
             log_info("Whisper warm-up finished.")
-            send_notification(
-                "Click-n-speak",
-                "Модель готова",
-                "Можно начинать диктовку.",
-            )
+            s = get_ui_strings(get_primary_language(self.config))
+            send_notification("Click-n-speak", s["model_ready_title"], s["model_ready_body"])
         except Exception as e:
             log_exception(f"Whisper warm-up failed: {e}")
-            send_notification(
-                "Click-n-speak",
-                "Подготовка модели не удалась",
-                "Запись продолжит работать, но первый распознающий запрос может быть медленнее.",
-            )
+            s = get_ui_strings(get_primary_language(self.config))
+            send_notification("Click-n-speak", s["warmup_failed_title"], s["warmup_failed_body"])
         finally:
             self.model_ready_event.set()
             self._model_warming = False
@@ -145,11 +147,8 @@ class SVoiceRecApp:
                 and not self.model_ready_event.is_set()
             ):
                 log_info("Ignoring hotkey: model warm-up in progress.")
-                send_notification(
-                    "Click-n-speak",
-                    "Подготовка модели...",
-                    "Подождите несколько секунд и попробуйте снова.",
-                )
+                s = get_ui_strings(get_primary_language(self.config))
+                send_notification("Click-n-speak", s["preparing_wait_title"], s["preparing_wait_body"])
                 return
 
             if not self.is_recording:
@@ -162,6 +161,53 @@ class SVoiceRecApp:
 
     def set_menu_bar(self, menu_bar):
         self.menu_bar = menu_bar
+
+    def _submit_for_main_thread(self, fn, *args, **kwargs) -> None:
+        """Schedule fn(*args, **kwargs) to run on the main thread (drained by menu bar timer)."""
+        self._main_thread_queue.put((fn, args, kwargs))
+
+    def _do_finish_cleanup(self) -> None:
+        """Run on main thread after worker has finished: clear status, save phrase, notify."""
+        log_info("Finish cleanup started (main thread): clearing status, saving phrase, notifying.")
+        self.is_processing = False
+        if self._delayed_transcribing_timer is not None:
+            try:
+                self._delayed_transcribing_timer.cancel()
+            except Exception:
+                pass
+            self._delayed_transcribing_timer = None
+        mb = self.menu_bar
+        if mb is not None:
+            try:
+                mb.set_status(recording=False, processing=False)
+            except Exception as e:
+                log_error(f"Failed to set menu bar status: {e}")
+        full_phrase = " ".join(self.transcribed_parts).strip()
+        if full_phrase:
+            append_phrase(full_phrase)
+            if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
+                try:
+                    mb.refresh_last_phrases_submenu()
+                except Exception as e:
+                    log_error(f"Failed to refresh Last 5 phrases submenu: {e}")
+        s = get_ui_strings(get_primary_language(self.config))
+        send_notification("Click-n-speak", s["ready_title"], s["ready_body"])
+        log_info("Finish cleanup done. Ready for next recording session.")
+
+    def _do_error_cleanup(self) -> None:
+        """Run on main thread on stop_recording error: clear status, notify."""
+        self.is_processing = False
+        mb = self.menu_bar
+        if mb is not None:
+            try:
+                mb.set_status(recording=False, processing=False)
+            except Exception as e:
+                log_error(f"Failed to set menu bar status: {e}")
+        send_notification(
+            "Click-n-speak",
+            "Error",
+            "An error occurred while finishing transcription. See log for details.",
+        )
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
@@ -180,14 +226,20 @@ class SVoiceRecApp:
             log_info("Recorder settings updated.")
 
     def start_recording(self):
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            log_info("Previous chunk worker still running; cannot start new recording.")
+            s = get_ui_strings(get_primary_language(self.config))
+            send_notification(
+                "Click-n-speak",
+                s["still_working_title"],
+                s["still_working_body"],
+            )
+            return
         log_info("Starting recording...")
         self.is_recording = True
-        mb = self.menu_bar
-        if mb is not None:
-            try:
-                mb.set_status(recording=True)
-            except Exception as e:
-                log_error(f"Failed to set menu bar status: {e}")
+        self._submit_for_main_thread(
+            lambda: self.menu_bar.set_status(recording=True) if self.menu_bar else None
+        )
         self.transcribed_parts = []
         self.stop_worker.clear()
 
@@ -208,11 +260,8 @@ class SVoiceRecApp:
             log_info("Starting chunk worker thread.")
             self.worker_thread.start()
 
-        send_notification(
-            "Click-n-speak",
-            "Запись...",
-            "Говорите. Нажмите горячую клавишу ещё раз, чтобы остановить.",
-        )
+        s = get_ui_strings(get_primary_language(self.config))
+        send_notification("Click-n-speak", s["recording_title"], s["recording_body"])
 
         try:
             self.recorder.start(chunk_callback=self.on_chunk_received)
@@ -227,12 +276,11 @@ class SVoiceRecApp:
         except Exception as e:
             self.is_recording = False
             log_exception(f"Failed to start AudioRecorder: {e}")
-            mb = self.menu_bar
-            if mb is not None:
-                try:
-                    mb.set_status(recording=False, processing=False)
-                except Exception as err:
-                    log_error(f"Failed to reset menu bar status after recorder error: {err}")
+            self._submit_for_main_thread(
+                lambda: self.menu_bar.set_status(recording=False, processing=False)
+                if self.menu_bar
+                else None
+            )
             send_notification(
                 "Click-n-speak",
                 "Error",
@@ -248,11 +296,20 @@ class SVoiceRecApp:
         while not self.stop_worker.is_set() or not self.chunk_queue.empty():
             try:
                 # Use a timeout to occasionally check the stop_worker event
-                audio_chunk = self.chunk_queue.get(timeout=0.5)
+                item = self.chunk_queue.get(timeout=0.5)
+                remaining = self.chunk_queue.qsize()
+                is_final_chunk = (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                    and item[0] == "final"
+                )
+                audio_chunk = item[1] if is_final_chunk else item
                 log_info(
                     f"Chunk worker received audio chunk of length={len(audio_chunk)}"
+                    + (" (final chunk)" if is_final_chunk else "")
+                    + f", chunks_remaining_in_queue={remaining}"
                 )
-                self.process_chunk(audio_chunk)
+                self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk)
                 self.chunk_queue.task_done()
             except queue.Empty:
                 continue
@@ -260,9 +317,9 @@ class SVoiceRecApp:
                 # Any unhandled exception here could silently kill the worker;
                 # log full traceback to diagnose rare crashes.
                 log_exception(f"Error in chunk worker loop: {e}")
-        log_info("Chunk worker stopped.")
+        log_info("Chunk worker stopped (queue empty, ready for next session).")
 
-    def process_chunk(self, audio_chunk):
+    def process_chunk(self, audio_chunk, is_final_chunk: bool = False):
         """Transcribe a single audio chunk and inject text; heavily logged for debugging."""
         try:
             # Determine initial prompt from previously transcribed text (limit context to prevent drift)
@@ -287,6 +344,7 @@ class SVoiceRecApp:
                 f"allowed_languages={allowed_languages}, "
                 f"condition_on_previous_text={condition_on_previous_text}, "
                 f"context_len={len(context)}"
+                + (", is_final_chunk=True" if is_final_chunk else "")
             )
 
             text = self.transcriber.transcribe(
@@ -294,6 +352,7 @@ class SVoiceRecApp:
                 initial_prompt=context,
                 allowed_languages=allowed_languages,
                 condition_on_previous_text=condition_on_previous_text,
+                is_final_chunk=is_final_chunk,
             )
 
             if text:
@@ -314,18 +373,14 @@ class SVoiceRecApp:
         try:
             self.is_recording = False
             self.is_processing = True
-            mb = self.menu_bar
-            if mb is not None:
-                try:
-                    mb.set_status(recording=False, processing=True)
-                except Exception as e:
-                    log_error(f"Failed to set menu bar status: {e}")
-
-            send_notification(
-                "Click-n-speak",
-                "Распознаю...",
-                "Идёт распознавание речи. Подождите.",
+            self._submit_for_main_thread(
+                lambda: self.menu_bar.set_status(recording=False, processing=True)
+                if self.menu_bar
+                else None
             )
+
+            s = get_ui_strings(get_primary_language(self.config))
+            send_notification("Click-n-speak", s["transcribing_title"], s["transcribing_body"])
 
             # Stop recording and get the last (remaining) chunk
             try:
@@ -338,17 +393,25 @@ class SVoiceRecApp:
                 last_audio = None
                 log_exception(f"Error during recorder.stop(): {e}")
 
+            queue_size_before_final = self.chunk_queue.qsize()
+            log_info(f"Chunk queue size before adding final chunk: {queue_size_before_final}")
+
             if last_audio is not None and len(last_audio) > 0:
-                self.chunk_queue.put(last_audio)
-                log_info("Final audio chunk enqueued for processing.")
+                # Final chunk in queue so worker processes it (one transcribe at a time; no parallel = no crash)
+                self.chunk_queue.put(("final", last_audio))
+                queue_size = self.chunk_queue.qsize()
+                log_info(
+                    f"Final audio chunk enqueued. Chunk queue size={queue_size} "
+                    f"(worker must process these before session ends)."
+                )
 
-            # Signal worker to finish and wait for it
+            # Signal worker to finish and wait for it (long timeout so "Finish" only after real completion)
             self.stop_worker.set()
+            wait_start = time.time()
 
-            # Schedule a delayed "still working" notification if recognition is slow.
+            # Schedule a delayed "still working" notification if recognition is slow if recognition is slow
             self._transcription_cycle_id += 1
             cycle_id = self._transcription_cycle_id
-
             if self._delayed_transcribing_timer is not None:
                 try:
                     self._delayed_transcribing_timer.cancel()
@@ -360,10 +423,11 @@ class SVoiceRecApp:
                     if self._transcription_cycle_id != cycle_id:
                         return
                     if self.worker_thread is not None and self.worker_thread.is_alive():
+                        s = get_ui_strings(get_primary_language(self.config))
                         send_notification(
                             "Click-n-speak",
-                            "Распознаю... всё ещё идёт",
-                            "Распознавание ещё выполняется. Подождите.",
+                            s["still_working_title"],
+                            s["still_working_body"],
                         )
                 except Exception as e:
                     log_exception(f"Delayed transcription notify failed: {e}")
@@ -377,56 +441,27 @@ class SVoiceRecApp:
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
                 try:
-                    self.worker_thread.join(timeout=30)
+                    self.worker_thread.join(timeout=120)
                 except Exception as e:
                     log_exception(f"Error while joining worker_thread: {e}")
+                waited = time.time() - wait_start
                 if self.worker_thread.is_alive():
-                    log_error("Worker thread did not finish within timeout.")
-
-            # Cleanup
-            self.is_processing = False
-            if self._delayed_transcribing_timer is not None:
-                try:
-                    self._delayed_transcribing_timer.cancel()
-                except Exception:
-                    pass
-            mb = self.menu_bar
-            if mb is not None:
-                try:
-                    mb.set_status(recording=False, processing=False)
-                except Exception as e:
-                    log_error(f"Failed to set menu bar status: {e}")
-
-            full_phrase = " ".join(self.transcribed_parts).strip()
-            if full_phrase:
-                append_phrase(full_phrase)
-                if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
-                    try:
-                        mb.refresh_last_phrases_submenu()
-                    except Exception as e:
-                        log_error(f"Failed to refresh Last 5 phrases submenu: {e}")
-
-            send_notification(
-                "Click-n-speak",
-                "Готово",
-                "Распознавание завершено. Можно диктовать снова.",
-            )
-        except Exception as e:
-            self.is_processing = False
-            log_exception(f"Unhandled exception in stop_recording_and_process: {e}")
-            mb = self.menu_bar
-            if mb is not None:
-                try:
-                    mb.set_status(recording=False, processing=False)
-                except Exception as err:
                     log_error(
-                        f"Failed to reset menu bar status after stop error: {err}"
+                        f"Worker thread did not finish within timeout. "
+                        f"Waited {waited:.1f}s. Submitting cleanup anyway."
                     )
-            send_notification(
-                "Click-n-speak",
-                "Error",
-                "An error occurred while finishing transcription. See log for details.",
-            )
+                else:
+                    log_info(
+                        f"Worker thread finished. Waited {waited:.1f}s. "
+                        "Submitting finish cleanup to main thread."
+                    )
+
+            # All UI updates and "Finish" run on main thread so menu bar actually updates
+            self._submit_for_main_thread(self._do_finish_cleanup)
+            log_info("Stop-recording phase done (cleanup scheduled on main thread).")
+        except Exception as e:
+            log_exception(f"Unhandled exception in stop_recording_and_process: {e}")
+            self._submit_for_main_thread(self._do_error_cleanup)
 
     def stop(self):
         self.stop_worker.set()

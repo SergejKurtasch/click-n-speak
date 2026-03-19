@@ -92,10 +92,19 @@ class WhisperTranscriber:
         )
         self._warmup_done = True
 
-    def transcribe(self, audio_data, initial_prompt=None, allowed_languages=None, condition_on_previous_text=True):
+    def transcribe(
+        self,
+        audio_data,
+        initial_prompt=None,
+        allowed_languages=None,
+        condition_on_previous_text=True,
+        is_final_chunk=False,
+    ):
         """
         Transcribes audio data using MLX Whisper.
         audio_data: numpy array (16kHz, float32)
+        is_final_chunk: if True, do not filter out short or common-hallucination text
+                        so the user's last words are never dropped.
         """
         if audio_data is None or len(audio_data) == 0:
             return ""
@@ -107,6 +116,7 @@ class WhisperTranscriber:
             f"allowed_languages={allowed_languages}, "
             f"condition_on_previous_text={condition_on_previous_text}, "
             f"initial_prompt_len={len(initial_prompt) if initial_prompt else 0}"
+            + (", is_final_chunk=True" if is_final_chunk else "")
         )
         start_time = time.time()
 
@@ -144,33 +154,41 @@ class WhisperTranscriber:
                         log_info(f"Filtered out unauthorized language '{detected_lang}': '{text}'")
                         return ""
 
-            # Check for suspicious characters (like excessive CJK characters in non-CJK context)
-            # This is common for Whisper hallucinations
+            # Hallucination filtering. For final chunk we still filter obvious garbage
+            # (phrase list, single-word you/the, repetition) so we keep short real phrases.
             clean_text_lower = text.lower()
 
-            # Simple check for Chinese characters (common hallucination)
-            # Unicode range for CJK: \u4e00-\u9fff
-            asian_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-            if asian_chars > 2 and asian_chars > (len(text) / 3):
-                log_info(f"Filtered out suspicious Asian characters: '{text}'")
-                return ""
-
-            # Filtering hallucinations using substring matching
-            for phrase in self.hallucination_phrases:
-                if phrase in clean_text_lower:
-                    log_info(f"Filtered out hallucination containing '{phrase}': '{text}'")
+            if not is_final_chunk:
+                # Suspicious CJK only for non-final (aggressive filter)
+                asian_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+                if asian_chars > 2 and asian_chars > (len(text) / 3):
+                    log_info(f"Filtered out suspicious Asian characters: '{text}'")
                     return ""
 
-            # Special case for "you" or "you." as it's a very common Whisper hallucination
-            # if it's the ONLY word in the result.
-            if clean_text_lower.strip(" .") == "you":
-                log_info(f"Filtered out likely 'you' hallucination: '{text}'")
+            # Phrase list and single-word you/the: filter for both normal and final chunk
+            for phrase in self.hallucination_phrases:
+                if phrase in clean_text_lower:
+                    log_info(
+                        f"Filtered out hallucination containing '{phrase}': '{text}'"
+                    )
+                    return ""
+
+            if clean_text_lower.strip(" .") in ("you", "the"):
+                log_info(
+                    f"Filtered out likely single-word hallucination: '{text}'"
+                )
                 return ""
 
-            # Consecutive same-word repetition (e.g. "word word word") is a common hallucination
-            if _has_consecutive_word_repetition(text, CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD):
-                log_info(f"Filtered out hallucination (consecutive word repetition): '{text}'")
+            if _has_consecutive_word_repetition(
+                text, CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD
+            ):
+                log_info(
+                    f"Filtered out hallucination (consecutive word repetition): '{text}'"
+                )
                 return ""
+
+            if is_final_chunk:
+                log_info(f"Final chunk: keeping after light filter: '{text}'")
 
             # Final cleanup: strip leading/trailing dots, ellipses and spaces
             return text.strip(" .…")

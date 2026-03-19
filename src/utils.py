@@ -77,6 +77,140 @@ def get_phrases_file_path() -> Path:
     return support_dir / "phrase_history.txt"
 
 
+# UI strings for notifications and menu bar, keyed by primary language (ru, en, de, es, fr).
+# Fallback: en if key or lang missing.
+UI_STRINGS: dict[str, dict[str, str]] = {
+    "ru": {
+        "preparing_title": "Подготовка модели...",
+        "preparing_body": "Загружаю/скачиваю Whisper-модель. Первый запуск может занять время.",
+        "model_ready_title": "Модель готова",
+        "model_ready_body": "Можно начинать диктовку.",
+        "warmup_failed_title": "Подготовка модели не удалась",
+        "warmup_failed_body": "Запись продолжит работать, но первый распознающий запрос может быть медленнее.",
+        "preparing_wait_title": "Подготовка модели...",
+        "preparing_wait_body": "Подождите несколько секунд и попробуйте снова.",
+        "recording_title": "Запись...",
+        "recording_body": "Говорите. Нажмите горячую клавишу ещё раз, чтобы остановить.",
+        "transcribing_title": "Распознаю...",
+        "transcribing_body": "Идёт распознавание речи. Подождите.",
+        "still_working_title": "Распознаю... всё ещё идёт",
+        "still_working_body": "Распознавание ещё выполняется. Подождите.",
+        "ready_title": "Готово",
+        "ready_body": "Распознавание завершено. Можно диктовать снова.",
+        "started_title": "Запущено",
+        "started_body": "Нажмите горячую клавишу, чтобы начать запись, или используйте иконку в меню-баре.",
+        "menu_recording": "● ЗАПИСЬ",
+        "menu_processing": "● РАСПОЗН.",
+    },
+    "en": {
+        "preparing_title": "Preparing model...",
+        "preparing_body": "Loading/downloading Whisper model. First run may take a while.",
+        "model_ready_title": "Model ready",
+        "model_ready_body": "You can start dictation now.",
+        "warmup_failed_title": "Warm-up failed",
+        "warmup_failed_body": "Recording will still work, but first transcription may be slower.",
+        "preparing_wait_title": "Preparing model...",
+        "preparing_wait_body": "Please wait a few seconds and try again.",
+        "recording_title": "Recording...",
+        "recording_body": "Speak now. Press the hotkey again to stop.",
+        "transcribing_title": "Transcribing...",
+        "transcribing_body": "Recognition in progress. Please wait.",
+        "still_working_title": "Transcribing... still working",
+        "still_working_body": "Recognition is still in progress. Please wait.",
+        "ready_title": "Ready",
+        "ready_body": "Transcription complete. You can dictate again.",
+        "started_title": "Started",
+        "started_body": "Press the hotkey to start recording or use the menu bar icon.",
+        "menu_recording": "● RECORDING",
+        "menu_processing": "● RECOGNIZING",
+    },
+    "de": {
+        "preparing_title": "Modell wird vorbereitet...",
+        "preparing_body": "Whisper-Modell wird geladen/heruntergeladen. Der erste Start kann dauern.",
+        "model_ready_title": "Modell bereit",
+        "model_ready_body": "Sie können jetzt diktieren.",
+        "warmup_failed_title": "Vorbereitung fehlgeschlagen",
+        "warmup_failed_body": "Aufnahme funktioniert weiter, die erste Erkennung kann langsamer sein.",
+        "preparing_wait_title": "Modell wird vorbereitet...",
+        "preparing_wait_body": "Bitte warten Sie einige Sekunden und versuchen Sie es erneut.",
+        "recording_title": "Aufnahme...",
+        "recording_body": "Sprechen Sie. Drücken Sie die Hotkey erneut zum Beenden.",
+        "transcribing_title": "Erkennung...",
+        "transcribing_body": "Spracherkennung läuft. Bitte warten.",
+        "still_working_title": "Erkennung... läuft noch",
+        "still_working_body": "Die Erkennung läuft noch. Bitte warten.",
+        "ready_title": "Fertig",
+        "ready_body": "Erkennung abgeschlossen. Sie können erneut diktieren.",
+        "started_title": "Gestartet",
+        "started_body": "Drücken Sie die Hotkey zum Aufnehmen oder nutzen Sie das Menü-Symbol.",
+        "menu_recording": "● AUFNAHME",
+        "menu_processing": "● ERKENNUNG",
+    },
+    "es": {
+        "preparing_title": "Preparando modelo...",
+        "preparing_body": "Cargando/descargando modelo Whisper. La primera vez puede tardar.",
+        "model_ready_title": "Modelo listo",
+        "model_ready_body": "Puede empezar a dictar.",
+        "warmup_failed_title": "Error al preparar",
+        "warmup_failed_body": "La grabación seguirá funcionando, pero la primera transcripción puede ser más lenta.",
+        "preparing_wait_title": "Preparando modelo...",
+        "preparing_wait_body": "Espere unos segundos e intente de nuevo.",
+        "recording_title": "Grabando...",
+        "recording_body": "Hable. Pulse la tecla de nuevo para terminar.",
+        "transcribing_title": "Transcribiendo...",
+        "transcribing_body": "Reconocimiento en curso. Espere.",
+        "still_working_title": "Transcribiendo... aún en curso",
+        "still_working_body": "El reconocimiento sigue en curso. Espere.",
+        "ready_title": "Listo",
+        "ready_body": "Transcripción completada. Puede dictar de nuevo.",
+        "started_title": "Iniciado",
+        "started_body": "Pulse la tecla para grabar o use el icono del menú.",
+        "menu_recording": "● GRABANDO",
+        "menu_processing": "● RECONOCIENDO",
+    },
+    "fr": {
+        "preparing_title": "Préparation du modèle...",
+        "preparing_body": "Chargement/téléchargement du modèle Whisper. Le premier lancement peut prendre du temps.",
+        "model_ready_title": "Modèle prêt",
+        "model_ready_body": "Vous pouvez commencer à dicter.",
+        "warmup_failed_title": "Échec de la préparation",
+        "warmup_failed_body": "L'enregistrement fonctionnera encore, mais la première transcription peut être plus lente.",
+        "preparing_wait_title": "Préparation du modèle...",
+        "preparing_wait_body": "Veuillez attendre quelques secondes et réessayer.",
+        "recording_title": "Enregistrement...",
+        "recording_body": "Parlez. Appuyez à nouveau sur le raccourci pour arrêter.",
+        "transcribing_title": "Transcription...",
+        "transcribing_body": "Reconnaissance en cours. Veuillez patienter.",
+        "still_working_title": "Transcription... en cours",
+        "still_working_body": "La reconnaissance est toujours en cours. Veuillez patienter.",
+        "ready_title": "Terminé",
+        "ready_body": "Transcription terminée. Vous pouvez dicter à nouveau.",
+        "started_title": "Démarré",
+        "started_body": "Appuyez sur le raccourci pour enregistrer ou utilisez l'icône du menu.",
+        "menu_recording": "● ENREGISTREMENT",
+        "menu_processing": "● RECONNAISSANCE",
+    },
+}
+
+
+def get_primary_language(config: dict) -> str:
+    """Return the primary UI language from config (e.g. 'ru', 'en'). Default 'ru'."""
+    lang_list = config.get("languages")
+    if isinstance(lang_list, list) and len(lang_list) > 0:
+        return str(lang_list[0]).lower().strip()
+    return "ru"
+
+
+def get_ui_strings(primary_lang: str) -> dict[str, str]:
+    """Return UI strings for the given primary language. Falls back to 'en' for unknown lang or keys."""
+    lang = primary_lang.lower().strip() if primary_lang else "en"
+    if lang not in UI_STRINGS:
+        lang = "en"
+    base = UI_STRINGS.get("en", {})
+    overlay = UI_STRINGS.get(lang, {})
+    return {**base, **overlay}
+
+
 def escape_applescript_string(s: str) -> str:
     """Escapes a string for safe use inside AppleScript double-quoted literals."""
     return s.replace("\\", "\\\\").replace('"', '\\"')

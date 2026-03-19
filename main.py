@@ -5,7 +5,15 @@ import threading
 from src.app import SVoiceRecApp
 from src.menu_bar import ClickNSpeakApp
 from src.updater import check_for_update
-from src.utils import ensure_accessibility_permission, get_config_path, log_error, log_info, send_notification
+from src.utils import (
+    ensure_accessibility_permission,
+    get_config_path,
+    get_primary_language,
+    get_ui_strings,
+    log_error,
+    log_info,
+    send_notification,
+)
 
 
 def _run_update_check_once() -> None:
@@ -46,11 +54,8 @@ def main() -> None:
         logic_app.start_model_warmup()
 
         log_info("Click-n-speak is running in the menu bar...")
-        send_notification(
-            "Click-n-speak",
-            "Запущено",
-            "Нажмите горячую клавишу, чтобы начать запись, или используйте иконку в меню-баре.",
-        )
+        s = get_ui_strings(get_primary_language(logic_app.config))
+        send_notification("Click-n-speak", s["started_title"], s["started_body"])
 
         # Start hotkey listener
         logic_app.hotkey_handler.start()
