@@ -37,6 +37,29 @@ def _has_consecutive_word_repetition(text: str, threshold: int = CONSECUTIVE_REP
     return False
 
 
+def _call_mlx_transcribe(
+    audio_data,
+    model_name: str,
+    initial_prompt=None,
+    condition_on_previous_text=True,
+    **extra_kwargs,
+):
+    """Call mlx_whisper.transcribe; fall back without extra_kwargs if API does not support them."""
+    base_kw = {
+        "path_or_hf_repo": model_name,
+        "initial_prompt": initial_prompt,
+        "condition_on_previous_text": condition_on_previous_text,
+        "task": "transcribe",
+        "verbose": False,
+    }
+    try:
+        return mlx_whisper.transcribe(audio_data, **base_kw, **extra_kwargs)
+    except TypeError:
+        # Older mlx_whisper may not accept no_speech_threshold / compression_ratio_threshold
+        log_info("mlx_whisper.transcribe does not accept strict thresholds; using defaults.")
+        return mlx_whisper.transcribe(audio_data, **base_kw)
+
+
 class WhisperTranscriber:
     def __init__(self, model_name="mlx-community/whisper-large-v3-mlx"):
         self.model_name = model_name
@@ -63,6 +86,9 @@ class WhisperTranscriber:
             "subtitles",
             "watching",
             "subscribe",
+            "субтитры подогнал",
+            "подогнал симон",
+            "heed",
         }
         log_info(f"Initializing Whisper model: {model_name}...")
 
@@ -109,6 +135,13 @@ class WhisperTranscriber:
         if audio_data is None or len(audio_data) == 0:
             return ""
 
+        # Stricter thresholds for short/final chunks to reduce long hallucination decoding (15-27s)
+        use_strict_thresholds = is_final_chunk or len(audio_data) < 48000  # 48000 samples ~ 3s at 16kHz
+        whisper_kw: dict = {}
+        if use_strict_thresholds:
+            whisper_kw["no_speech_threshold"] = 0.5
+            whisper_kw["compression_ratio_threshold"] = 2.0
+
         log_info(
             "Transcribing audio chunk with Whisper: "
             f"len={len(audio_data)}, "
@@ -117,18 +150,20 @@ class WhisperTranscriber:
             f"condition_on_previous_text={condition_on_previous_text}, "
             f"initial_prompt_len={len(initial_prompt) if initial_prompt else 0}"
             + (", is_final_chunk=True" if is_final_chunk else "")
+            + (", strict_thresholds=True" if use_strict_thresholds else "")
         )
         start_time = time.time()
 
         try:
-            # MLX Whisper transcribe options (verbose=True to get language info in logs if needed)
-            result = mlx_whisper.transcribe(
+            result = _call_mlx_transcribe(
                 audio_data,
-                path_or_hf_repo=self.model_name,
+                model_name=self.model_name,
                 initial_prompt=initial_prompt,
                 condition_on_previous_text=condition_on_previous_text,
-                task="transcribe",
-                verbose=False,
+                **whisper_kw,
+            )
+            log_info(
+                f"transcribe returned (len={len(audio_data)}, is_final_chunk={is_final_chunk})"
             )
 
             end_time = time.time()

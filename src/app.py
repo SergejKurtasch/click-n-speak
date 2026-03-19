@@ -50,6 +50,8 @@ class SVoiceRecApp:
         self.transcribed_parts = []
         self.worker_thread = None  # type: threading.Thread | None
         self.stop_worker = threading.Event()
+        # Final chunk stored here on Stop; worker processes it first (priority over queue)
+        self._pending_final_chunk = None  # Optional[array-like], cleared by worker after processing
 
         # Model warm-up state (cold-start optimization after app rebuild/restart)
         self._model_warming = False
@@ -242,6 +244,7 @@ class SVoiceRecApp:
         )
         self.transcribed_parts = []
         self.stop_worker.clear()
+        self._pending_final_chunk = None
 
         # Clear the queue just in case
         cleared = 0
@@ -293,29 +296,35 @@ class SVoiceRecApp:
 
     def chunk_worker(self):
         log_info("Chunk worker started.")
-        while not self.stop_worker.is_set() or not self.chunk_queue.empty():
+        while (
+            not self.stop_worker.is_set()
+            or not self.chunk_queue.empty()
+            or self._pending_final_chunk is not None
+        ):
             try:
-                # Use a timeout to occasionally check the stop_worker event
+                # Priority: process pending final chunk first (set on Stop) so last phrase appears fast
+                if self.stop_worker.is_set() and self._pending_final_chunk is not None:
+                    audio_chunk = self._pending_final_chunk
+                    self._pending_final_chunk = None
+                    remaining = self.chunk_queue.qsize()
+                    log_info(
+                        f"Chunk worker processing final chunk first (priority), "
+                        f"length={len(audio_chunk)}, chunks_remaining_in_queue={remaining}"
+                    )
+                    self.process_chunk(audio_chunk, is_final_chunk=True)
+                    continue
+                # Otherwise take next from queue (normal chunks only; final is in _pending_final_chunk)
                 item = self.chunk_queue.get(timeout=0.5)
                 remaining = self.chunk_queue.qsize()
-                is_final_chunk = (
-                    isinstance(item, tuple)
-                    and len(item) == 2
-                    and item[0] == "final"
-                )
-                audio_chunk = item[1] if is_final_chunk else item
                 log_info(
-                    f"Chunk worker received audio chunk of length={len(audio_chunk)}"
-                    + (" (final chunk)" if is_final_chunk else "")
-                    + f", chunks_remaining_in_queue={remaining}"
+                    f"Chunk worker received audio chunk of length={len(item)}, "
+                    f"chunks_remaining_in_queue={remaining}"
                 )
-                self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk)
+                self.process_chunk(item, is_final_chunk=False)
                 self.chunk_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
-                # Any unhandled exception here could silently kill the worker;
-                # log full traceback to diagnose rare crashes.
                 log_exception(f"Error in chunk worker loop: {e}")
         log_info("Chunk worker stopped (queue empty, ready for next session).")
 
@@ -393,16 +402,13 @@ class SVoiceRecApp:
                 last_audio = None
                 log_exception(f"Error during recorder.stop(): {e}")
 
-            queue_size_before_final = self.chunk_queue.qsize()
-            log_info(f"Chunk queue size before adding final chunk: {queue_size_before_final}")
+            queue_size = self.chunk_queue.qsize()
+            log_info(f"Chunk queue size at stop: {queue_size} (worker will process final chunk first)")
 
             if last_audio is not None and len(last_audio) > 0:
-                # Final chunk in queue so worker processes it (one transcribe at a time; no parallel = no crash)
-                self.chunk_queue.put(("final", last_audio))
-                queue_size = self.chunk_queue.qsize()
+                self._pending_final_chunk = last_audio
                 log_info(
-                    f"Final audio chunk enqueued. Chunk queue size={queue_size} "
-                    f"(worker must process these before session ends)."
+                    "Final audio chunk set as pending (worker processes it first, then drains queue)."
                 )
 
             # Signal worker to finish and wait for it (long timeout so "Finish" only after real completion)
