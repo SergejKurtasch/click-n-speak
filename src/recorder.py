@@ -107,11 +107,16 @@ class AudioRecorder:
         if self.silence_counter >= effective_silence_duration:
             if len(self.audio_data) > 0 and self.has_speech_in_chunk:
                 duration = sum(len(x) for x in self.audio_data) / self.sample_rate
-                if duration > 0.5:
+                speech_duration = duration - self.silence_counter
+                if speech_duration > 0.15:
                     log_info(
-                        f"Triggering {trigger_type} chunk: {self.current_chunk_duration:.2f}s total, {self.silence_counter:.2f}s silence"
+                        f"Triggering {trigger_type} chunk: {self.current_chunk_duration:.2f}s total, {self.silence_counter:.2f}s silence, {speech_duration:.2f}s active speech"
                     )
                     self._trigger_chunk()
+                else:
+                    log_info(
+                        f"Discarding empty/noise chunk (speech duration {speech_duration:.2f}s <= 0.15s)"
+                    )
 
             # Reset chunk state even if it was just noise
             self.audio_data = []

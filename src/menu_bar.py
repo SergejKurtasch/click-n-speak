@@ -63,17 +63,31 @@ class ClickNSpeakApp(rumps.App):
                 item.state = 1
             self.menu["Model"].add(item)
 
-        # Languages
+        # Languages: primary (single) and additional (multiple)
         langs = ["ru", "en", "de", "es", "fr"]
-        lang_list = self.config.get("languages", ["ru"])
-        primary = lang_list[0] if lang_list else "ru"
+        primary = get_primary_language(self.config)
+        additional = self.config.get("additional_languages")
+        if not isinstance(additional, list):
+            additional = []
+        # Backward compat: derive from old "languages" list
+        if not additional:
+            lang_list = self.config.get("languages", [])
+            if isinstance(lang_list, list) and len(lang_list) > 1:
+                additional = [str(x).lower().strip() for x in lang_list[1:] if x]
 
         self.menu.add("Primary Language")
         for lang in langs:
-            item = rumps.MenuItem(lang.upper(), callback=self.change_language)
+            item = rumps.MenuItem(lang.upper(), callback=self._change_primary_language)
             if lang == primary:
                 item.state = 1
             self.menu["Primary Language"].add(item)
+
+        self.menu.add("Additional Languages")
+        for lang in langs:
+            item = rumps.MenuItem(lang.upper(), callback=self._toggle_additional_language)
+            if lang in additional:
+                item.state = 1
+            self.menu["Additional Languages"].add(item)
 
         # Sensitivity / Delays
         self.menu.add("Sensitivity")
@@ -128,18 +142,12 @@ class ClickNSpeakApp(rumps.App):
                 item.state = 0  # type: ignore
         sender.state = 1
 
-    def change_language(self, sender):
+    def _change_primary_language(self, sender):
         new_lang = sender.title.lower()
         log_info(f"Setting primary language to {new_lang}")
 
-        # Get current languages and update the first one
-        current_langs = self.config.get("languages", ["ru"])
-        if current_langs:
-            current_langs[0] = new_lang
-        else:
-            current_langs = [new_lang]
-
-        self.main_app.update_config({"languages": current_langs})
+        self.config["primary_language"] = new_lang
+        self.main_app.update_config({"primary_language": new_lang})
 
         # Update UI: uncheck others in the "Primary Language" submenu
         for item in self.menu["Primary Language"].values():
@@ -147,7 +155,30 @@ class ClickNSpeakApp(rumps.App):
                 item.state = 0  # type: ignore
         sender.state = 1
 
-        # Update initial prompt based on languages
+        self._update_language_hint_and_prompt()
+        self.save_config()
+        self.main_app.load_config_data(self.config)
+
+    def _toggle_additional_language(self, sender):
+        lang = sender.title.lower()
+        additional = list(self.config.get("additional_languages") or [])
+        if not additional and isinstance(self.config.get("languages"), list) and len(self.config["languages"]) > 1:
+            additional = [str(x).lower().strip() for x in self.config["languages"][1:] if x]
+        if lang in additional:
+            additional.remove(lang)
+        else:
+            additional.append(lang)
+        self.config["additional_languages"] = additional
+        self.main_app.update_config({"additional_languages": additional})
+        sender.state = 1 if lang in additional else 0
+        log_info(f"Additional languages: {additional}")
+
+        self._update_language_hint_and_prompt()
+        self.save_config()
+        self.main_app.load_config_data(self.config)
+
+    def _update_language_hint_and_prompt(self):
+        """Build language_hint from primary + additional and refresh initial_prompt."""
         prompts = {
             "ru": "Русский язык.",
             "en": "English language.",
@@ -155,25 +186,14 @@ class ClickNSpeakApp(rumps.App):
             "es": "Texto en español.",
             "fr": "Texte en français.",
         }
-        main_prompt = prompts.get(new_lang, "")
-        # Get up to 2 extra languages from config for context
-        other_langs = []
-        cl = self.config.get("languages", ["ru"])
-        if isinstance(cl, list) and len(cl) > 1:
-            other_langs = cl[1:3]
-
-        extra_prompts_list = []
-        for lang in other_langs:
-            p = prompts.get(str(lang))
-            if p:
-                extra_prompts_list.append(p)
+        primary = get_primary_language(self.config)
+        additional = self.config.get("additional_languages") or []
+        main_prompt = prompts.get(primary, "")
+        extra_prompts_list = [prompts.get(str(l), "") for l in additional if prompts.get(str(l))]
         extra_prompts = " ".join(extra_prompts_list)
-
         language_hint = f"{main_prompt} {extra_prompts}".strip()
         self.config["language_hint"] = language_hint
         self.config["initial_prompt"] = build_initial_prompt(self.config)
-        self.save_config()
-        self.main_app.load_config_data(self.config)
 
     def set_sensitivity(self, sender):
         delay_map = {"Fast (0.5s)": 0.5, "Normal (1.0s)": 1.0, "Slow (2.0s)": 2.0}

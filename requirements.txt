@@ -11,3 +11,4 @@ tokenizers
 huggingface-hub
 rumps
 py2app
+pytest

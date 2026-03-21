@@ -11,6 +11,7 @@ from .phrase_history import append_phrase
 from .recorder import AudioRecorder
 from .transcriber import WhisperTranscriber
 from .utils import (
+    get_allowed_languages,
     get_primary_language,
     get_ui_strings,
     log_error,
@@ -50,8 +51,6 @@ class SVoiceRecApp:
         self.transcribed_parts = []
         self.worker_thread = None  # type: threading.Thread | None
         self.stop_worker = threading.Event()
-        # Final chunk stored here on Stop; worker processes it first (priority over queue)
-        self._pending_final_chunk = None  # Optional[array-like], cleared by worker after processing
 
         # Model warm-up state (cold-start optimization after app rebuild/restart)
         self._model_warming = False
@@ -82,7 +81,8 @@ class SVoiceRecApp:
     def _model_warmup_worker(self) -> None:
         try:
             log_info("Starting Whisper warm-up in background thread.")
-            self.transcriber.warmup()
+            primary_lang = get_primary_language(self.config)
+            self.transcriber.warmup(language=primary_lang)
             log_info("Whisper warm-up finished.")
             s = get_ui_strings(get_primary_language(self.config))
             send_notification("Click-n-speak", s["model_ready_title"], s["model_ready_body"])
@@ -244,7 +244,6 @@ class SVoiceRecApp:
         )
         self.transcribed_parts = []
         self.stop_worker.clear()
-        self._pending_final_chunk = None
 
         # Clear the queue just in case
         cleared = 0
@@ -292,35 +291,24 @@ class SVoiceRecApp:
 
     def on_chunk_received(self, audio_data):
         if self.is_recording:
-            self.chunk_queue.put(audio_data)
+            self.chunk_queue.put((audio_data, False))
 
     def chunk_worker(self):
         log_info("Chunk worker started.")
-        while (
-            not self.stop_worker.is_set()
-            or not self.chunk_queue.empty()
-            or self._pending_final_chunk is not None
-        ):
+        while not self.stop_worker.is_set() or not self.chunk_queue.empty():
             try:
-                # Priority: process pending final chunk first (set on Stop) so last phrase appears fast
-                if self.stop_worker.is_set() and self._pending_final_chunk is not None:
-                    audio_chunk = self._pending_final_chunk
-                    self._pending_final_chunk = None
-                    remaining = self.chunk_queue.qsize()
-                    log_info(
-                        f"Chunk worker processing final chunk first (priority), "
-                        f"length={len(audio_chunk)}, chunks_remaining_in_queue={remaining}"
-                    )
-                    self.process_chunk(audio_chunk, is_final_chunk=True)
-                    continue
-                # Otherwise take next from queue (normal chunks only; final is in _pending_final_chunk)
-                item = self.chunk_queue.get(timeout=0.5)
+                audio_chunk, is_final_chunk = self.chunk_queue.get(timeout=0.5)
                 remaining = self.chunk_queue.qsize()
-                log_info(
-                    f"Chunk worker received audio chunk of length={len(item)}, "
-                    f"chunks_remaining_in_queue={remaining}"
+                drain_note = (
+                    " (draining queue after stop)"
+                    if self.stop_worker.is_set()
+                    else ""
                 )
-                self.process_chunk(item, is_final_chunk=False)
+                log_info(
+                    f"Chunk worker received audio chunk of length={len(audio_chunk)}, "
+                    f"is_final={is_final_chunk}, chunks_remaining_in_queue={remaining}{drain_note}"
+                )
+                self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk)
                 self.chunk_queue.task_done()
             except queue.Empty:
                 continue
@@ -342,7 +330,7 @@ class SVoiceRecApp:
             else:
                 context = str(self.config.get("initial_prompt", ""))
 
-            allowed_languages = self.config.get("languages", [])
+            allowed_languages = get_allowed_languages(self.config)
             condition_on_previous_text = self.config.get(
                 "condition_on_previous_text", True
             )
@@ -403,12 +391,12 @@ class SVoiceRecApp:
                 log_exception(f"Error during recorder.stop(): {e}")
 
             queue_size = self.chunk_queue.qsize()
-            log_info(f"Chunk queue size at stop: {queue_size} (worker will process final chunk first)")
+            log_info(f"Chunk queue size at stop: {queue_size} (worker will finish queue)")
 
             if last_audio is not None and len(last_audio) > 0:
-                self._pending_final_chunk = last_audio
+                self.chunk_queue.put((last_audio, True))
                 log_info(
-                    "Final audio chunk set as pending (worker processes it first, then drains queue)."
+                    "Final audio chunk added to queue (worker will process it in order)."
                 )
 
             # Signal worker to finish and wait for it (long timeout so "Finish" only after real completion)

@@ -79,20 +79,20 @@ class WhisperTranscriber:
             "don't forget to",
             "you for watching",
             "a s s u b t i t l e s",
-            "insert",
-            "direct",
             "by the amara",
             "y cómo va a funcionar",
             "subtitles",
-            "watching",
-            "subscribe",
             "субтитры подогнал",
             "подогнал симон",
-            "heed",
+            "десерт",
+            "субтитры подготовил",
+            "субтитры сделал",
+            "редактор субтитров",
+            "перевод на русский",
         }
         log_info(f"Initializing Whisper model: {model_name}...")
 
-    def warmup(self, duration_seconds: float = 0.5, sample_rate: int = 16000) -> None:
+    def warmup(self, duration_seconds: float = 0.5, sample_rate: int = 16000, language: str = None) -> None:
         """Warm up the MLX Whisper model to reduce the first-use latency.
 
         This runs a tiny transcription on silence and discards the result.
@@ -108,13 +108,22 @@ class WhisperTranscriber:
         audio_data = np.zeros((audio_len,), dtype=np.float32)
 
         log_info(
-            "Warming up Whisper model (silence transcription to initialize MLX)..."
+            f"Warming up Whisper model (silence transcription to initialize MLX with language={language})..."
         )
-        _ = mlx_whisper.transcribe(
+        
+        warmup_kw = {
+            "no_speech_threshold": 0.5,
+            "compression_ratio_threshold": 2.0
+        }
+        if language:
+            warmup_kw["language"] = language
+
+        _ = _call_mlx_transcribe(
             audio_data,
-            path_or_hf_repo=self.model_name,
-            task="transcribe",
-            verbose=False,
+            model_name=self.model_name,
+            initial_prompt=None,
+            condition_on_previous_text=True,
+            **warmup_kw,
         )
         self._warmup_done = True
 
@@ -141,6 +150,10 @@ class WhisperTranscriber:
         if use_strict_thresholds:
             whisper_kw["no_speech_threshold"] = 0.5
             whisper_kw["compression_ratio_threshold"] = 2.0
+
+        # Tell Whisper the primary language so when uncertain it uses it; we still filter by detected language below
+        if allowed_languages:
+            whisper_kw["language"] = allowed_languages[0]
 
         log_info(
             "Transcribing audio chunk with Whisper: "
@@ -173,21 +186,57 @@ class WhisperTranscriber:
             if not text:
                 return ""
 
-            # Language filtering logic
-            # Map of Whisper language codes to common names if needed, but Whisper usually returns codes
-            detected_lang = result.get("language", "").lower()
-            if allowed_languages and detected_lang:
-                # Some versions might return "en" vs "english"
-                if detected_lang not in allowed_languages:
-                    # Check if the code is a prefix or vice-versa (e.g., 'en' in 'english')
-                    is_allowed = False
-                    for allowed in allowed_languages:
-                        if allowed in detected_lang or detected_lang in allowed:
-                            is_allowed = True
-                            break
-                    if not is_allowed:
-                        log_info(f"Filtered out unauthorized language '{detected_lang}': '{text}'")
-                        return ""
+            # Filter out chunks that were recognized in another language (model was told primary via language=; we drop the rest).
+            # Skip for final chunk so we never lose the end of the phrase; skip for trivial text (punctuation only or single word).
+            words = text.split()
+            is_trivial = len(words) <= 1 or not any(w.isalnum() for w in words)
+            apply_lang_filter = (
+                allowed_languages
+                and not is_final_chunk
+                and not is_trivial
+            )
+            if apply_lang_filter:
+                detected_lang = result.get("language", "").lower()
+                if detected_lang:
+                    if detected_lang not in allowed_languages:
+                        is_allowed = False
+                        for allowed in allowed_languages:
+                            if allowed in detected_lang or detected_lang in allowed:
+                                is_allowed = True
+                                break
+                        if not is_allowed:
+                            log_info(
+                                f"Segment recognized as '{detected_lang}', retrying transcription with 0.1s padding..."
+                            )
+                            # Pad audio with 0.1s of silence (1600 samples at 16kHz) at both ends
+                            # to shift the decoding window and potentially change the output language.
+                            padded_audio = np.pad(audio_data, (1600, 1600), "constant")
+                            result = _call_mlx_transcribe(
+                                padded_audio,
+                                model_name=self.model_name,
+                                initial_prompt=initial_prompt,
+                                condition_on_previous_text=condition_on_previous_text,
+                                **whisper_kw,
+                            )
+                            text = result.get("text", "").strip()
+                            if text:
+                                words = text.split()
+                                is_trivial = len(words) <= 1 or not any(
+                                    w.isalnum() for w in words
+                                )
+                                retry_lang = result.get("language", "").lower()
+                                if retry_lang and retry_lang in allowed_languages:
+                                    log_info(
+                                        f"Retry returned allowed language '{retry_lang}': '{text[:50]}...'"
+                                    )
+                                else:
+                                    log_info(
+                                        "Retry used (keeping text to avoid losing chunk)."
+                                    )
+                                apply_lang_filter = False
+                            else:
+                                log_info("Retry returned empty text; dropping chunk.")
+                                return ""
 
             # Hallucination filtering. For final chunk we still filter obvious garbage
             # (phrase list, single-word you/the, repetition) so we keep short real phrases.
@@ -200,7 +249,7 @@ class WhisperTranscriber:
                     log_info(f"Filtered out suspicious Asian characters: '{text}'")
                     return ""
 
-            # Phrase list and single-word you/the: filter for both normal and final chunk
+            # Phrase list: filter for both normal and final chunk (thank you, etc.)
             for phrase in self.hallucination_phrases:
                 if phrase in clean_text_lower:
                     log_info(
@@ -208,7 +257,9 @@ class WhisperTranscriber:
                     )
                     return ""
 
-            if clean_text_lower.strip(" .") in ("you", "the"):
+            # Single-word "you"/"the": filter for normal chunks only; allow for final
+            # so we do not drop real short endings when Whisper hallucinates "you"
+            if not is_final_chunk and clean_text_lower.strip(" .") in ("you", "the"):
                 log_info(
                     f"Filtered out likely single-word hallucination: '{text}'"
                 )

@@ -1,5 +1,5 @@
 import re
-from collections import Counter
+from collections import Counter, deque
 from typing import Iterable, List
 
 from .utils import get_log_file_path, log_error, log_info
@@ -62,7 +62,8 @@ def generate_terms_hint_from_log(max_terms: int = 20) -> str:
 
     try:
         with log_path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
+            # Read only the last 500 lines to save memory and get recent context
+            lines = deque(f, maxlen=500)
     except OSError as exc:
         log_error(f"Failed to read log file for terms hint: {exc}")
         return ""

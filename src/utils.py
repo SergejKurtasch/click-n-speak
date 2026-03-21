@@ -194,11 +194,35 @@ UI_STRINGS: dict[str, dict[str, str]] = {
 
 
 def get_primary_language(config: dict) -> str:
-    """Return the primary UI language from config (e.g. 'ru', 'en'). Default 'ru'."""
+    """Return the primary UI/recognition language from config (e.g. 'ru', 'en'). Default 'ru'."""
+    primary = config.get("primary_language")
+    if primary and isinstance(primary, str):
+        return str(primary).lower().strip()
     lang_list = config.get("languages")
     if isinstance(lang_list, list) and len(lang_list) > 0:
         return str(lang_list[0]).lower().strip()
     return "ru"
+
+
+def get_allowed_languages(config: dict) -> list[str]:
+    """Return the list of languages allowed for recognition: primary + additional (no duplicates)."""
+    primary = get_primary_language(config)
+    additional = config.get("additional_languages")
+    if not isinstance(additional, list):
+        additional = []
+    # Backward compat: old config had "languages" = [primary, extra, ...]
+    if not additional:
+        lang_list = config.get("languages")
+        if isinstance(lang_list, list) and len(lang_list) > 1:
+            additional = [str(x).lower().strip() for x in lang_list[1:] if x]
+    seen = {primary}
+    result = [primary]
+    for lang in additional:
+        code = str(lang).lower().strip()
+        if code and code not in seen:
+            seen.add(code)
+            result.append(code)
+    return result
 
 
 def get_ui_strings(primary_lang: str) -> dict[str, str]:
