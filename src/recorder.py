@@ -14,6 +14,13 @@ from .utils import (
     send_notification,
 )
 
+try:
+    import webrtcvad
+    HAVE_VAD = True
+except ImportError:
+    HAVE_VAD = False
+
+
 
 class AudioRecorder:
     def __init__(
@@ -41,6 +48,13 @@ class AudioRecorder:
         self.chunk_callback = None
         self.has_speech_in_chunk = False
         self.current_chunk_duration = 0  # Track time since last split
+        self.vad_buffer = b""
+
+        if HAVE_VAD:
+            self.vad = webrtcvad.Vad(2) # 0-3 aggressiveness (2 is moderate)
+            log_info("WebRTC VAD initialized for silence detection.")
+        else:
+            log_info("webrtcvad not found, falling back to RMS energy. Run 'pip install webrtcvad' for better accuracy.")
 
         # If device_id is provided in config, use it. Otherwise, try to find built-in.
         if device_id is not None:
@@ -74,19 +88,32 @@ class AudioRecorder:
         # Append data to current chunk
         self.audio_data.append(indata.copy())
 
-        # Check for silence
-        # RMS energy
-        energy = np.sqrt(np.mean(indata**2))
-
         # Update current chunk duration
         chunk_increment = frames / self.sample_rate
         self.current_chunk_duration += chunk_increment
 
-        if energy < self.silence_threshold:
-            self.silence_counter += chunk_increment
+        if HAVE_VAD:
+            # indata is natively float32, webrtcvad requires 16-bit PCM
+            pcm_data = (indata[:, 0] * 32767).astype(np.int16).tobytes()
+            self.vad_buffer += pcm_data
+            
+            frame_length = int(self.sample_rate * 0.03) * 2 # 30ms 16-bit
+            while len(self.vad_buffer) >= frame_length:
+                frame = self.vad_buffer[:frame_length]
+                self.vad_buffer = self.vad_buffer[frame_length:]
+                if self.vad.is_speech(frame, self.sample_rate):
+                    self.silence_counter = 0
+                    self.has_speech_in_chunk = True
+                else:
+                    self.silence_counter += 0.03
         else:
-            self.silence_counter = 0
-            self.has_speech_in_chunk = True
+            # Check for silence using RMS energy fallback
+            energy = np.sqrt(np.mean(indata**2))
+            if energy < self.silence_threshold:
+                self.silence_counter += chunk_increment
+            else:
+                self.silence_counter = 0
+                self.has_speech_in_chunk = True
 
         # Adaptive silence threshold:
         # 1. Normal: 1.0s (default)
@@ -145,6 +172,7 @@ class AudioRecorder:
         self.silence_counter = 0
         self.has_speech_in_chunk = False
         self.current_chunk_duration = 0
+        self.vad_buffer = b""
         self._stop_event.clear()
 
         try:

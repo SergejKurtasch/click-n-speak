@@ -1,5 +1,8 @@
 import re
 import time
+import multiprocessing as mp
+import queue
+import traceback
 
 import numpy as np
 import mlx_whisper
@@ -61,7 +64,7 @@ def _call_mlx_transcribe(
 
 
 class WhisperTranscriber:
-    def __init__(self, model_name="mlx-community/whisper-large-v3-mlx"):
+    def __init__(self, model_name="mlx-community/whisper-large-v3-turbo"):
         self.model_name = model_name
         self._warmup_done = False
         # Common hallucinations/noise results to filter out (substring matches)
@@ -282,3 +285,81 @@ class WhisperTranscriber:
             # Log full traceback to help diagnose rare crashes inside mlx_whisper
             log_exception(f"Transcription error with model {self.model_name}: {e}")
             return ""
+
+
+class TranscriberProcessWrapper:
+    """Runs WhisperTranscriber in a dedicated child process to avoid blocking the main UI loop with the GIL."""
+    def __init__(self, model_name="mlx-community/whisper-large-v3-turbo"):
+        self.input_queue = mp.Queue()
+        self.output_queue = mp.Queue()
+        self.model_name = model_name
+        
+        # Start child process
+        self._process = mp.Process(target=self._run_loop, daemon=True)
+        self._process.start()
+
+    def _run_loop(self):
+        try:
+            transcriber = WhisperTranscriber(model_name=self.model_name)
+        except Exception as e:
+            self.output_queue.put({"type": "error", "message": str(e), "trace": traceback.format_exc()})
+            return
+
+        while True:
+            try:
+                cmd = self.input_queue.get()
+                if cmd is None:
+                    break
+                
+                action = cmd.get("action")
+                if action == "warmup":
+                    transcriber.warmup(language=cmd.get("language"))
+                    self.output_queue.put({"type": "warmup_done"})
+                elif action == "transcribe":
+                    text = transcriber.transcribe(
+                        cmd.get("audio_data"),
+                        initial_prompt=cmd.get("initial_prompt"),
+                        allowed_languages=cmd.get("allowed_languages"),
+                        condition_on_previous_text=cmd.get("condition_on_previous_text", True),
+                        is_final_chunk=cmd.get("is_final_chunk", False)
+                    )
+                    self.output_queue.put({
+                        "type": "transcription",
+                        "text": text,
+                        "is_final_chunk": cmd.get("is_final_chunk", False)
+                    })
+                elif action == "update_model":
+                    transcriber = WhisperTranscriber(model_name=cmd["model_name"])
+            except Exception as e:
+                self.output_queue.put({"type": "error", "message": str(e), "trace": traceback.format_exc()})
+
+    def stop(self):
+        self.input_queue.put(None)
+        self._process.join(timeout=3.0)
+        
+    def warmup(self, language=None):
+        self.input_queue.put({"action": "warmup", "language": language})
+        
+    def transcribe(self, audio_data, initial_prompt=None, allowed_languages=None, condition_on_previous_text=True, is_final_chunk=False):
+        """Blocking call to transcribe the given audio chunk using the child process."""
+        self.input_queue.put({
+            "action": "transcribe",
+            "audio_data": audio_data,
+            "initial_prompt": initial_prompt,
+            "allowed_languages": allowed_languages,
+            "condition_on_previous_text": condition_on_previous_text,
+            "is_final_chunk": is_final_chunk
+        })
+        # Wait for result
+        while True:
+            try:
+                # Polling allows interruption if needed
+                res = self.output_queue.get(timeout=0.1)
+                if res["type"] == "transcription":
+                    return res["text"]
+                elif res["type"] == "error":
+                    log_error(f"Transcriber process error: {res['message']}\n{res.get('trace')}")
+                    return ""
+                # Ignore warmup_done or other messages if they accidentally arrive during transcribe
+            except queue.Empty:
+                continue

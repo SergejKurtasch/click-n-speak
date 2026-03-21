@@ -9,7 +9,7 @@ from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
-from .transcriber import WhisperTranscriber
+from .transcriber import TranscriberProcessWrapper
 from .utils import (
     get_allowed_languages,
     get_primary_language,
@@ -35,8 +35,8 @@ class SVoiceRecApp:
             target_speech_duration=self.config.get("target_speech_duration", 8.0),
             max_speech_duration=self.config.get("max_speech_duration", 12.0),
         )
-        self.transcriber = WhisperTranscriber(
-            model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-mlx")
+        self.transcriber = TranscriberProcessWrapper(
+            model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
         )
         self.hotkey_handler = HotkeyHandler(
             hotkey_str=self.config.get("hotkey", "<alt>+<space>"), on_trigger=self.toggle_recording
@@ -83,6 +83,18 @@ class SVoiceRecApp:
             log_info("Starting Whisper warm-up in background thread.")
             primary_lang = get_primary_language(self.config)
             self.transcriber.warmup(language=primary_lang)
+            # Wait for warmup_done
+            while True:
+                try:
+                    res = self.transcriber.output_queue.get(timeout=0.2)
+                    if res["type"] == "warmup_done":
+                        break
+                    elif res["type"] == "error":
+                        log_error(f"Warmup error: {res['message']}")
+                        break
+                except Exception:
+                    # Ignore timeout and retry
+                    pass
             log_info("Whisper warm-up finished.")
             s = get_ui_strings(get_primary_language(self.config))
             send_notification("Click-n-speak", s["model_ready_title"], s["model_ready_body"])
@@ -213,7 +225,8 @@ class SVoiceRecApp:
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
-        self.transcriber = WhisperTranscriber(model_name=model_name)
+        self.transcriber.update_model(model_name)
+        self.transcriber.model_name = model_name
 
     def update_recorder_settings(self, **kwargs):
         # Override config with any specifically provided kwargs first
@@ -328,7 +341,9 @@ class SVoiceRecApp:
                 else:
                     context = full_context
             else:
-                context = str(self.config.get("initial_prompt", ""))
+                # Add a bilingual default prompt to prevent Whisper Large-v3 from auto-translating mixed languages
+                default_prompt = "Текст содержит русские и английские слова. Mixed Russian and English terminology: API, bug, feature, survival."
+                context = str(self.config.get("initial_prompt", "")) or default_prompt
 
             allowed_languages = get_allowed_languages(self.config)
             condition_on_previous_text = self.config.get(
@@ -463,3 +478,5 @@ class SVoiceRecApp:
             self.worker_thread.join()
         if self.hotkey_handler:
             self.hotkey_handler.stop()
+        if hasattr(self, "transcriber"):
+            self.transcriber.stop()
