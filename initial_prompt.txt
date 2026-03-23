@@ -1,0 +1,1 @@
+Например, я часто использую англоязычные термины: PCA, survival, prompt, readmission, Hugging Face, Readmission, train, test, Edge, production, main, Guthub, git.

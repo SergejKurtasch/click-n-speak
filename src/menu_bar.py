@@ -5,7 +5,7 @@ import sys
 
 import rumps
 
-from .log_analyzer import generate_terms_hint_from_log
+from .log_analyzer import generate_terms_hint_from_history
 from .phrase_history import get_last_phrases
 from .updater import check_for_update
 from .utils import (
@@ -30,6 +30,7 @@ class ClickNSpeakApp(rumps.App):
         super(ClickNSpeakApp, self).__init__("", icon=icon_path)
         self.main_app = main_app
         self.config = main_app.config
+        self._last_prompt_mtime = 0.0
 
         # Build Menu
         self.setup_menu()
@@ -50,6 +51,40 @@ class ClickNSpeakApp(rumps.App):
                 fn(*args, **kwargs)
             except Exception as e:
                 log_error(f"Main thread job failed: {e}")
+
+    @rumps.timer(1.0)
+    def _watch_prompt_file(self, _):
+        """Watches initial_prompt.txt for manual edits by the user."""
+        prompt_path = get_config_path().parent / "initial_prompt.txt"
+        if not prompt_path.exists():
+            return
+            
+        try:
+            mtime = prompt_path.stat().st_mtime
+            if self._last_prompt_mtime == 0.0:
+                self._last_prompt_mtime = mtime
+                return
+                
+            if mtime > self._last_prompt_mtime:
+                self._last_prompt_mtime = mtime
+                with open(prompt_path, "r", encoding="utf-8") as f:
+                    new_prompt = f.read().strip()
+                
+                previous = str(self.config.get("initial_prompt", "")).strip()
+                if previous != new_prompt:
+                    if previous:
+                        self.config["previous_initial_prompt"] = previous
+                    self.config["initial_prompt"] = new_prompt
+                    # Clear auto-hints so they don't overwrite manual edits when reloading language
+                    self.config["terms_hint"] = ""
+                    self.config["language_hint"] = ""
+                    
+                    self.save_config()
+                    self.main_app.load_config_data(self.config)
+                    log_info("Initial prompt updated manually from text file.")
+                    send_notification("Click-n-speak", "Initial Prompt", "Manual edit saved successfully!")
+        except Exception as e:
+            log_error(f"Error checking prompt file: {e}")
 
     def setup_menu(self):
         # Model Selection
@@ -109,8 +144,8 @@ class ClickNSpeakApp(rumps.App):
         self._last_phrases_parent = rumps.MenuItem("Last 5 phrases")
         self.menu.add(self._last_phrases_parent)
         self._refresh_last_phrases_submenu()
-        self.menu.add(rumps.MenuItem("Show Initial Prompt", callback=self.show_initial_prompt))
-        self.menu.add(rumps.MenuItem("Update Initial Prompt from Logs", callback=self.update_initial_prompt_from_logs))
+        self.menu.add(rumps.MenuItem("Edit Initial Prompt", callback=self.edit_initial_prompt))
+        self.menu.add(rumps.MenuItem("Update Initial Prompt from History", callback=self.update_initial_prompt_from_history))
         self.menu.add(rumps.MenuItem("Revert Initial Prompt", callback=self.revert_initial_prompt))
         self.menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
         self.menu.add(rumps.MenuItem("Check for Updates", callback=self.check_for_updates))
@@ -251,31 +286,27 @@ class ClickNSpeakApp(rumps.App):
         self.menu.clear()
         self.setup_menu()
 
-    def show_initial_prompt(self, _: rumps.MenuItem) -> None:
-        """Shows the current initial prompt in a read-only window."""
+    def edit_initial_prompt(self, _: rumps.MenuItem) -> None:
+        """Opens the initial prompt in a text editor for manual editing."""
         current_prompt = str(self.config.get("initial_prompt", ""))
-        previous_prompt = str(self.config.get("previous_initial_prompt", ""))
-        if previous_prompt:
-            body = f"Current initial prompt:\n\n{current_prompt}\n\nPrevious version:\n\n{previous_prompt}"
-        else:
-            body = f"Current initial prompt:\n\n{current_prompt}"
-        window = rumps.Window(
-            message=body,
-            title="Initial Prompt",
-            default_text="",
-            ok="Close",
-            cancel=None,
-        )
-        window.run()
+            
+        prompt_path = get_config_path().parent / "initial_prompt.txt"
+        try:
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(current_prompt)
+            self._last_prompt_mtime = prompt_path.stat().st_mtime
+            subprocess.run(["open", "-t", str(prompt_path)], check=False)
+        except OSError as e:
+            log_error(f"Failed to open initial prompt for editing: {e}")
 
-    def update_initial_prompt_from_logs(self, _: rumps.MenuItem) -> None:
-        """Builds a new initial prompt from recent logs and applies it."""
-        terms_hint = generate_terms_hint_from_log()
+    def update_initial_prompt_from_history(self, _: rumps.MenuItem) -> None:
+        """Builds a new initial prompt from recent phrase history and applies it."""
+        terms_hint = generate_terms_hint_from_history()
         if not terms_hint:
             send_notification(
                 "Click-n-speak",
                 "Initial Prompt",
-                "Could not generate terms from logs. Speak more with technical terms and try again.",
+                "Could not generate terms from history. Speak more with technical terms and try again.",
             )
             return
 
