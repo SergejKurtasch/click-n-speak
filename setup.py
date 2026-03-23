@@ -125,6 +125,7 @@ OPTIONS = {
         "certifi",
         # Used by huggingface_hub
         "charset_normalizer",
+        "webrtcvad",
     ],
     "frameworks": frameworks_list,
     "excludes": [

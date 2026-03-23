@@ -166,9 +166,14 @@ class SVoiceRecApp:
                 return
 
             if not self.is_recording:
-                self.start_recording()
+                # Set immediately to prevent rapid double-triggers
+                self.is_recording = True 
+                threading.Thread(target=self.start_recording, daemon=True).start()
             else:
-                self.stop_recording_and_process()
+                # Set immediately to lock out further triggers
+                self.is_recording = False
+                self.is_processing = True
+                threading.Thread(target=self.stop_recording_and_process, daemon=True).start()
         except Exception as e:
             # Catch-all to avoid crashing the app from the hotkey thread
             log_exception(f"Unhandled exception in toggle_recording: {e}")
