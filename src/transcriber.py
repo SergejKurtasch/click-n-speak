@@ -9,6 +9,13 @@ import mlx_whisper
 
 from .utils import log_error, log_exception, log_info
 
+# Maximum seconds to wait for transcriber process to respond before killing it
+TRANSCRIBER_TIMEOUT_SECONDS = 30
+
+# Final chunks shorter than this (in samples at 16kHz) are skipped — they are
+# almost always silence/noise that cause Whisper to hallucinate for 10-43 seconds.
+MIN_FINAL_CHUNK_SAMPLES = 4800  # 0.3 seconds at 16 kHz
+
 # Consecutive same-word repeats at or above this count are treated as hallucination
 CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD = 2
 
@@ -90,6 +97,9 @@ class WhisperTranscriber:
             "десерт",
             "субтитры подготовил",
             "субтитры сделал",
+            "субтитры создавал",
+            "субтитры создал",
+            "субтитры",
             "редактор субтитров",
             "перевод на русский",
         }
@@ -145,6 +155,15 @@ class WhisperTranscriber:
                         so the user's last words are never dropped.
         """
         if audio_data is None or len(audio_data) == 0:
+            return ""
+
+        # Skip very short final chunks — they are almost always post-speech silence
+        # that Whisper decodes into hallucinations (10-43 seconds of wasted time).
+        if is_final_chunk and len(audio_data) < MIN_FINAL_CHUNK_SAMPLES:
+            log_info(
+                f"Skipping tiny final chunk ({len(audio_data)} samples, "
+                f"{len(audio_data) / 16000:.2f}s) to avoid hallucination."
+            )
             return ""
 
         # Stricter thresholds for short/final chunks to reduce long hallucination decoding (15-27s)
@@ -340,8 +359,31 @@ class TranscriberProcessWrapper:
     def warmup(self, language=None):
         self.input_queue.put({"action": "warmup", "language": language})
         
+    def _restart_process(self) -> None:
+        """Kill the hung child process and start a fresh one."""
+        log_info("Restarting transcriber process after timeout...")
+        try:
+            self._process.kill()
+            self._process.join(timeout=2.0)
+        except Exception as e:
+            log_error(f"Error killing transcriber process: {e}")
+        # Drain stale queues
+        for q in (self.input_queue, self.output_queue):
+            while True:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+        self._process = mp.Process(target=self._run_loop, daemon=True)
+        self._process.start()
+        log_info("Transcriber process restarted.")
+
     def transcribe(self, audio_data, initial_prompt=None, allowed_languages=None, condition_on_previous_text=True, is_final_chunk=False):
-        """Blocking call to transcribe the given audio chunk using the child process."""
+        """Blocking call to transcribe the given audio chunk using the child process.
+
+        If the child process does not respond within TRANSCRIBER_TIMEOUT_SECONDS,
+        the process is killed and restarted, and an empty string is returned.
+        """
         self.input_queue.put({
             "action": "transcribe",
             "audio_data": audio_data,
@@ -350,11 +392,20 @@ class TranscriberProcessWrapper:
             "condition_on_previous_text": condition_on_previous_text,
             "is_final_chunk": is_final_chunk
         })
-        # Wait for result
+        # Wait for result with a hard timeout to prevent infinite hangs
+        deadline = time.time() + TRANSCRIBER_TIMEOUT_SECONDS
         while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                log_error(
+                    f"Transcriber process did not respond within {TRANSCRIBER_TIMEOUT_SECONDS}s. "
+                    "Killing and restarting process."
+                )
+                self._restart_process()
+                return ""
             try:
-                # Polling allows interruption if needed
-                res = self.output_queue.get(timeout=0.1)
+                poll_timeout = min(0.1, remaining)
+                res = self.output_queue.get(timeout=poll_timeout)
                 if res["type"] == "transcription":
                     return res["text"]
                 elif res["type"] == "error":

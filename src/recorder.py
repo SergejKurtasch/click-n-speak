@@ -216,4 +216,16 @@ class AudioRecorder:
             return None
 
         # Concatenate all blocks and return as a single numpy array
-        return np.concatenate(self.audio_data, axis=0).flatten()
+        result = np.concatenate(self.audio_data, axis=0).flatten()
+
+        # Filter out very short final chunks (< 0.3s) that are almost always
+        # post-speech silence causing Whisper to hallucinate for 10-43 seconds.
+        min_samples = int(self.sample_rate * 0.3)
+        if len(result) < min_samples:
+            log_info(
+                f"Final chunk too short ({len(result)} samples, "
+                f"{len(result) / self.sample_rate:.2f}s), discarding to avoid hallucination."
+            )
+            return None
+
+        return result

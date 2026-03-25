@@ -455,15 +455,17 @@ class SVoiceRecApp:
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
                 try:
-                    self.worker_thread.join(timeout=120)
+                    self.worker_thread.join(timeout=45)
                 except Exception as e:
                     log_exception(f"Error while joining worker_thread: {e}")
                 waited = time.time() - wait_start
                 if self.worker_thread.is_alive():
                     log_error(
                         f"Worker thread did not finish within timeout. "
-                        f"Waited {waited:.1f}s. Submitting cleanup anyway."
+                        f"Waited {waited:.1f}s. Force-resetting is_processing."
                     )
+                    # Force-reset so hotkeys are not permanently blocked
+                    self.is_processing = False
                 else:
                     log_info(
                         f"Worker thread finished. Waited {waited:.1f}s. "
