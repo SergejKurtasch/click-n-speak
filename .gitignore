@@ -28,3 +28,4 @@ temp/
 
 .pre-commit-config.yaml
 pyproject.toml
+phrase_history.txt
