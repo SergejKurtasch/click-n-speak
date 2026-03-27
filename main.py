@@ -10,9 +10,11 @@ from src.utils import (
     get_config_path,
     get_primary_language,
     get_ui_strings,
+    is_accessibility_trusted,
     log_error,
     log_info,
     send_notification,
+    wait_for_accessibility,
 )
 
 
@@ -33,6 +35,30 @@ def _run_update_check_after_model_ready(model_ready_event: threading.Event) -> N
         log_error(f"Update check failed: {e}")
 
 
+def _wait_and_start_hotkeys(logic_app) -> None:
+    """Background thread: poll for accessibility and start hotkeys when granted."""
+    log_info("Background thread: waiting for accessibility permission...")
+    granted = wait_for_accessibility(timeout=120, poll_interval=2.0)
+    if granted:
+        log_info("Accessibility granted — starting hotkey listener.")
+        try:
+            logic_app.hotkey_handler.restart()
+            send_notification(
+                "Click-n-speak",
+                "Hotkeys activated",
+                "Accessibility granted. Hotkeys are now active.",
+            )
+        except Exception as e:
+            log_error(f"Failed to start hotkey listener after permission grant: {e}")
+    else:
+        log_info("Accessibility not granted after 120s. Hotkeys remain disabled.")
+        send_notification(
+            "Click-n-speak",
+            "Hotkeys disabled",
+            "Accessibility not granted. Please grant access and restart the app.",
+        )
+
+
 def main() -> None:
     # Ensure we are in the right directory
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -47,18 +73,32 @@ def main() -> None:
         # Link them
         logic_app.set_menu_bar(menu_app)
 
-        # Ensure accessibility permissions are requested and guide user if missing
-        ensure_accessibility_permission()
+        # Smart accessibility check: only prompt if not already trusted
+        trusted = is_accessibility_trusted()
+        if not trusted:
+            trusted = ensure_accessibility_permission()
 
         # Start model warm-up early to reduce first-run transcription latency.
         logic_app.start_model_warmup()
+
+        # Start background stability tasks (keep-alive and wake from sleep warmup)
+        logic_app.start_keep_alive_timer()
+        logic_app.start_wake_observer()
 
         log_info("Click-n-speak is running in the menu bar...")
         s = get_ui_strings(get_primary_language(logic_app.config))
         send_notification("Click-n-speak", s["started_title"], s["started_body"])
 
-        # Start hotkey listener
-        logic_app.hotkey_handler.start()
+        if trusted:
+            # Permissions already granted — start hotkeys immediately
+            logic_app.hotkey_handler.start()
+            log_info("Hotkey listener started (accessibility already granted).")
+        else:
+            # Permissions not yet granted — start background poller
+            log_info("Accessibility not granted yet. Starting background poller.")
+            threading.Thread(
+                target=_wait_and_start_hotkeys, args=(logic_app,), daemon=True
+            ).start()
 
         # Check for updates once per session in background (after warm-up).
         threading.Thread(
@@ -79,3 +119,4 @@ if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
     main()
+

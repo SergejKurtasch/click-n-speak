@@ -167,7 +167,8 @@ class WhisperTranscriber:
             return ""
 
         # Stricter thresholds for short/final chunks to reduce long hallucination decoding (15-27s)
-        use_strict_thresholds = is_final_chunk or len(audio_data) < 48000  # 48000 samples ~ 3s at 16kHz
+        # Applied to: final chunks, and any audio shorter than ~5s (80000 samples at 16kHz)
+        use_strict_thresholds = is_final_chunk or len(audio_data) < 80000
         whisper_kw: dict = {}
         if use_strict_thresholds:
             whisper_kw["no_speech_threshold"] = 0.5

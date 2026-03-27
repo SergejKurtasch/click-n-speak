@@ -48,3 +48,9 @@ class HotkeyHandler:
     def stop(self):
         if self.listener:
             self.listener.stop()
+            self.listener = None
+
+    def restart(self) -> None:
+        """Stop the current listener (if any) and start a fresh one."""
+        self.stop()
+        self.start()

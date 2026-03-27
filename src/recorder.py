@@ -31,6 +31,7 @@ class AudioRecorder:
         silence_duration=1.0,
         target_speech_duration=8.0,
         max_speech_duration=12.0,
+        min_speech_duration=1.0,
     ):
         self.sample_rate = sample_rate
         self.recording = False
@@ -43,6 +44,7 @@ class AudioRecorder:
         self.silence_duration = silence_duration  # Normal pause
         self.target_speech_duration = target_speech_duration  # Start looking for micro-pauses
         self.max_speech_duration = max_speech_duration  # Force split
+        self.min_speech_duration = min_speech_duration  # Min active speech to send chunk
 
         self.silence_counter = 0
         self.chunk_callback = None
@@ -135,14 +137,14 @@ class AudioRecorder:
             if len(self.audio_data) > 0 and self.has_speech_in_chunk:
                 duration = sum(len(x) for x in self.audio_data) / self.sample_rate
                 speech_duration = duration - self.silence_counter
-                if speech_duration > 0.15:
+                if speech_duration > self.min_speech_duration:
                     log_info(
                         f"Triggering {trigger_type} chunk: {self.current_chunk_duration:.2f}s total, {self.silence_counter:.2f}s silence, {speech_duration:.2f}s active speech"
                     )
                     self._trigger_chunk()
                 else:
                     log_info(
-                        f"Discarding empty/noise chunk (speech duration {speech_duration:.2f}s <= 0.15s)"
+                        f"Discarding empty/noise chunk (speech duration {speech_duration:.2f}s <= {self.min_speech_duration:.2f}s)"
                     )
 
             # Reset chunk state even if it was just noise
@@ -204,11 +206,7 @@ class AudioRecorder:
         log_info("Stopping recording...")
         self.recording = False
         if self.stream:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception as e:
-                log_error(f"Error closing audio stream: {e}")
+            self._stop_stream_with_timeout(timeout=3.0)
 
         play_sound(SOUND_RECORDING_STOP)
 
@@ -229,3 +227,27 @@ class AudioRecorder:
             return None
 
         return result
+
+    def _stop_stream_with_timeout(self, timeout: float = 3.0) -> None:
+        """Stop and close the audio stream with a timeout to prevent hangs.
+
+        If the stream does not stop within `timeout` seconds (e.g. audio device
+        disconnected or macOS blocked access), log an error and continue.
+        """
+        def _do_stop():
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception as e:
+                log_error(f"Error closing audio stream: {e}")
+
+        t = threading.Thread(target=_do_stop, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            log_error(
+                f"Audio stream stop/close did not complete within {timeout}s. "
+                "Continuing without waiting (possible device issue)."
+            )
+        else:
+            log_info("Recorder.stop() stream closed successfully.")

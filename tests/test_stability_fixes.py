@@ -179,6 +179,87 @@ def test_is_processing_reset_on_worker_timeout():
         with patch.object(threading.Thread, 'join', fast_join):
             app.stop_recording_and_process()
 
-        # is_processing must be reset even though worker didn't finish
         assert app.is_processing is False, "is_processing should be reset after worker timeout"
         never_done.set()  # cleanup
+
+
+# ---------------------------------------------------------------------------
+# Fix: min_speech_duration filtering
+# ---------------------------------------------------------------------------
+
+def test_min_speech_duration_filtering():
+    """Test that audio shorter than min_speech_duration is discarded by the recorder."""
+    from src.recorder import AudioRecorder
+    import numpy as np
+    
+    recorder = AudioRecorder(sample_rate=16000, min_speech_duration=1.0)
+    recorder.silence_counter = 100  # Force it to think silence happened
+    recorder.recording = True
+    
+    # 0.5s of audio (8000 samples)
+    audio = np.ones((8000, 1), dtype=np.float32)
+    recorder.frames = [audio]
+    
+    # Trigger callback logic (mocking the structure)
+    recorder._is_user_speaking = False
+    
+    # Call stop, which forces flush.
+    # We monkey-patch the thread so it runs synchronously for testing
+    original_thread = threading.Thread
+    def sync_thread(target, *args, **kwargs):
+        target()
+        mock = MagicMock()
+        mock.start = lambda: None
+        return mock
+
+    with patch('threading.Thread', side_effect=sync_thread):
+        recorder.stop()
+    
+    # Should be empty because 0.5s < 1.0s
+    assert recorder.output_queue.empty()
+
+# ---------------------------------------------------------------------------
+# Fix: Keep-alive memory pressure check
+# ---------------------------------------------------------------------------
+
+def test_keep_alive_memory_pressure():
+    """Test that keep alive respects memory pressure threshold."""
+    from src.app import SVoiceRecApp, MEMORY_PRESSURE_THRESHOLD_PERCENT
+    
+    app = SVoiceRecApp.__new__(SVoiceRecApp)
+    # Mock psutil
+    with patch("psutil.virtual_memory") as mock_mem:
+        mock_mem.return_value.percent = MEMORY_PRESSURE_THRESHOLD_PERCENT + 10
+        assert app._is_memory_pressure_high() is True
+        
+        mock_mem.return_value.percent = MEMORY_PRESSURE_THRESHOLD_PERCENT - 10
+        assert app._is_memory_pressure_high() is False
+
+# ---------------------------------------------------------------------------
+# Fix: recorder.stop() timeout
+# ---------------------------------------------------------------------------
+
+def test_recorder_stop_thread_timeout():
+    """Test that recorder stop doesn't block indefinitely."""
+    from src.recorder import AudioRecorder
+    import threading
+    import time
+    
+    recorder = AudioRecorder(sample_rate=16000)
+    
+    # Mock stream to hang forever
+    class HangingStream:
+        def stop(self):
+            time.sleep(10)
+        def close(self):
+            pass
+            
+    recorder.stream = HangingStream()
+    
+    start_time = time.time()
+    # Should timeout in ~3 seconds, not 10
+    recorder.stop()
+    elapsed = time.time() - start_time
+    
+    # The stop itself should be nearly instantaneous because it spawns a daemon thread
+    assert elapsed < 1.0

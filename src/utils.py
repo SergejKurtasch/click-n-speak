@@ -384,7 +384,20 @@ def open_microphone_settings() -> None:
 
 
 def ensure_accessibility_permission() -> bool:
-    """Ensure the app is a trusted accessibility client; prompt and open settings if needed."""
+    """Ensure the app is a trusted accessibility client; prompt and open settings if needed.
+
+    Uses a two-step approach:
+    1. Check AXIsProcessTrusted() first (no UI shown).
+    2. Only if NOT trusted, call AXIsProcessTrustedWithOptions with prompt=True
+       to show the system dialog *once*.
+    """
+    # Step 1: silent check
+    if is_accessibility_trusted():
+        log_info("Accessibility already granted — skipping prompt.")
+        return True
+
+    # Step 2: not trusted — show prompt once
+    log_info("Accessibility not granted. Showing system prompt.")
     try:
         from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
         from Foundation import NSDictionary
@@ -392,18 +405,35 @@ def ensure_accessibility_permission() -> bool:
         options = NSDictionary.dictionaryWithDictionary_({kAXTrustedCheckOptionPrompt: True})
         trusted = bool(AXIsProcessTrustedWithOptions(options))
     except ImportError:
-        log_info("AXIsProcessTrustedWithOptions not available; falling back to AXIsProcessTrusted.")
-        trusted = is_accessibility_trusted()
+        log_info("AXIsProcessTrustedWithOptions not available; opening settings manually.")
+        trusted = False
     except Exception as exc:
         log_error(f"Accessibility permission check failed: {exc}")
-        trusted = is_accessibility_trusted()
+        trusted = False
 
     if not trusted:
         open_accessibility_settings()
         send_notification(
             "Click-n-speak",
             "Accessibility required",
-            "Please allow Click-n-speak under Privacy & Security → Accessibility, then restart the app.",
+            "Please allow Click-n-speak under Privacy & Security → Accessibility.",
         )
 
     return trusted
+
+
+def wait_for_accessibility(timeout: float = 30.0, poll_interval: float = 1.0) -> bool:
+    """Poll AXIsProcessTrusted() until it returns True or timeout expires.
+
+    Returns True if accessibility was granted within the timeout.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_accessibility_trusted():
+            log_info("Accessibility permission granted (detected by polling).")
+            return True
+        time.sleep(poll_interval)
+    log_info(f"Accessibility not granted after {timeout}s polling.")
+    return False

@@ -17,8 +17,10 @@ from .utils import (
     get_menu_icon_path,
     get_primary_language,
     get_ui_strings,
+    is_accessibility_trusted,
     log_error,
     log_info,
+    open_accessibility_settings,
     save_config_to_disk,
     send_notification,
 )
@@ -31,6 +33,8 @@ class ClickNSpeakApp(rumps.App):
         self.main_app = main_app
         self.config = main_app.config
         self._last_prompt_mtime = 0.0
+        self._accessibility_granted = is_accessibility_trusted()
+        self._accessibility_item = None  # set in setup_menu
 
         # Build Menu
         self.setup_menu()
@@ -86,7 +90,55 @@ class ClickNSpeakApp(rumps.App):
         except Exception as e:
             log_error(f"Error checking prompt file: {e}")
 
+    @rumps.timer(5.0)
+    def _check_accessibility_status(self, _):
+        """Periodically checks accessibility status and auto-starts hotkeys when granted."""
+        try:
+            trusted = is_accessibility_trusted()
+            if trusted != self._accessibility_granted:
+                self._accessibility_granted = trusted
+                self._update_accessibility_menu_item()
+                if trusted:
+                    log_info("Accessibility permission detected — restarting hotkey listener.")
+                    try:
+                        self.main_app.hotkey_handler.restart()
+                        send_notification(
+                            "Click-n-speak",
+                            "Hotkeys activated",
+                            "Accessibility granted. Hotkeys are now active.",
+                        )
+                    except Exception as e:
+                        log_error(f"Failed to restart hotkey listener: {e}")
+        except Exception as e:
+            log_error(f"Error in accessibility status check: {e}")
+
+    def _update_accessibility_menu_item(self) -> None:
+        """Update the accessibility status menu item text."""
+        if self._accessibility_item is None:
+            return
+        if self._accessibility_granted:
+            self._accessibility_item.title = "✅ Accessibility Granted"
+        else:
+            self._accessibility_item.title = "⚠️ Accessibility Required"
+
+    def _on_accessibility_click(self, _) -> None:
+        """Handle click on accessibility menu item: open settings if not granted."""
+        if not self._accessibility_granted:
+            open_accessibility_settings()
+        else:
+            send_notification(
+                "Click-n-speak",
+                "Accessibility",
+                "Accessibility permissions are already granted.",
+            )
+
     def setup_menu(self):
+        # Accessibility status at the top
+        self._accessibility_item = rumps.MenuItem("", callback=self._on_accessibility_click)
+        self._update_accessibility_menu_item()
+        self.menu.add(self._accessibility_item)
+        self.menu.add(None)  # Separator
+
         # Model Selection
         models = ["base", "small", "medium", "large"]
         current_model = self.config.get("model_name", "").lower()
@@ -125,7 +177,7 @@ class ClickNSpeakApp(rumps.App):
             self.menu["Additional Languages"].add(item)
 
         # Sensitivity / Delays
-        self.menu.add("Sensitivity")
+        self.menu.add("Silence Delay")
         sensitivity_options = [("Fast (0.5s)", 0.5), ("Normal (1.0s)", 1.0), ("Slow (2.0s)", 2.0)]
         current_delay = self.config.get("silence_duration", 1.0)
         for title, val in sensitivity_options:
@@ -136,7 +188,21 @@ class ClickNSpeakApp(rumps.App):
                 or (val == 2.0 and current_delay > 1.2)
             ):
                 item.state = 1
-            self.menu["Sensitivity"].add(item)
+            self.menu["Silence Delay"].add(item)
+            
+        self.menu.add("Min Speech Duration")
+        speech_options = [("Short (0.3s)", 0.3), ("Normal (1.0s)", 1.0), ("Long (2.0s)", 2.0)]
+        current_speech = self.config.get("min_speech_duration", 1.0)
+        for title, val in speech_options:
+            item = rumps.MenuItem(title, callback=self.set_min_speech_duration)
+            if (
+                (val == 0.3 and current_speech <= 0.5)
+                or (val == 1.0 and 0.5 < current_speech <= 1.5)
+                or (val == 2.0 and current_speech > 1.5)
+            ):
+                item.state = 1
+            self.menu["Min Speech Duration"].add(item)
+
         self.menu.add(None)  # Separator
 
         self.menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
@@ -236,12 +302,25 @@ class ClickNSpeakApp(rumps.App):
         self.config["silence_duration"] = val
         self.save_config()
 
-        for item in self.menu["Sensitivity"].values():
+        for item in self.menu["Silence Delay"].values():
             item.state = 0
         sender.state = 1
 
         # Update app settings
         self.main_app.update_recorder_settings(silence_duration=val)
+
+    def set_min_speech_duration(self, sender):
+        speech_map = {"Short (0.3s)": 0.3, "Normal (1.0s)": 1.0, "Long (2.0s)": 2.0}
+        val = speech_map.get(sender.title, 1.0)
+        self.config["min_speech_duration"] = val
+        self.save_config()
+
+        for item in self.menu["Min Speech Duration"].values():
+            item.state = 0
+        sender.state = 1
+
+        # Update app settings
+        self.main_app.update_recorder_settings(min_speech_duration=val)
 
     def _refresh_last_phrases_submenu(self) -> None:
         """Rebuild the 'Last 5 phrases' submenu from the phrase history file."""

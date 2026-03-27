@@ -21,6 +21,11 @@ from .utils import (
     send_notification,
 )
 
+# Keep-alive interval in seconds (15 minutes)
+KEEP_ALIVE_INTERVAL_SECONDS = 15 * 60
+# Memory pressure threshold (%) above which keep-alive is disabled
+MEMORY_PRESSURE_THRESHOLD_PERCENT = 75
+
 
 class SVoiceRecApp:
     def __init__(self, config_path="config.json"):
@@ -34,6 +39,7 @@ class SVoiceRecApp:
             silence_duration=self.config.get("silence_duration", 1.0),
             target_speech_duration=self.config.get("target_speech_duration", 8.0),
             max_speech_duration=self.config.get("max_speech_duration", 12.0),
+            min_speech_duration=self.config.get("min_speech_duration", 1.0),
         )
         self.transcriber = TranscriberProcessWrapper(
             model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
@@ -64,6 +70,11 @@ class SVoiceRecApp:
 
         # Jobs to run on the main thread (menu bar / rumps) so UI updates are applied
         self._main_thread_queue = queue.Queue()
+
+        # Keep-alive & cold-start optimization
+        self._last_transcription_time = time.time()  # Initialized to now (warmup counts)
+        self._keep_alive_timer: Optional[threading.Timer] = None
+        self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
 
     def start_model_warmup(self) -> None:
         """Start a background warm-up to reduce first-use latency."""
@@ -243,6 +254,7 @@ class SVoiceRecApp:
             self.recorder.silence_duration = self.config.get("silence_duration", 1.0)
             self.recorder.target_speech_duration = self.config.get("target_speech_duration", 8.0)
             self.recorder.max_speech_duration = self.config.get("max_speech_duration", 12.0)
+            self.recorder.min_speech_duration = self.config.get("min_speech_duration", 1.0)
             log_info("Recorder settings updated.")
 
     def start_recording(self):
@@ -326,6 +338,18 @@ class SVoiceRecApp:
                     f"Chunk worker received audio chunk of length={len(audio_chunk)}, "
                     f"is_final={is_final_chunk}, chunks_remaining_in_queue={remaining}{drain_note}"
                 )
+
+                # Early cancel: if stop was requested and this is NOT the final chunk,
+                # skip non-final chunks to avoid long waits on stale audio.
+                if self.stop_worker.is_set() and not is_final_chunk:
+                    remaining_after = self.chunk_queue.qsize()
+                    if remaining_after > 0:
+                        log_info(
+                            f"Skipping non-final chunk (stop requested, {remaining_after} more in queue)."
+                        )
+                        self.chunk_queue.task_done()
+                        continue
+
                 self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk)
                 self.chunk_queue.task_done()
             except queue.Empty:
@@ -337,6 +361,11 @@ class SVoiceRecApp:
     def process_chunk(self, audio_chunk, is_final_chunk: bool = False):
         """Transcribe a single audio chunk and inject text; heavily logged for debugging."""
         try:
+            # Check if stop was requested before starting expensive transcription
+            if self.stop_worker.is_set() and not is_final_chunk:
+                log_info("Skipping non-final chunk transcription (stop requested).")
+                return
+
             # Determine initial prompt from previously transcribed text (limit context to prevent drift)
             if self.transcribed_parts:
                 full_context = " ".join(self.transcribed_parts)
@@ -371,6 +400,9 @@ class SVoiceRecApp:
                 condition_on_previous_text=condition_on_previous_text,
                 is_final_chunk=is_final_chunk,
             )
+
+            # Update last transcription time for keep-alive tracking
+            self._last_transcription_time = time.time()
 
             if text:
                 log_info(f"Partial Transcription: {text}")
@@ -455,7 +487,7 @@ class SVoiceRecApp:
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
                 try:
-                    self.worker_thread.join(timeout=45)
+                    self.worker_thread.join(timeout=15)
                 except Exception as e:
                     log_exception(f"Error while joining worker_thread: {e}")
                 waited = time.time() - wait_start
@@ -487,3 +519,117 @@ class SVoiceRecApp:
             self.hotkey_handler.stop()
         if hasattr(self, "transcriber"):
             self.transcriber.stop()
+        self._stop_keep_alive_timer()
+
+    # ── Keep-alive & Wake-from-sleep ───────────────────────────────────────
+
+    def start_keep_alive_timer(self) -> None:
+        """Start the periodic keep-alive timer to prevent MLX cold-start delays."""
+        self._schedule_keep_alive()
+        log_info(f"Keep-alive timer started (interval={KEEP_ALIVE_INTERVAL_SECONDS}s).")
+
+    def _schedule_keep_alive(self) -> None:
+        """Schedule the next keep-alive check."""
+        self._keep_alive_timer = threading.Timer(
+            KEEP_ALIVE_INTERVAL_SECONDS, self._keep_alive_tick
+        )
+        self._keep_alive_timer.daemon = True
+        self._keep_alive_timer.start()
+
+    def _keep_alive_tick(self) -> None:
+        """Periodic check: if no transcription happened recently, do a warmup ping."""
+        try:
+            elapsed = time.time() - self._last_transcription_time
+            if elapsed < KEEP_ALIVE_INTERVAL_SECONDS:
+                log_info(
+                    f"Keep-alive: last transcription {elapsed:.0f}s ago, "
+                    "model still warm — skipping ping."
+                )
+                self._schedule_keep_alive()
+                return
+
+            # Check memory pressure before pinging
+            if self._is_memory_pressure_high():
+                log_info(
+                    "Keep-alive: memory pressure high, skipping warmup ping "
+                    "to avoid adding load."
+                )
+                self._schedule_keep_alive()
+                return
+
+            log_info(
+                f"Keep-alive: no transcription for {elapsed:.0f}s, "
+                "sending warmup ping to keep model warm."
+            )
+            # Warmup in a separate thread to not block the timer
+            threading.Thread(
+                target=self._do_keep_alive_warmup, daemon=True
+            ).start()
+        except Exception as e:
+            log_exception(f"Keep-alive tick error: {e}")
+        finally:
+            self._schedule_keep_alive()
+
+    def _do_keep_alive_warmup(self) -> None:
+        """Perform a lightweight warmup transcription to keep the model in hot memory."""
+        try:
+            primary_lang = get_primary_language(self.config)
+            self.transcriber.warmup(language=primary_lang)
+            # Drain the warmup_done response
+            try:
+                res = self.transcriber.output_queue.get(timeout=10)
+                if res.get("type") == "warmup_done":
+                    log_info("Keep-alive warmup completed successfully.")
+                    self._last_transcription_time = time.time()
+            except Exception:
+                pass
+        except Exception as e:
+            log_error(f"Keep-alive warmup failed: {e}")
+
+    def _stop_keep_alive_timer(self) -> None:
+        """Cancel the keep-alive timer."""
+        if self._keep_alive_timer is not None:
+            try:
+                self._keep_alive_timer.cancel()
+            except Exception:
+                pass
+            self._keep_alive_timer = None
+
+    def _is_memory_pressure_high(self) -> bool:
+        """Check if system memory usage exceeds the threshold."""
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            return mem.percent > MEMORY_PRESSURE_THRESHOLD_PERCENT
+        except ImportError:
+            # psutil not available — assume memory is fine
+            return False
+        except Exception as e:
+            log_error(f"Error checking memory pressure: {e}")
+            return False
+
+    def start_wake_observer(self) -> None:
+        """Subscribe to macOS NSWorkspaceDidWakeNotification to warmup model after sleep."""
+        try:
+            from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification, NSObject
+            import objc
+
+            app_ref = self  # Capture reference for the observer callback
+
+            class _WakeObserver(NSObject):
+                def onWake_(self, notification):
+                    log_info("System wake detected — scheduling model warmup in background.")
+                    threading.Thread(
+                        target=app_ref._do_keep_alive_warmup, daemon=True
+                    ).start()
+
+            self._wake_observer = _WakeObserver.alloc().init()
+            workspace = NSWorkspace.sharedWorkspace()
+            workspace.notificationCenter().addObserver_selector_name_object_(
+                self._wake_observer, 'onWake:', NSWorkspaceDidWakeNotification, None
+            )
+            log_info("Wake-from-sleep observer registered successfully.")
+        except ImportError:
+            log_info("AppKit not available — wake-from-sleep warmup disabled.")
+        except Exception as e:
+            log_error(f"Failed to register wake observer: {e}")
