@@ -38,6 +38,33 @@ class ClickNSpeakApp(rumps.App):
 
         # Build Menu
         self.setup_menu()
+        self._migrate_old_prompt()
+
+    def _migrate_old_prompt(self):
+        """Migrates a single initial_prompt.txt into custom_prompts mapping on first launch."""
+        custom_dict = self.config.get("custom_prompts")
+        if custom_dict is None:
+            old_path = get_config_path().parent / "initial_prompt.txt"
+            lang = get_primary_language(self.config)
+            
+            custom_dict = {}
+            if old_path.exists():
+                try:
+                    with open(old_path, "r", encoding="utf-8") as f:
+                        old_txt = f.read().strip()
+                    if old_txt:
+                        custom_dict[lang] = old_txt
+                        self.config["initial_prompt"] = old_txt
+                except Exception:
+                    pass
+            self.config["custom_prompts"] = custom_dict
+            self.save_config()
+
+    def _get_prompt_path(self, lang: str = None):
+        """Returns the absolute path to initial_prompt_{lang}.txt."""
+        if not lang:
+            lang = get_primary_language(self.config)
+        return get_config_path().parent / f"initial_prompt_{lang}.txt"
 
     @rumps.timer(0.3)
     def _drain_main_thread_queue(self, _):
@@ -58,15 +85,17 @@ class ClickNSpeakApp(rumps.App):
 
     @rumps.timer(1.0)
     def _watch_prompt_file(self, _):
-        """Watches initial_prompt.txt for manual edits by the user."""
-        prompt_path = get_config_path().parent / "initial_prompt.txt"
+        """Watches initial_prompt_{lang}.txt for manual edits by the user."""
+        lang = get_primary_language(self.config)
+        prompt_path = self._get_prompt_path(lang)
         if not prompt_path.exists():
             return
             
         try:
             mtime = prompt_path.stat().st_mtime
-            if self._last_prompt_mtime == 0.0:
+            if getattr(self, "_last_prompt_mtime", 0.0) == 0.0 or getattr(self, "_last_prompt_path", None) != prompt_path:
                 self._last_prompt_mtime = mtime
+                self._last_prompt_path = prompt_path
                 return
                 
             if mtime > self._last_prompt_mtime:
@@ -74,19 +103,23 @@ class ClickNSpeakApp(rumps.App):
                 with open(prompt_path, "r", encoding="utf-8") as f:
                     new_prompt = f.read().strip()
                 
-                previous = str(self.config.get("initial_prompt", "")).strip()
+                custom_dict = self.config.get("custom_prompts", {})
+                previous = custom_dict.get(lang, "")
+                
                 if previous != new_prompt:
                     if previous:
-                        self.config["previous_initial_prompt"] = previous
+                        prev_dict = self.config.get("previous_prompts", {})
+                        prev_dict[lang] = previous
+                        self.config["previous_prompts"] = prev_dict
+                        
+                    custom_dict[lang] = new_prompt
+                    self.config["custom_prompts"] = custom_dict
                     self.config["initial_prompt"] = new_prompt
-                    # Clear auto-hints so they don't overwrite manual edits when reloading language
-                    self.config["terms_hint"] = ""
-                    self.config["language_hint"] = ""
                     
                     self.save_config()
                     self.main_app.load_config_data(self.config)
-                    log_info("Initial prompt updated manually from text file.")
-                    send_notification("Click-n-speak", "Initial Prompt", "Manual edit saved successfully!")
+                    log_info(f"Initial prompt updated manually for {lang.upper()}.")
+                    send_notification("Click-n-speak", "Initial Prompt", f"Manual edit saved for {lang.upper()}!")
         except Exception as e:
             log_error(f"Error checking prompt file: {e}")
 
@@ -213,6 +246,10 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(rumps.MenuItem("Edit Initial Prompt", callback=self.edit_initial_prompt))
         self.menu.add(rumps.MenuItem("Update Initial Prompt from History", callback=self.update_initial_prompt_from_history))
         self.menu.add(rumps.MenuItem("Revert Initial Prompt", callback=self.revert_initial_prompt))
+        
+        self.menu.add(None) # Separator
+        self.menu.add(rumps.MenuItem("Transcribe Audio File...", callback=self.transcribe_audio_file))
+        
         self.menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
         self.menu.add(rumps.MenuItem("Check for Updates", callback=self.check_for_updates))
 
@@ -260,6 +297,10 @@ class ClickNSpeakApp(rumps.App):
         self.save_config()
         self.main_app.load_config_data(self.config)
 
+        # Reset mtime tracker for the new language file so we don't falsely trigger it
+        self._last_prompt_path = None
+        self._last_prompt_mtime = 0.0
+
     def _toggle_additional_language(self, sender):
         lang = sender.title.lower()
         additional = list(self.config.get("additional_languages") or [])
@@ -279,7 +320,7 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.load_config_data(self.config)
 
     def _update_language_hint_and_prompt(self):
-        """Build language_hint from primary + additional and refresh initial_prompt."""
+        """Setup initial_prompt: use user's custom text if exists, else generate a fresh auto-hint."""
         prompts = {
             "ru": "Русский язык.",
             "en": "English language.",
@@ -289,12 +330,30 @@ class ClickNSpeakApp(rumps.App):
         }
         primary = get_primary_language(self.config)
         additional = self.config.get("additional_languages") or []
-        main_prompt = prompts.get(primary, "")
-        extra_prompts_list = [prompts.get(str(l), "") for l in additional if prompts.get(str(l))]
-        extra_prompts = " ".join(extra_prompts_list)
-        language_hint = f"{main_prompt} {extra_prompts}".strip()
-        self.config["language_hint"] = language_hint
-        self.config["initial_prompt"] = build_initial_prompt(self.config)
+        
+        custom_dict = self.config.get("custom_prompts", {})
+        if primary in custom_dict and custom_dict[primary].strip():
+            # Apply user's custom prompt for this language
+            final_prompt = custom_dict[primary].strip()
+        else:
+            # Build and write a new base auto-hint for this language
+            main_prompt = prompts.get(primary, "")
+            extra_prompts_list = [prompts.get(str(l), "") for l in additional if prompts.get(str(l))]
+            extra_prompts = " ".join(extra_prompts_list)
+            final_prompt = f"{main_prompt} {extra_prompts}".strip()
+            
+            # Save it so it appears correctly if the user clicks "Edit Initial Prompt"
+            custom_dict[primary] = final_prompt
+            self.config["custom_prompts"] = custom_dict
+            
+            try:
+                prompt_path = self._get_prompt_path(primary)
+                with open(prompt_path, "w", encoding="utf-8") as f:
+                    f.write(final_prompt)
+            except Exception as e:
+                log_error(f"Failed to auto-write warmup prompt for {primary}: {e}")
+            
+        self.config["initial_prompt"] = final_prompt
 
     def set_sensitivity(self, sender):
         delay_map = {"Fast (0.5s)": 0.5, "Normal (1.0s)": 1.0, "Slow (2.0s)": 2.0}
@@ -366,14 +425,16 @@ class ClickNSpeakApp(rumps.App):
         self.setup_menu()
 
     def edit_initial_prompt(self, _: rumps.MenuItem) -> None:
-        """Opens the initial prompt in a text editor for manual editing."""
+        """Opens the language-specific initial prompt in a text editor."""
+        lang = get_primary_language(self.config)
         current_prompt = str(self.config.get("initial_prompt", ""))
             
-        prompt_path = get_config_path().parent / "initial_prompt.txt"
+        prompt_path = self._get_prompt_path(lang)
         try:
             with open(prompt_path, "w", encoding="utf-8") as f:
                 f.write(current_prompt)
             self._last_prompt_mtime = prompt_path.stat().st_mtime
+            self._last_prompt_path = prompt_path
             subprocess.run(["open", "-t", str(prompt_path)], check=False)
         except OSError as e:
             log_error(f"Failed to open initial prompt for editing: {e}")
@@ -389,41 +450,93 @@ class ClickNSpeakApp(rumps.App):
             )
             return
 
-        previous = str(self.config.get("initial_prompt", "")).strip()
+        lang = get_primary_language(self.config)
+        custom_dict = self.config.get("custom_prompts", {})
+        previous = custom_dict.get(lang, "")
+        
+        current_prompt = str(self.config.get("initial_prompt", "")).strip()
+        new_prompt = f"{current_prompt}\n{terms_hint}".strip()
+        
         if previous:
-            self.config["previous_initial_prompt"] = previous
+            prev_dict = self.config.get("previous_prompts", {})
+            prev_dict[lang] = previous
+            self.config["previous_prompts"] = prev_dict
 
-        self.config["terms_hint"] = terms_hint
-        self.config["initial_prompt"] = build_initial_prompt(self.config)
+        custom_dict[lang] = new_prompt
+        self.config["custom_prompts"] = custom_dict
+        self.config["initial_prompt"] = new_prompt
+        
+        prompt_path = self._get_prompt_path(lang)
+        try:
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(new_prompt)
+        except Exception:
+            pass
+
         self.save_config()
         self.main_app.load_config_data(self.config)
-        send_notification(
-            "Click-n-speak",
-            "Initial Prompt",
-            "Initial prompt has been updated from logs.",
-        )
+        send_notification("Click-n-speak", "Initial Prompt", f"Terms appended for {lang.upper()}.")
 
     def revert_initial_prompt(self, _: rumps.MenuItem) -> None:
         """Reverts initial_prompt to the previous version if available."""
-        previous_prompt = str(self.config.get("previous_initial_prompt", "")).strip()
-        if not previous_prompt:
+        lang = get_primary_language(self.config)
+        previous_prompts = self.config.get("previous_prompts", {})
+        prev = previous_prompts.get(lang, "")
+        
+        if not prev:
             send_notification(
                 "Click-n-speak",
                 "Initial Prompt",
-                "No previous initial prompt to revert to.",
+                f"No previous initial prompt to revert to for {lang.upper()}.",
             )
             return
 
-        current_prompt = str(self.config.get("initial_prompt", "")).strip()
-        self.config["initial_prompt"] = previous_prompt
-        self.config["previous_initial_prompt"] = current_prompt
+        custom_dict = self.config.get("custom_prompts", {})
+        current = custom_dict.get(lang, "")
+        
+        custom_dict[lang] = prev
+        previous_prompts[lang] = current
+        
+        self.config["custom_prompts"] = custom_dict
+        self.config["previous_prompts"] = previous_prompts
+        self.config["initial_prompt"] = prev
+        
+        prompt_path = self._get_prompt_path(lang)
+        try:
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(prev)
+        except Exception:
+            pass
+
         self.save_config()
         self.main_app.load_config_data(self.config)
         send_notification(
             "Click-n-speak",
             "Initial Prompt",
-            "Initial prompt has been reverted to the previous version.",
+            f"Prompt reverted for {lang.upper()}.",
         )
+
+    def transcribe_audio_file(self, _: rumps.MenuItem) -> None:
+        """Opens a file selection dialog and starts file transcription."""
+        if self.main_app.is_recording or self.main_app.is_processing:
+            send_notification("Click-n-speak", "Busy", "Please wait until current transcription finishes.")
+            return
+
+        try:
+            # osascript dialog to pick a file
+            script = 'set theFile to choose file with prompt "Select Audio File" of type {"public.audio", "wav", "m4a"} \n POSIX path of theFile'
+            result = subprocess.check_output(['osascript', '-e', script])
+            file_path = result.decode('utf-8').strip()
+            
+            if file_path and os.path.exists(file_path):
+                self.main_app.start_file_transcription(file_path)
+            
+        except subprocess.CalledProcessError:
+            # User canceled the dialog
+            pass
+        except Exception as e:
+            log_error(f"Error selecting audio file: {e}")
+            send_notification("Click-n-speak", "Error", "Could not open file picker.")
 
     def save_config(self) -> None:
         """Persists current config to config.json."""

@@ -511,6 +511,74 @@ class SVoiceRecApp:
             log_exception(f"Unhandled exception in stop_recording_and_process: {e}")
             self._submit_for_main_thread(self._do_error_cleanup)
 
+    def start_file_transcription(self, file_path: str):
+        if self.is_recording or self.is_processing:
+            log_info(f"Ignoring file transcription request; already busy. is_recording={self.is_recording}, is_processing={self.is_processing}")
+            return
+            
+        self.is_processing = True
+        self._submit_for_main_thread(
+            lambda: self.menu_bar.set_status(recording=False, processing=True) if self.menu_bar else None
+        )
+        
+        send_notification("Click-n-speak", "Transcribing File", f"Processing {os.path.basename(file_path)}...")
+        
+        threading.Thread(target=self._file_transcription_worker, args=(file_path,), daemon=True).start()
+
+    def _file_transcription_worker(self, file_path: str):
+        log_info(f"File transcription worker started for {file_path}")
+        try:
+            allowed_languages = get_allowed_languages(self.config)
+            context = str(self.config.get("initial_prompt", ""))
+            
+            self._last_transcription_time = time.time()
+            
+            text = self.transcriber.transcribe_file(
+                file_path, 
+                initial_prompt=context,
+                allowed_languages=allowed_languages,
+            )
+            
+            self._last_transcription_time = time.time()
+            
+            if text:
+                log_info(f"File transcription successful, {len(text)} chars.")
+                
+                downloads_dir = os.path.expanduser("~/Downloads")
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                output_file = os.path.join(downloads_dir, f"{base_name}_transcription.md")
+                
+                try:
+                    with open(output_file, "w", encoding="utf-8") as f:
+                        f.write(f"# Transcription: {os.path.basename(file_path)}\n\n")
+                        f.write(text)
+                    log_info(f"Saved transcription to {output_file}")
+                    
+                    # Store in parts so _do_finish_cleanup saves it to phrase history
+                    self.transcribed_parts = [f"File saved to {output_file}"] 
+                    
+                    from .utils import copy_to_clipboard
+                    copy_to_clipboard(text)
+                    
+                    send_notification(
+                        "Click-n-speak", 
+                        "File Transcribed", 
+                        f"Saved: {os.path.basename(output_file)} (and copied!)"
+                    )
+                except Exception as write_err:
+                    log_error(f"Failed to write markdown file: {write_err}")
+                    send_notification("Click-n-speak", "Error", "Failed to save markdown file.")
+            else:
+                log_info("File transcription returned empty text.")
+                send_notification("Click-n-speak", "No Speech", "Could not transcribe any speech from the file.")
+                
+        except Exception as e:
+            log_exception(f"Unhandled exception in _file_transcription_worker: {e}")
+            self._submit_for_main_thread(self._do_error_cleanup)
+            return
+
+        self._submit_for_main_thread(self._do_finish_cleanup)
+
     def stop(self):
         self.stop_worker.set()
         if self.worker_thread is not None and self.worker_thread.is_alive():

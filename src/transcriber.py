@@ -52,6 +52,7 @@ def _call_mlx_transcribe(
     model_name: str,
     initial_prompt=None,
     condition_on_previous_text=True,
+    verbose=False,
     **extra_kwargs,
 ):
     """Call mlx_whisper.transcribe; fall back without extra_kwargs if API does not support them."""
@@ -60,7 +61,7 @@ def _call_mlx_transcribe(
         "initial_prompt": initial_prompt,
         "condition_on_previous_text": condition_on_previous_text,
         "task": "transcribe",
-        "verbose": False,
+        "verbose": verbose,
     }
     try:
         return mlx_whisper.transcribe(audio_data, **base_kw, **extra_kwargs)
@@ -174,8 +175,10 @@ class WhisperTranscriber:
             whisper_kw["no_speech_threshold"] = 0.5
             whisper_kw["compression_ratio_threshold"] = 2.0
 
-        # Tell Whisper the primary language so when uncertain it uses it; we still filter by detected language below
-        if allowed_languages:
+        # Only force the Whisper language token if there is exactly ONE allowed language.
+        # If the user selected additional languages, we must let Whisper auto-detect 
+        # (the initial_prompt with multiple language hints will guide it).
+        if allowed_languages and len(allowed_languages) == 1:
             whisper_kw["language"] = allowed_languages[0]
 
         log_info(
@@ -306,6 +309,39 @@ class WhisperTranscriber:
             log_exception(f"Transcription error with model {self.model_name}: {e}")
             return ""
 
+    def transcribe_file(self, file_path: str, initial_prompt=None, allowed_languages=None):
+        """Transcribe a full audio file directly."""
+        if not file_path:
+            return ""
+
+        whisper_kw: dict = {}
+        if allowed_languages and len(allowed_languages) == 1:
+            whisper_kw["language"] = allowed_languages[0]
+
+        log_info(
+            f"Transcribing audio file with Whisper: '{file_path}', "
+            f"model={self.model_name}, allowed_languages={allowed_languages}"
+        )
+        start_time = time.time()
+        try:
+            result = _call_mlx_transcribe(
+                file_path,
+                model_name=self.model_name,
+                initial_prompt=initial_prompt,
+                condition_on_previous_text=False,
+                verbose=True,
+                **whisper_kw,
+            )
+            
+            end_time = time.time()
+            log_info(f"File transcription finished in {end_time - start_time:.2f} seconds.")
+
+            text = result.get("text", "").strip()
+            return text.strip(" .…")
+        except Exception as e:
+            log_exception(f"File transcription error with model {self.model_name}: {e}")
+            return ""
+
 
 class TranscriberProcessWrapper:
     """Runs WhisperTranscriber in a dedicated child process to avoid blocking the main UI loop with the GIL."""
@@ -348,6 +384,17 @@ class TranscriberProcessWrapper:
                         "text": text,
                         "is_final_chunk": cmd.get("is_final_chunk", False)
                     })
+                elif action == "transcribe_file":
+                    text = transcriber.transcribe_file(
+                        cmd.get("file_path"),
+                        initial_prompt=cmd.get("initial_prompt"),
+                        allowed_languages=cmd.get("allowed_languages")
+                    )
+                    self.output_queue.put({
+                        "type": "transcription",
+                        "text": text,
+                        "is_final_chunk": True
+                    })
                 elif action == "update_model":
                     transcriber = WhisperTranscriber(model_name=cmd["model_name"])
             except Exception as e:
@@ -359,6 +406,11 @@ class TranscriberProcessWrapper:
         
     def warmup(self, language=None):
         self.input_queue.put({"action": "warmup", "language": language})
+        
+    def update_model(self, model_name: str) -> None:
+        """Tell the child process to load a new model."""
+        self.model_name = model_name
+        self.input_queue.put({"action": "update_model", "model_name": model_name})
         
     def _restart_process(self) -> None:
         """Kill the hung child process and start a fresh one."""
@@ -413,5 +465,38 @@ class TranscriberProcessWrapper:
                     log_error(f"Transcriber process error: {res['message']}\n{res.get('trace')}")
                     return ""
                 # Ignore warmup_done or other messages if they accidentally arrive during transcribe
+            except queue.Empty:
+                continue
+
+    def transcribe_file(self, file_path, initial_prompt=None, allowed_languages=None):
+        """Blocking call to transcribe the given audio file using the child process.
+        
+        Uses a very long timeout (3600s) since files can be arbitrarily large.
+        """
+        self.input_queue.put({
+            "action": "transcribe_file",
+            "file_path": file_path,
+            "initial_prompt": initial_prompt,
+            "allowed_languages": allowed_languages,
+        })
+        # Wait for result with a hard timeout of 1 hour to prevent infinite file processing hangs
+        deadline = time.time() + 3600
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                log_error(
+                    "Transcriber process did not respond within 3600s for audio file. "
+                    "Killing and restarting process."
+                )
+                self._restart_process()
+                return ""
+            try:
+                poll_timeout = min(0.1, remaining)
+                res = self.output_queue.get(timeout=poll_timeout)
+                if res["type"] == "transcription":
+                    return res["text"]
+                elif res["type"] == "error":
+                    log_error(f"Transcriber process error: {res['message']}\n{res.get('trace')}")
+                    return ""
             except queue.Empty:
                 continue
