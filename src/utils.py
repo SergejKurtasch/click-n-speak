@@ -328,7 +328,9 @@ def copy_to_clipboard(text):
         log_error(f"Failed to copy to clipboard: {e}")
 
 
-def play_sound(sound_name: str | None = None) -> None:
+from typing import Optional
+
+def play_sound(sound_name: Optional[str] = None) -> None:
     """Plays a system sound (non-blocking). Uses SOUND_RECORDING_START if no path given."""
     path = sound_name if sound_name is not None else SOUND_RECORDING_START
     try:

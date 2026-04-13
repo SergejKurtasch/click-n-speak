@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+from typing import Optional
 
 from .utils import log_error, log_info, send_notification
 
@@ -35,7 +36,7 @@ def _parse_version(version_str: str) -> tuple[int, ...]:
     return tuple(parts) if parts else (0,)
 
 
-def get_current_version() -> str | None:
+def get_current_version() -> Optional[str]:
     """
     Return current app version.
     When run from .app: read from Info.plist. Otherwise read from pyproject.toml.
@@ -70,7 +71,7 @@ def get_current_version() -> str | None:
     return None
 
 
-def fetch_latest_release() -> dict | None:
+def fetch_latest_release() -> Optional[dict]:
     """Fetch latest release from GitHub API. Returns None on error."""
     try:
         req = Request(RELEASES_API_URL, headers={"Accept": "application/vnd.github.v3+json"})

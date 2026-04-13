@@ -1,45 +1,53 @@
 import time
 
-from pynput.keyboard import Controller
+from pynput.keyboard import Controller, Key
 
-from .utils import copy_to_clipboard, is_accessibility_trusted, log_error, log_info, send_notification
-
+from .utils import is_accessibility_trusted, log_error, log_info, send_notification
 
 def inject_text(text):
     """
-    Injects text directly into the active application using pynput.
-    If it fails (likely due to permissions), copies to clipboard as a fallback.
+    Injects text directly into the active application using pynput by typing
+    character by character with a micro-delay to prevent dropped characters.
     """
     if not text:
         return
 
     # Check for accessibility permissions
     if not is_accessibility_trusted():
-        log_error("Accessibility permissions NOT granted. Skipping direct injection.")
-        copy_to_clipboard(text)
+        log_error("Accessibility permissions NOT granted. Cannot type text.")
         send_notification(
             "Click-n-speak",
             "Permissions Required",
-            "Please allow Click-n-speak in System Settings -> Privacy -> Accessibility to enable text injection.",
+            "Please allow Click-n-speak in System Settings -> Privacy -> Accessibility to enable text typing.",
         )
         return
 
     keyboard = Controller()
 
     try:
-        # Give the UI a tiny bit of time to refocus if needed
-        time.sleep(0.1)
+        # Give the UI a bit more time to refocus if needed
+        time.sleep(0.3)
 
-        # Attempt to type the text directly
-        log_info(f"Attempting to inject text: {text[:50]}...")
-        keyboard.type(text)
-        log_info("Text injection successful.")
+        # Release modifiers just in case they are virtually stuck from the hotkey
+        # Note: Do not release shift as the user expects capitalization if they type it?
+        # Releasing all modifiers to ensure clean typing state
+        for k in (Key.alt, Key.cmd, Key.shift, Key.ctrl):
+            keyboard.release(k)
+
+        log_info(f"Attempting to inject text (typing mode): {text[:50]}...")
+        
+        # Type text character by character with a small delay
+        for char in text:
+            keyboard.type(char)
+            # 2ms delay is enough to avoid UI buffer skips in most IDEs/Browsers
+            time.sleep(0.002) 
+        
+        log_info("Text injection successful (via keyboard typing).")
 
     except Exception as e:
-        log_error(f"Direct injection failed: {e}. Falling back to clipboard.")
-        copy_to_clipboard(text)
+        log_error(f"Direct injection failed: {e}")
         send_notification(
             "Click-n-speak",
             "Injection Failed",
-            "Could not inject text. Check Accessibility permissions or use clipboard.",
+            "Could not type text. Check Accessibility permissions.",
         )

@@ -182,6 +182,16 @@ class AudioRecorder:
             play_sound(SOUND_RECORDING_START)
             time.sleep(0.2)  # Small buffer to let the beep finish mostly
 
+            # FORCE CLOSE any dangling stream before creating a new one
+            if self.stream is not None:
+                log_info("Found dangling audio stream, forcing cleanup before start...")
+                try:
+                    self.stream.abort()
+                    self.stream.close()
+                except Exception:
+                    pass
+                self.stream = None
+
             self.stream = sd.InputStream(
                 device=self.device_id,
                 samplerate=self.sample_rate,
@@ -207,6 +217,7 @@ class AudioRecorder:
         self.recording = False
         if self.stream:
             self._stop_stream_with_timeout(timeout=3.0)
+            self.stream = None
 
         play_sound(SOUND_RECORDING_STOP)
 
@@ -236,7 +247,9 @@ class AudioRecorder:
         """
         def _do_stop():
             try:
-                self.stream.stop()
+                # Use abort() instead of stop() to prevent macOS PortAudio deadlock 
+                # where waiting for pending buffers hangs indefinitely.
+                self.stream.abort()
                 self.stream.close()
             except Exception as e:
                 log_error(f"Error closing audio stream: {e}")

@@ -2,8 +2,23 @@ import os
 import queue
 import subprocess
 import sys
+import threading
 
 import rumps
+
+# ---------------------------------------------------------------------------
+# Whisper model registry — ordered fastest → most accurate
+# ---------------------------------------------------------------------------
+WHISPER_MODELS = [
+    ("Turbo",    "mlx-community/whisper-large-v3-turbo"),
+    ("Large v3", "mlx-community/whisper-large-v3-mlx"),
+    ("Medium",   "mlx-community/whisper-medium-mlx"),
+    ("Small",    "mlx-community/whisper-small-mlx"),
+    ("Base",     "mlx-community/whisper-base-mlx"),
+]
+
+_ICON_CACHED   = "\U0001f7e2"   # 🟢  — model is on disk, instant switch
+_ICON_DOWNLOAD = "\u2b07\ufe0f"  # ⬇️  — model needs to download
 
 from .log_analyzer import generate_terms_hint_from_history
 from .phrase_history import get_last_phrases
@@ -39,6 +54,8 @@ class ClickNSpeakApp(rumps.App):
         # Build Menu
         self.setup_menu()
         self._migrate_old_prompt()
+        # Asynchronously check which Whisper models are already cached
+        self._start_model_cache_check()
 
     def _migrate_old_prompt(self):
         """Migrates a single initial_prompt.txt into custom_prompts mapping on first launch."""
@@ -119,7 +136,7 @@ class ClickNSpeakApp(rumps.App):
                     self.save_config()
                     self.main_app.load_config_data(self.config)
                     log_info(f"Initial prompt updated manually for {lang.upper()}.")
-                    send_notification("Click-n-speak", "Initial Prompt", f"Manual edit saved for {lang.upper()}!")
+                    self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} обновлена!")
         except Exception as e:
             log_error(f"Error checking prompt file: {e}")
 
@@ -135,11 +152,7 @@ class ClickNSpeakApp(rumps.App):
                     log_info("Accessibility permission detected — restarting hotkey listener.")
                     try:
                         self.main_app.hotkey_handler.restart()
-                        send_notification(
-                            "Click-n-speak",
-                            "Hotkeys activated",
-                            "Accessibility granted. Hotkeys are now active.",
-                        )
+                        self.main_app.notify("Доступ разрешен", "Горячие клавиши активированы.")
                     except Exception as e:
                         log_error(f"Failed to restart hotkey listener: {e}")
         except Exception as e:
@@ -159,11 +172,7 @@ class ClickNSpeakApp(rumps.App):
         if not self._accessibility_granted:
             open_accessibility_settings()
         else:
-            send_notification(
-                "Click-n-speak",
-                "Accessibility",
-                "Accessibility permissions are already granted.",
-            )
+            self.main_app.notify("Доступ", "Права доступа уже предоставлены.")
 
     def setup_menu(self):
         # Accessibility status at the top
@@ -173,13 +182,14 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(None)  # Separator
 
         # Model Selection
-        models = ["base", "small", "medium", "large"]
-        current_model = self.config.get("model_name", "").lower()
+        current_model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
 
         self.menu.add("Model")
-        for m in models:
-            item = rumps.MenuItem(m.capitalize(), callback=self.change_model)
-            if m in current_model:
+        for label, model_id in WHISPER_MODELS:
+            # Start with download icon as placeholder; cache check will update it
+            title = f"{_ICON_DOWNLOAD} {label}"
+            item = rumps.MenuItem(title, callback=self.change_model)
+            if model_id == current_model:
                 item.state = 1
             self.menu["Model"].add(item)
 
@@ -248,8 +258,15 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(rumps.MenuItem("Revert Initial Prompt", callback=self.revert_initial_prompt))
         
         self.menu.add(None) # Separator
+
+        # AI Editor toggle
+        ai_editor_item = rumps.MenuItem("✦ AI Editor (Punctuation & Cleanup)", callback=self._toggle_ai_editor)
+        ai_editor_item.state = 1 if self.config.get("ai_editor_enabled", False) else 0
+        self.menu.add(ai_editor_item)
+        self.menu.add(rumps.MenuItem("  ↳ Download AI Editor Model", callback=self._download_ai_model))
+
         self.menu.add(rumps.MenuItem("Transcribe Audio File...", callback=self.transcribe_audio_file))
-        
+
         self.menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
         self.menu.add(rumps.MenuItem("Check for Updates", callback=self.check_for_updates))
 
@@ -260,21 +277,71 @@ class ClickNSpeakApp(rumps.App):
 
         self.menu.add(None)
 
-    def change_model(self, sender):
-        model_map = {
-            "Base": "mlx-community/whisper-base-mlx",
-            "Small": "mlx-community/whisper-small-mlx",
-            "Medium": "mlx-community/whisper-medium-mlx",
-            "Large": "mlx-community/whisper-large-v3-mlx",
-        }
-        new_model = model_map.get(sender.title)
-        if not new_model:
+    # ------------------------------------------------------------------
+    # Whisper model cache check
+    # ------------------------------------------------------------------
+
+    def _start_model_cache_check(self) -> None:
+        """Start a daemon thread that checks HuggingFace cache for all Whisper models."""
+        t = threading.Thread(target=self._update_model_cache_indicators, daemon=True)
+        t.start()
+
+    def _update_model_cache_indicators(self) -> None:
+        """Check each Whisper model against the local HF cache and update menu icons.
+
+        Runs in a background thread; schedules UI updates on the main thread.
+        """
+        try:
+            from huggingface_hub import snapshot_download  # type: ignore
+        except ImportError:
+            log_error("huggingface_hub not installed — cannot check model cache status.")
             return
 
-        log_info(f"Switching model to {new_model}")
-        self.main_app.update_config({"model_name": new_model})
+        for label, model_id in WHISPER_MODELS:
+            try:
+                snapshot_download(repo_id=model_id, local_files_only=True)
+                icon = _ICON_CACHED
+            except Exception:
+                icon = _ICON_DOWNLOAD
 
-        # Update UI: uncheck others in the "Model" submenu
+            new_title = f"{icon} {label}"
+
+            def _apply(title: str = new_title, lbl: str = label) -> None:
+                try:
+                    for item in self.menu["Model"].values():
+                        # Strip any existing icon prefix to compare base labels
+                        base = item.title
+                        for pfx in (_ICON_CACHED, _ICON_DOWNLOAD):
+                            if base.startswith(pfx):
+                                base = base[len(pfx):].lstrip()
+                        if base == lbl:
+                            item.title = title
+                            break
+                except Exception as exc:
+                    log_error(f"Model cache indicator update failed for '{lbl}': {exc}")
+
+            # Post to main-thread queue so rumps UI stays thread-safe
+            if hasattr(self.main_app, "_main_thread_queue"):
+                self.main_app._main_thread_queue.put((_apply, [], {}))
+            else:
+                _apply()
+
+    def change_model(self, sender):
+        # Strip cache-status icon prefix (e.g. "🟢 Turbo" → "Turbo")
+        clean_label = sender.title
+        for pfx in (_ICON_CACHED, _ICON_DOWNLOAD):
+            if clean_label.startswith(pfx):
+                clean_label = clean_label[len(pfx):].lstrip()
+
+        model_id = {lbl: mid for lbl, mid in WHISPER_MODELS}.get(clean_label)
+        if not model_id:
+            log_error(f"change_model: unknown label '{clean_label}'")
+            return
+
+        log_info(f"Switching model to {model_id}")
+        self.main_app.update_config({"model_name": model_id})
+
+        # Update UI: uncheck all, then check the selected item
         for item in self.menu["Model"].values():
             if hasattr(item, "state"):
                 item.state = 0  # type: ignore
@@ -414,12 +481,12 @@ class ClickNSpeakApp(rumps.App):
             subprocess.run(["open", str(log_path)], check=True)
         else:
             log_info("Log file not created yet (no logs written).")
-            send_notification("Click-n-speak", "Log file", "Log file not created yet. It will appear after the app logs something.")
+            self.main_app.notify("Лог-файл", "Файл лога еще не создан. Он появится после первой записи.")
 
     def reload_config(self, _: rumps.MenuItem) -> None:
         """Reloads config from disk and refreshes the menu."""
         self.main_app.load_config(str(get_config_path()))
-        send_notification("Click-n-speak", "Config Reloaded", "New settings applied.")
+        self.main_app.notify("Конфигурация", "Настройки успешно перезагружены.")
         # Re-setup menu (simplest way to update states)
         self.menu.clear()
         self.setup_menu()
@@ -443,11 +510,7 @@ class ClickNSpeakApp(rumps.App):
         """Builds a new initial prompt from recent phrase history and applies it."""
         terms_hint = generate_terms_hint_from_history()
         if not terms_hint:
-            send_notification(
-                "Click-n-speak",
-                "Initial Prompt",
-                "Could not generate terms from history. Speak more with technical terms and try again.",
-            )
+            self.main_app.notify("Настройки", "Не удалось сгенерировать подсказки из истории.")
             return
 
         lang = get_primary_language(self.config)
@@ -475,7 +538,7 @@ class ClickNSpeakApp(rumps.App):
 
         self.save_config()
         self.main_app.load_config_data(self.config)
-        send_notification("Click-n-speak", "Initial Prompt", f"Terms appended for {lang.upper()}.")
+        self.main_app.notify("Настройки", f"Термины добавлены для {lang.upper()}.")
 
     def revert_initial_prompt(self, _: rumps.MenuItem) -> None:
         """Reverts initial_prompt to the previous version if available."""
@@ -484,11 +547,7 @@ class ClickNSpeakApp(rumps.App):
         prev = previous_prompts.get(lang, "")
         
         if not prev:
-            send_notification(
-                "Click-n-speak",
-                "Initial Prompt",
-                f"No previous initial prompt to revert to for {lang.upper()}.",
-            )
+            self.main_app.notify("Настройки", f"Нет предыдущей версии подсказки для {lang.upper()}.")
             return
 
         custom_dict = self.config.get("custom_prompts", {})
@@ -510,16 +569,12 @@ class ClickNSpeakApp(rumps.App):
 
         self.save_config()
         self.main_app.load_config_data(self.config)
-        send_notification(
-            "Click-n-speak",
-            "Initial Prompt",
-            f"Prompt reverted for {lang.upper()}.",
-        )
+        self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} восстановлена.")
 
     def transcribe_audio_file(self, _: rumps.MenuItem) -> None:
         """Opens a file selection dialog and starts file transcription."""
         if self.main_app.is_recording or self.main_app.is_processing:
-            send_notification("Click-n-speak", "Busy", "Please wait until current transcription finishes.")
+            self.main_app.notify("Занято", "Пожалуйста, дождитесь окончания текущего распознавания.")
             return
 
         try:
@@ -536,7 +591,7 @@ class ClickNSpeakApp(rumps.App):
             pass
         except Exception as e:
             log_error(f"Error selecting audio file: {e}")
-            send_notification("Click-n-speak", "Error", "Could not open file picker.")
+            self.main_app.notify("Ошибка", "Не удалось открыть выбор файла.")
 
     def save_config(self) -> None:
         """Persists current config to config.json."""
@@ -546,7 +601,42 @@ class ClickNSpeakApp(rumps.App):
         """Check GitHub for a newer release; notify and open release page if found."""
         if check_for_update(open_url_if_new=True):
             return
-        send_notification("Click-n-speak", "No updates", "You are running the latest version.")
+        self.main_app.notify("Обновления", "У вас установлена последняя версия.")
+
+    def _toggle_ai_editor(self, sender) -> None:
+        """Toggle the AI Editor on/off and persist the setting."""
+        new_state = not (sender.state == 1)
+        sender.state = 1 if new_state else 0
+        self.main_app.update_config({"ai_editor_enabled": new_state})
+        log_info(f"AI Editor {'enabled' if new_state else 'disabled'}.")
+        if new_state:
+            self.main_app.notify("AI Editor", "Загрузка модели... Вы получите уведомление о готовности.")
+        else:
+            self.main_app.notify("AI Editor", "Умная очистка отключена.")
+
+    def _download_ai_model(self, _) -> None:
+        """Open a new Terminal window and run the download script with visible progress."""
+        script_path = str(get_config_path().parent / "scripts" / "download_ai_model.py")
+        venv_python = str(get_config_path().parent / "venv" / "bin" / "python")
+        python_bin = venv_python if os.path.exists(venv_python) else sys.executable
+
+        import shlex
+        q_python = shlex.quote(python_bin)
+        q_script = shlex.quote(script_path)
+        
+        # AppleScript: open a new Terminal tab and run the download script
+        applescript = (
+            'tell application "Terminal"\n'
+            "    activate\n"
+            f'    do script "{q_python} {q_script}"\n'
+            "end tell"
+        )
+        try:
+            subprocess.run(["osascript", "-e", applescript], check=False)
+            self.main_app.notify("AI Editor", "Загрузка начата в Терминале. Перезапустите приложение после завершения.")
+        except Exception as e:
+            log_error(f"Failed to open Terminal for download: {e}")
+            self.main_app.notify("AI Editor", "Запустите вручную: python scripts/download_ai_model.py")
 
     def toggle_autostart(self, sender):
         current_state = sender.state == 1
@@ -568,11 +658,11 @@ class ClickNSpeakApp(rumps.App):
             if new_state:
                 cmd = f'tell application "System Events" to make login item at end with properties {{path:"{safe_path}", name:"{safe_name}", hidden:false}}'
                 subprocess.run(["osascript", "-e", cmd], check=True)
-                send_notification(app_name, "Autostart Enabled", "The app will launch at login.")
+                self.main_app.notify("Автозапуск", "Приложение будет запускаться при входе в систему.")
             else:
                 cmd = f'tell application "System Events" to delete login item "{safe_name}"'
                 subprocess.run(["osascript", "-e", cmd], check=True)
-                send_notification(app_name, "Autostart Disabled", "The app will no longer launch at login.")
+                self.main_app.notify("Автозапуск", "Автозапуск отключен.")
 
             sender.state = 1 if new_state else 0
             self.config["autostart"] = new_state
@@ -580,7 +670,7 @@ class ClickNSpeakApp(rumps.App):
 
         except Exception as e:
             log_error(f"Error toggling autostart: {e}")
-            send_notification(app_name, "Error", "Could not update login items.")
+            self.main_app.notify("Ошибка", "Не удалось обновить объекты входа.")
 
     def set_status(self, recording=False, processing=False):
         # Make the state highly visible in the menu bar; language from primary setting.

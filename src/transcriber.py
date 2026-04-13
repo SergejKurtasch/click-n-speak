@@ -397,6 +397,8 @@ class TranscriberProcessWrapper:
                     })
                 elif action == "update_model":
                     transcriber = WhisperTranscriber(model_name=cmd["model_name"])
+            except KeyboardInterrupt:
+                break
             except Exception as e:
                 self.output_queue.put({"type": "error", "message": str(e), "trace": traceback.format_exc()})
 

@@ -9,6 +9,7 @@ from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
+from .ai_editor import AiEditor, DEFAULT_MODEL_NAME
 from .transcriber import TranscriberProcessWrapper
 from .utils import (
     get_allowed_languages,
@@ -44,6 +45,11 @@ class SVoiceRecApp:
         self.transcriber = TranscriberProcessWrapper(
             model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
         )
+        # AI Editor: optional LLM post-processing for punctuation and cleanup
+        self.ai_editor: Optional[AiEditor] = None
+        self._ai_editor_loading = False
+        if self.config.get("ai_editor_enabled", False):
+            self._init_ai_editor()
         self.hotkey_handler = HotkeyHandler(
             hotkey_str=self.config.get("hotkey", "<alt>+<space>"), on_trigger=self.toggle_recording
         )
@@ -57,6 +63,8 @@ class SVoiceRecApp:
         self.transcribed_parts = []
         self.worker_thread = None  # type: threading.Thread | None
         self.stop_worker = threading.Event()
+        # Guards text injection: cleared on timeout/session-end to prevent stale injections
+        self._inject_allowed = threading.Event()
 
         # Model warm-up state (cold-start optimization after app rebuild/restart)
         self._model_warming = False
@@ -75,6 +83,50 @@ class SVoiceRecApp:
         self._last_transcription_time = time.time()  # Initialized to now (warmup counts)
         self._keep_alive_timer: Optional[threading.Timer] = None
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
+        self._preview_panel = None  # lazy-init on first use
+
+    def _ensure_preview_panel(self):
+        if self._preview_panel is None:
+            from .preview_panel import TranscriptionPreviewPanel
+            self._preview_panel = TranscriptionPreviewPanel()
+
+    def _init_ai_editor(self) -> None:
+        """Create and load the AiEditor in a background thread (non-blocking)."""
+        if self._ai_editor_loading:
+            return
+        model_name = self.config.get("ai_editor_model", DEFAULT_MODEL_NAME)
+        self.ai_editor = AiEditor(model_name=model_name)
+        self._ai_editor_loading = True
+        threading.Thread(target=self._ai_editor_load_worker, daemon=True).start()
+
+    def _ai_editor_load_worker(self) -> None:
+        """Background worker: load the LLM model and notify when ready."""
+        try:
+            if self.ai_editor is None:
+                return
+
+            # Check cache BEFORE trying to load — prevents silent multi-hour downloads
+            if not self.ai_editor.is_model_cached():
+                model_name = self.ai_editor.model_name
+                log_error(
+                    f"AiEditor: model '{model_name}' is not cached locally. "
+                    "Download it first by running in your terminal:\n"
+                    "  python scripts/download_ai_model.py"
+                )
+                self.notify("AI Editor: Модель не найдена", "Запустите скрипт загрузки и перезапустите приложение.")
+                return
+
+            self.ai_editor.load()
+            if self.ai_editor.is_ready():
+                self.notify("AI Editor Готов", "Умная пунктуация и очистка текста активированы.")
+                log_info("AiEditor loaded and ready.")
+            else:
+                log_error("AiEditor failed to load — editor will be skipped.")
+                self.notify("AI Editor: Ошибка загрузки", "Не удалось загрузить модель. Проверьте логи.")
+        except Exception as e:
+            log_exception(f"AiEditor background load failed: {e}")
+        finally:
+            self._ai_editor_loading = False
 
     def start_model_warmup(self) -> None:
         """Start a background warm-up to reduce first-use latency."""
@@ -83,7 +135,8 @@ class SVoiceRecApp:
 
         self._model_warming = True
         s = get_ui_strings(get_primary_language(self.config))
-        send_notification("Click-n-speak", s["preparing_title"], s["preparing_body"])
+        self._ensure_preview_panel()
+        self._preview_panel.show(s["preparing_title"], self._main_thread_queue)
         self._model_warmup_thread = threading.Thread(
             target=self._model_warmup_worker, daemon=True
         )
@@ -108,11 +161,15 @@ class SVoiceRecApp:
                     pass
             log_info("Whisper warm-up finished.")
             s = get_ui_strings(get_primary_language(self.config))
-            send_notification("Click-n-speak", s["model_ready_title"], s["model_ready_body"])
+            if self._preview_panel:
+                self._preview_panel.update_status(s["model_ready_title"], self._main_thread_queue)
+                self._preview_panel.hide(self._main_thread_queue, delay=1.5)
         except Exception as e:
             log_exception(f"Whisper warm-up failed: {e}")
             s = get_ui_strings(get_primary_language(self.config))
-            send_notification("Click-n-speak", s["warmup_failed_title"], s["warmup_failed_body"])
+            if self._preview_panel:
+                self._preview_panel.update_status(s["warmup_failed_title"], self._main_thread_queue)
+                self._preview_panel.hide(self._main_thread_queue, delay=2.0)
         finally:
             self.model_ready_event.set()
             self._model_warming = False
@@ -136,7 +193,7 @@ class SVoiceRecApp:
         if hasattr(self, "recorder"):
             self.update_recorder_settings()
         if hasattr(self, "transcriber"):
-            model = self.config.get("model_name", "mlx-community/whisper-large-v3-mlx")
+            model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
             if self.transcriber.model_name != model:
                 self.update_transcriber(model)
 
@@ -145,6 +202,15 @@ class SVoiceRecApp:
         self.config.update(updates)
         self.load_config_data(self.config)
         save_config_to_disk(self.config)
+        # React to ai_editor_enabled toggle from the menu
+        if "ai_editor_enabled" in updates:
+            if updates["ai_editor_enabled"]:
+                if self.ai_editor is None or not self.ai_editor.is_ready():
+                    self._init_ai_editor()
+            else:
+                self.ai_editor = None
+                self._ai_editor_loading = False
+                log_info("AiEditor disabled.")
 
     def toggle_recording(self):
         """Hotkey callback: toggles recording state with debounce and safety logging."""
@@ -173,7 +239,9 @@ class SVoiceRecApp:
             ):
                 log_info("Ignoring hotkey: model warm-up in progress.")
                 s = get_ui_strings(get_primary_language(self.config))
-                send_notification("Click-n-speak", s["preparing_wait_title"], s["preparing_wait_body"])
+                self._ensure_preview_panel()
+                self._preview_panel.show(s["preparing_wait_title"], self._main_thread_queue)
+                self._preview_panel.hide(self._main_thread_queue, delay=2.0)
                 return
 
             if not self.is_recording:
@@ -195,6 +263,15 @@ class SVoiceRecApp:
     def _submit_for_main_thread(self, fn, *args, **kwargs) -> None:
         """Schedule fn(*args, **kwargs) to run on the main thread (drained by menu bar timer)."""
         self._main_thread_queue.put((fn, args, kwargs))
+
+    def notify(self, title: str, text: str = "", delay: float = 2.0) -> None:
+        """Unified notification method that routes to HUD."""
+        self._ensure_preview_panel()
+        if self._preview_panel:
+            self._preview_panel.show(title, self._main_thread_queue)
+            if text:
+                self._preview_panel.update_text(text, self._main_thread_queue)
+            self._preview_panel.hide(self._main_thread_queue, delay=delay)
 
     def _do_finish_cleanup(self) -> None:
         """Run on main thread after worker has finished: clear status, save phrase, notify."""
@@ -221,11 +298,16 @@ class SVoiceRecApp:
                 except Exception as e:
                     log_error(f"Failed to refresh Last 5 phrases submenu: {e}")
         s = get_ui_strings(get_primary_language(self.config))
-        send_notification("Click-n-speak", s["ready_title"], s["ready_body"])
+        if self._preview_panel:
+            self._preview_panel.update_status(s["ready_title"], self._main_thread_queue)
+        self._inject_allowed.clear()  # Session over; no further injections
         log_info("Finish cleanup done. Ready for next recording session.")
 
     def _do_error_cleanup(self) -> None:
         """Run on main thread on stop_recording error: clear status, notify."""
+        if self._preview_panel:
+            self._preview_panel.update_status("Ошибка распознавания", self._main_thread_queue)
+            self._preview_panel.hide(self._main_thread_queue, delay=2.0)
         self.is_processing = False
         mb = self.menu_bar
         if mb is not None:
@@ -233,11 +315,6 @@ class SVoiceRecApp:
                 mb.set_status(recording=False, processing=False)
             except Exception as e:
                 log_error(f"Failed to set menu bar status: {e}")
-        send_notification(
-            "Click-n-speak",
-            "Error",
-            "An error occurred while finishing transcription. See log for details.",
-        )
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
@@ -261,11 +338,8 @@ class SVoiceRecApp:
         if self.worker_thread is not None and self.worker_thread.is_alive():
             log_info("Previous chunk worker still running; cannot start new recording.")
             s = get_ui_strings(get_primary_language(self.config))
-            send_notification(
-                "Click-n-speak",
-                s["still_working_title"],
-                s["still_working_body"],
-            )
+            if self._preview_panel:
+                self._preview_panel.update_status(s["still_working_title"], self._main_thread_queue)
             return
         log_info("Starting recording...")
         self.is_recording = True
@@ -274,6 +348,7 @@ class SVoiceRecApp:
         )
         self.transcribed_parts = []
         self.stop_worker.clear()
+        self._inject_allowed.set()   # Allow injection for this recording session
 
         # Clear the queue just in case
         cleared = 0
@@ -293,7 +368,8 @@ class SVoiceRecApp:
             self.worker_thread.start()
 
         s = get_ui_strings(get_primary_language(self.config))
-        send_notification("Click-n-speak", s["recording_title"], s["recording_body"])
+        self._ensure_preview_panel()
+        self._preview_panel.show(s["recording_title"], self._main_thread_queue)
 
         try:
             self.recorder.start(chunk_callback=self.on_chunk_received)
@@ -313,11 +389,7 @@ class SVoiceRecApp:
                 if self.menu_bar
                 else None
             )
-            send_notification(
-                "Click-n-speak",
-                "Error",
-                "Could not start recording. See log for details.",
-            )
+            self.notify("Ошибка", "Не удалось начать запись. Проверьте логи.")
 
     def on_chunk_received(self, audio_data):
         if self.is_recording:
@@ -366,18 +438,21 @@ class SVoiceRecApp:
                 log_info("Skipping non-final chunk transcription (stop requested).")
                 return
 
-            # Determine initial prompt from previously transcribed text (limit context to prevent drift)
+            # Prepend punctuation instructions to ensure Whisper adds dots/commas
+            instruction = "Расставляй знаки препинания. Пиши с заглавной буквы. "
             if self.transcribed_parts:
                 full_context = " ".join(self.transcribed_parts)
-                # Use string methods to avoid indexing issues with some linters
                 if len(full_context) > 200:
-                    context = full_context[-200:]  # type: ignore
+                    context = instruction + full_context[-200:]
                 else:
-                    context = full_context
+                    context = instruction + full_context
             else:
-                # Add a bilingual default prompt to prevent Whisper Large-v3 from auto-translating mixed languages
-                default_prompt = "Текст содержит русские и английские слова. Mixed Russian and English terminology: API, bug, feature, survival."
-                context = str(self.config.get("initial_prompt", "")) or default_prompt
+                default_prompt = (
+                    "Текст содержит русские и английские слова. "
+                    "Mixed Russian and English terminology: API, bug, feature, survival."
+                )
+                user_prompt = str(self.config.get("initial_prompt", ""))
+                context = instruction + (user_prompt or default_prompt)
 
             allowed_languages = get_allowed_languages(self.config)
             condition_on_previous_text = self.config.get(
@@ -405,13 +480,63 @@ class SVoiceRecApp:
             self._last_transcription_time = time.time()
 
             if text:
-                log_info(f"Partial Transcription: {text}")
+                log_info(f"Partial Transcription (raw): {text}")
+                # --- AI Editor post-processing (optional) ---
+                # IMPORTANT: only run on the final chunk.
+                # Whisper runs in a subprocess; Qwen runs in the main process.
+                # Both use Metal GPU via MLX. Running them concurrently causes
+                # a Metal command-buffer assertion failure (abort/segfault).
+                if (
+                    is_final_chunk
+                    and self.ai_editor is not None
+                    and self.ai_editor.is_ready()
+                    and self.config.get("ai_editor_enabled", False)
+                ):
+                    # Pre-filter hallucinations before calling LLM
+                    if self.ai_editor.is_hallucination(text):
+                        log_info("AiEditor: skipping refinement due to hallucination filter.")
+                        text = ""
+                    else:
+                        refined = self.ai_editor.refine(text)
+                        if refined and refined != text:
+                            log_info(f"AiEditor refined: '{text}' → '{refined}'")
+                        text = refined if refined else text
+                # -------------------------------------------
                 self.transcribed_parts.append(text)
                 # Keep parts manageable
                 if len(self.transcribed_parts) > 10:
                     self.transcribed_parts.pop(0)
-                # Inject partial text immediately
-                inject_text(text + " ")
+                # ── Injection strategy: batch-on-final ─────────────────────────────
+                # Injecting each chunk immediately creates a multi-second gap between
+                # injections, during which the cursor can drift (focus changes, app
+                # auto-formatting, etc.), causing the next chunk to land at the wrong
+                # position ("jumping cursor" bug).
+                #
+                # Fix: accumulate all chunks silently; inject the complete joined text
+                # in a single atomic operation only when the final chunk is ready.
+                # The _inject_allowed flag prevents stale injections after a timeout.
+                if self._inject_allowed.is_set():
+                    if is_final_chunk:
+                        full_text = " ".join(self.transcribed_parts).strip()
+                        if full_text:
+                            inject_text(full_text + " ")
+                        if self._preview_panel:
+                            self._preview_panel.hide(self._main_thread_queue, delay=0.8)
+                    else:
+                        accumulated = " ".join(self.transcribed_parts).strip()
+                        if self._preview_panel:
+                            self._preview_panel.update_text(accumulated, self._main_thread_queue)
+                        log_info(
+                            f"Partial chunk buffered "
+                            f"({len(self.transcribed_parts)} chunk(s) so far) "
+                            "— will inject all text on final chunk."
+                        )
+                else:
+                    if self._preview_panel:
+                        self._preview_panel.hide(self._main_thread_queue, delay=0.0)
+                    log_info(
+                        f"Injection skipped (session timed out): '{text[:60]}'"
+                    )
             else:
                 log_info("Transcriber returned empty text for this chunk.")
         except Exception as e:
@@ -429,7 +554,8 @@ class SVoiceRecApp:
             )
 
             s = get_ui_strings(get_primary_language(self.config))
-            send_notification("Click-n-speak", s["transcribing_title"], s["transcribing_body"])
+            if self._preview_panel:
+                self._preview_panel.update_status(s["transcribing_title"], self._main_thread_queue)
 
             # Stop recording and get the last (remaining) chunk
             try:
@@ -470,11 +596,8 @@ class SVoiceRecApp:
                         return
                     if self.worker_thread is not None and self.worker_thread.is_alive():
                         s = get_ui_strings(get_primary_language(self.config))
-                        send_notification(
-                            "Click-n-speak",
-                            s["still_working_title"],
-                            s["still_working_body"],
-                        )
+                        if self._preview_panel:
+                            self._preview_panel.update_status(s["still_working_title"], self._main_thread_queue)
                 except Exception as e:
                     log_exception(f"Delayed transcription notify failed: {e}")
 
@@ -487,7 +610,7 @@ class SVoiceRecApp:
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
                 try:
-                    self.worker_thread.join(timeout=15)
+                    self.worker_thread.join(timeout=30)
                 except Exception as e:
                     log_exception(f"Error while joining worker_thread: {e}")
                 waited = time.time() - wait_start
@@ -498,6 +621,9 @@ class SVoiceRecApp:
                     )
                     # Force-reset so hotkeys are not permanently blocked
                     self.is_processing = False
+                    # Prevent the still-alive worker from injecting text into
+                    # a position where the cursor has already moved.
+                    self._inject_allowed.clear()
                 else:
                     log_info(
                         f"Worker thread finished. Waited {waited:.1f}s. "
@@ -521,7 +647,7 @@ class SVoiceRecApp:
             lambda: self.menu_bar.set_status(recording=False, processing=True) if self.menu_bar else None
         )
         
-        send_notification("Click-n-speak", "Transcribing File", f"Processing {os.path.basename(file_path)}...")
+        self.notify("Распознавание файла", f"Обработка {os.path.basename(file_path)}...")
         
         threading.Thread(target=self._file_transcription_worker, args=(file_path,), daemon=True).start()
 
@@ -560,17 +686,13 @@ class SVoiceRecApp:
                     from .utils import copy_to_clipboard
                     copy_to_clipboard(text)
                     
-                    send_notification(
-                        "Click-n-speak", 
-                        "File Transcribed", 
-                        f"Saved: {os.path.basename(output_file)} (and copied!)"
-                    )
+                    self.notify("Файл распознан", f"Сохранено: {os.path.basename(output_file)} (и скопировано!)", delay=3.0)
                 except Exception as write_err:
                     log_error(f"Failed to write markdown file: {write_err}")
-                    send_notification("Click-n-speak", "Error", "Failed to save markdown file.")
+                    self.notify("Ошибка", "Не удалось сохранить файл.")
             else:
                 log_info("File transcription returned empty text.")
-                send_notification("Click-n-speak", "No Speech", "Could not transcribe any speech from the file.")
+                self.notify("Нет речи", "Не удалось извлечь текст из файла.")
                 
         except Exception as e:
             log_exception(f"Unhandled exception in _file_transcription_worker: {e}")
@@ -613,7 +735,6 @@ class SVoiceRecApp:
                     f"Keep-alive: last transcription {elapsed:.0f}s ago, "
                     "model still warm — skipping ping."
                 )
-                self._schedule_keep_alive()
                 return
 
             # Check memory pressure before pinging
@@ -622,7 +743,6 @@ class SVoiceRecApp:
                     "Keep-alive: memory pressure high, skipping warmup ping "
                     "to avoid adding load."
                 )
-                self._schedule_keep_alive()
                 return
 
             log_info(
