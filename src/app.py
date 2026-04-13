@@ -9,6 +9,12 @@ from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
+try:
+    from AppKit import NSWorkspace
+except ImportError:
+    NSWorkspace = None
+
+from .dataset_logger import append_to_dataset
 from .ai_editor import AiEditor, DEFAULT_MODEL_NAME
 from .transcriber import TranscriberProcessWrapper
 from .utils import (
@@ -84,6 +90,9 @@ class SVoiceRecApp:
         self._keep_alive_timer: Optional[threading.Timer] = None
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
+        self._previous_app_pid = None
+        self._raw_whisper_text = ""
+        self._ai_edited_text = None
 
     def _ensure_preview_panel(self):
         if self._preview_panel is None:
@@ -347,8 +356,19 @@ class SVoiceRecApp:
             lambda: self.menu_bar.set_status(recording=True) if self.menu_bar else None
         )
         self.transcribed_parts = []
+        self._raw_whisper_text = ""
+        self._ai_edited_text = None
         self.stop_worker.clear()
         self._inject_allowed.set()   # Allow injection for this recording session
+
+        # Remember active app safely on main thread
+        self._previous_app_pid = None
+        if NSWorkspace is not None:
+            def _capture_app():
+                app = NSWorkspace.sharedWorkspace().frontmostApplication()
+                if app:
+                    self._previous_app_pid = app.processIdentifier()
+            self._submit_for_main_thread(_capture_app)
 
         # Clear the queue just in case
         cleared = 0
@@ -481,18 +501,19 @@ class SVoiceRecApp:
 
             if text:
                 log_info(f"Partial Transcription (raw): {text}")
+                is_ai_edited = False
+                
+                if is_final_chunk:
+                    # Capture the raw text before AI touches it
+                    self._raw_whisper_text = " ".join(self.transcribed_parts + [text]).strip()
+
                 # --- AI Editor post-processing (optional) ---
-                # IMPORTANT: only run on the final chunk.
-                # Whisper runs in a subprocess; Qwen runs in the main process.
-                # Both use Metal GPU via MLX. Running them concurrently causes
-                # a Metal command-buffer assertion failure (abort/segfault).
                 if (
                     is_final_chunk
                     and self.ai_editor is not None
                     and self.ai_editor.is_ready()
                     and self.config.get("ai_editor_enabled", False)
                 ):
-                    # Pre-filter hallucinations before calling LLM
                     if self.ai_editor.is_hallucination(text):
                         log_info("AiEditor: skipping refinement due to hallucination filter.")
                         text = ""
@@ -500,36 +521,57 @@ class SVoiceRecApp:
                         refined = self.ai_editor.refine(text)
                         if refined and refined != text:
                             log_info(f"AiEditor refined: '{text}' → '{refined}'")
+                            is_ai_edited = True
+                            self._ai_edited_text = refined
                         text = refined if refined else text
                 # -------------------------------------------
+                
                 self.transcribed_parts.append(text)
-                # Keep parts manageable
                 if len(self.transcribed_parts) > 10:
                     self.transcribed_parts.pop(0)
-                # ── Injection strategy: batch-on-final ─────────────────────────────
-                # Injecting each chunk immediately creates a multi-second gap between
-                # injections, during which the cursor can drift (focus changes, app
-                # auto-formatting, etc.), causing the next chunk to land at the wrong
-                # position ("jumping cursor" bug).
-                #
-                # Fix: accumulate all chunks silently; inject the complete joined text
-                # in a single atomic operation only when the final chunk is ready.
-                # The _inject_allowed flag prevents stale injections after a timeout.
+
                 if self._inject_allowed.is_set():
                     if is_final_chunk:
                         full_text = " ".join(self.transcribed_parts).strip()
-                        if full_text:
-                            inject_text(full_text + " ")
-                        if self._preview_panel:
+                        
+                        # Stop delayed transcribing timer to not interrupt user
+                        if self._delayed_transcribing_timer is not None:
+                            try:
+                                self._delayed_transcribing_timer.cancel()
+                            except Exception:
+                                pass
+                            self._delayed_transcribing_timer = None
+
+                        def _on_confirm(user_text):
+                            def _run_injection():
+                                # Log to dataset
+                                append_to_dataset(self._raw_whisper_text, self._ai_edited_text, user_text)
+                                
+                                # Restore focus safely on main thread and inject
+                                if self._previous_app_pid:
+                                    def _restore_focus():
+                                        if NSWorkspace is not None:
+                                            app = NSWorkspace.sharedWorkspace().runningApplicationWithProcessIdentifier_(self._previous_app_pid)
+                                            if app:
+                                                app.activateWithOptions_(0)
+                                    self._submit_for_main_thread(_restore_focus)
+                                    time.sleep(0.15)
+                                    
+                                if user_text:
+                                    inject_text(user_text + " ")
+                                    
+                            threading.Thread(target=_run_injection, daemon=True).start()
+
+                        if full_text and self._preview_panel:
+                            self._preview_panel.show_interactive(full_text, self._main_thread_queue, on_confirm=_on_confirm)
+                        elif self._preview_panel:
                             self._preview_panel.hide(self._main_thread_queue, delay=0.8)
                     else:
                         accumulated = " ".join(self.transcribed_parts).strip()
                         if self._preview_panel:
                             self._preview_panel.update_text(accumulated, self._main_thread_queue)
                         log_info(
-                            f"Partial chunk buffered "
-                            f"({len(self.transcribed_parts)} chunk(s) so far) "
-                            "— will inject all text on final chunk."
+                            f"Partial chunk buffered ({len(self.transcribed_parts)} chunk(s))"
                         )
                 else:
                     if self._preview_panel:
