@@ -51,6 +51,7 @@ class AudioRecorder:
         self.has_speech_in_chunk = False
         self.current_chunk_duration = 0  # Track time since last split
         self.vad_buffer = b""
+        self._close_thread = None  # Track ongoing stream-close operation
 
         if HAVE_VAD:
             self.vad = webrtcvad.Vad(2) # 0-3 aggressiveness (2 is moderate)
@@ -167,6 +168,24 @@ class AudioRecorder:
         if self.recording:
             return
 
+        # If the previous stream's abort/close is still running in a daemon thread,
+        # wait for it before creating a new stream.  The close thread holds a PortAudio
+        # lock; creating a new stream while it is still active can deadlock.
+        if self._close_thread is not None and self._close_thread.is_alive():
+            log_info("Previous stream close still in progress. Waiting up to 5s…")
+            self._close_thread.join(timeout=5.0)
+            if self._close_thread.is_alive():
+                log_error(
+                    "Previous audio stream close did not complete after 5s. "
+                    "Cannot safely create a new stream — aborting start."
+                )
+                # Raise so app.py's except-block can notify the user.
+                raise RuntimeError(
+                    "Audio device busy: previous stream close is still pending."
+                )
+            log_info("Previous stream close completed. Proceeding with new recording.")
+            self._close_thread = None
+
         log_info(f"Starting recording on device {self.device_id if self.device_id is not None else 'default'}...")
         self.audio_data = []
         self.recording = True
@@ -217,7 +236,7 @@ class AudioRecorder:
         self.recording = False
         if self.stream:
             self._stop_stream_with_timeout(timeout=3.0)
-            self.stream = None
+            # self.stream is already set to None inside _stop_stream_with_timeout
 
         play_sound(SOUND_RECORDING_STOP)
 
@@ -242,25 +261,33 @@ class AudioRecorder:
     def _stop_stream_with_timeout(self, timeout: float = 3.0) -> None:
         """Stop and close the audio stream with a timeout to prevent hangs.
 
-        If the stream does not stop within `timeout` seconds (e.g. audio device
-        disconnected or macOS blocked access), log an error and continue.
+        Captures the stream reference immediately and sets self.stream = None
+        so that a subsequent start() call does not see a dangling stream.
+        The actual abort/close runs in a daemon thread; self._close_thread
+        tracks it so start() can wait for it before creating a new stream.
         """
+        old_stream = self.stream
+        self.stream = None  # Release reference immediately; start() won't see it
+
         def _do_stop():
             try:
-                # Use abort() instead of stop() to prevent macOS PortAudio deadlock 
+                # Use abort() instead of stop() to prevent macOS PortAudio deadlock
                 # where waiting for pending buffers hangs indefinitely.
-                self.stream.abort()
-                self.stream.close()
+                old_stream.abort()
+                old_stream.close()
             except Exception as e:
                 log_error(f"Error closing audio stream: {e}")
 
         t = threading.Thread(target=_do_stop, daemon=True)
+        self._close_thread = t
         t.start()
         t.join(timeout=timeout)
         if t.is_alive():
             log_error(
                 f"Audio stream stop/close did not complete within {timeout}s. "
-                "Continuing without waiting (possible device issue)."
+                "Thread still running in background (possible device issue)."
             )
+            # _close_thread remains set so start() can detect this situation.
         else:
+            self._close_thread = None
             log_info("Recorder.stop() stream closed successfully.")

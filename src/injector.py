@@ -4,10 +4,13 @@ from pynput.keyboard import Controller, Key
 
 from .utils import is_accessibility_trusted, log_error, log_info, send_notification
 
-def inject_text(text):
+def inject_text(text, pre_delay: float = 0.0):
     """
     Injects text directly into the active application using pynput by typing
     character by character with a micro-delay to prevent dropped characters.
+
+    pre_delay: optional sleep before typing (seconds). Callers that have already
+               waited for focus restore should pass 0.0.
     """
     if not text:
         return
@@ -25,23 +28,21 @@ def inject_text(text):
     keyboard = Controller()
 
     try:
-        # Give the UI a bit more time to refocus if needed
-        time.sleep(0.3)
+        if pre_delay > 0:
+            time.sleep(pre_delay)
 
-        # Release modifiers just in case they are virtually stuck from the hotkey
-        # Note: Do not release shift as the user expects capitalization if they type it?
-        # Releasing all modifiers to ensure clean typing state
+        # Release modifiers in case they are virtually stuck from the hotkey
         for k in (Key.alt, Key.cmd, Key.shift, Key.ctrl):
             keyboard.release(k)
 
         log_info(f"Attempting to inject text (typing mode): {text[:50]}...")
-        
+
         # Type text character by character with a small delay
         for char in text:
             keyboard.type(char)
             # 2ms delay is enough to avoid UI buffer skips in most IDEs/Browsers
-            time.sleep(0.002) 
-        
+            time.sleep(0.002)
+
         log_info("Text injection successful (via keyboard typing).")
 
     except Exception as e:

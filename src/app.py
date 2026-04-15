@@ -9,6 +9,13 @@ from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
+try:
+    from AppKit import NSWorkspace, NSRunningApplication
+except ImportError:
+    NSWorkspace = None
+    NSRunningApplication = None
+
+from .dataset_logger import append_to_dataset
 from .ai_editor import AiEditor, DEFAULT_MODEL_NAME
 from .transcriber import TranscriberProcessWrapper
 from .utils import (
@@ -84,6 +91,10 @@ class SVoiceRecApp:
         self._keep_alive_timer: Optional[threading.Timer] = None
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
+        self._previous_app_pid = None
+        self._raw_whisper_text = ""
+        self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
+        self._ai_edited_text = None
 
     def _ensure_preview_panel(self):
         if self._preview_panel is None:
@@ -289,14 +300,8 @@ class SVoiceRecApp:
                 mb.set_status(recording=False, processing=False)
             except Exception as e:
                 log_error(f"Failed to set menu bar status: {e}")
-        full_phrase = " ".join(self.transcribed_parts).strip()
-        if full_phrase:
-            append_phrase(full_phrase)
-            if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
-                try:
-                    mb.refresh_last_phrases_submenu()
-                except Exception as e:
-                    log_error(f"Failed to refresh Last 5 phrases submenu: {e}")
+        # Note: append_phrase and submenu refresh are now done in _on_confirm
+        # with the user's actual final text, not the raw/AI-processed accumulation.
         s = get_ui_strings(get_primary_language(self.config))
         if self._preview_panel:
             self._preview_panel.update_status(s["ready_title"], self._main_thread_queue)
@@ -315,6 +320,66 @@ class SVoiceRecApp:
                 mb.set_status(recording=False, processing=False)
             except Exception as e:
                 log_error(f"Failed to set menu bar status: {e}")
+
+    def _build_confirm_cancel_callbacks(self):
+        """Build on_confirm / on_cancel callbacks for the interactive edit popup.
+
+        Extracted so the same callbacks can be reused both from process_chunk
+        (normal is_final_chunk path) and from the buffered-finalization path in
+        stop_recording_and_process (when Recorder.stop() returns None but partial
+        chunks were already transcribed and buffered).
+        """
+        def _on_confirm(user_text):
+            def _run_injection():
+                try:
+                    log_info("_run_injection: start")
+
+                    # Log to dataset (background thread, file I/O — safe)
+                    append_to_dataset(self._raw_whisper_text, self._ai_edited_text, user_text)
+                    log_info("_run_injection: dataset saved")
+
+                    if user_text:
+                        append_phrase(user_text)
+                        log_info("_run_injection: phrase appended")
+                        mb = self.menu_bar
+                        if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
+                            self._submit_for_main_thread(mb.refresh_last_phrases_submenu)
+
+                    if not user_text:
+                        log_info("_run_injection: no text to inject, skipping")
+                        return
+
+                    prev_pid = self._previous_app_pid
+                    text_to_inject = user_text + " "
+
+                    def _restore_focus():
+                        if prev_pid and NSRunningApplication is not None:
+                            running_app = NSRunningApplication.runningApplicationWithProcessIdentifier_(prev_pid)
+                            if running_app:
+                                log_info("_restore_focus: activating previous app")
+                                running_app.activateWithOptions_(0)
+                        # Now wait for activation, then inject on main thread.
+                        def _wait_then_inject():
+                            time.sleep(0.4)
+                            log_info("_wait_then_inject: submitting inject_text to main thread")
+                            self._submit_for_main_thread(lambda: inject_text(text_to_inject))
+                        threading.Thread(target=_wait_then_inject, daemon=True).start()
+
+                    # Small initial sleep so the panel's orderOut_ is fully
+                    # processed by the main run loop before we activate another app.
+                    time.sleep(0.2)
+                    self._submit_for_main_thread(_restore_focus)
+                    log_info("_run_injection: _restore_focus queued on main thread")
+
+                except Exception as e:
+                    log_exception(f"_run_injection failed: {e}")
+
+            threading.Thread(target=_run_injection, daemon=True).start()
+
+        def _on_cancel():
+            log_info("User cancelled edit popup (Escape). Nothing injected.")
+
+        return _on_confirm, _on_cancel
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
@@ -347,8 +412,20 @@ class SVoiceRecApp:
             lambda: self.menu_bar.set_status(recording=True) if self.menu_bar else None
         )
         self.transcribed_parts = []
+        self._raw_whisper_text = ""
+        self._raw_whisper_chunks = []
+        self._ai_edited_text = None
         self.stop_worker.clear()
         self._inject_allowed.set()   # Allow injection for this recording session
+
+        # Remember active app safely on main thread
+        self._previous_app_pid = None
+        if NSWorkspace is not None:
+            def _capture_app():
+                app = NSWorkspace.sharedWorkspace().frontmostApplication()
+                if app:
+                    self._previous_app_pid = app.processIdentifier()
+            self._submit_for_main_thread(_capture_app)
 
         # Clear the queue just in case
         cleared = 0
@@ -363,9 +440,8 @@ class SVoiceRecApp:
 
         # Start worker thread for chunk processing
         self.worker_thread = threading.Thread(target=self.chunk_worker)
-        if self.worker_thread:
-            log_info("Starting chunk worker thread.")
-            self.worker_thread.start()
+        log_info("Starting chunk worker thread.")
+        self.worker_thread.start()
 
         s = get_ui_strings(get_primary_language(self.config))
         self._ensure_preview_panel()
@@ -431,7 +507,7 @@ class SVoiceRecApp:
         log_info("Chunk worker stopped (queue empty, ready for next session).")
 
     def process_chunk(self, audio_chunk, is_final_chunk: bool = False):
-        """Transcribe a single audio chunk and inject text; heavily logged for debugging."""
+        """Transcribe a single audio chunk, accumulate result, and show popup on final chunk."""
         try:
             # Check if stop was requested before starting expensive transcription
             if self.stop_worker.is_set() and not is_final_chunk:
@@ -481,18 +557,22 @@ class SVoiceRecApp:
 
             if text:
                 log_info(f"Partial Transcription (raw): {text}")
+                is_ai_edited = False
+
+                # Track raw Whisper output before any AI editing (for dataset accuracy)
+                self._raw_whisper_chunks.append(text)
+
+                if is_final_chunk:
+                    # Build raw_whisper_text from pure Whisper output, not AI-edited parts
+                    self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
+
                 # --- AI Editor post-processing (optional) ---
-                # IMPORTANT: only run on the final chunk.
-                # Whisper runs in a subprocess; Qwen runs in the main process.
-                # Both use Metal GPU via MLX. Running them concurrently causes
-                # a Metal command-buffer assertion failure (abort/segfault).
                 if (
                     is_final_chunk
                     and self.ai_editor is not None
                     and self.ai_editor.is_ready()
                     and self.config.get("ai_editor_enabled", False)
                 ):
-                    # Pre-filter hallucinations before calling LLM
                     if self.ai_editor.is_hallucination(text):
                         log_info("AiEditor: skipping refinement due to hallucination filter.")
                         text = ""
@@ -500,36 +580,53 @@ class SVoiceRecApp:
                         refined = self.ai_editor.refine(text)
                         if refined and refined != text:
                             log_info(f"AiEditor refined: '{text}' → '{refined}'")
+                            is_ai_edited = True
+                            self._ai_edited_text = refined
                         text = refined if refined else text
                 # -------------------------------------------
+                
                 self.transcribed_parts.append(text)
-                # Keep parts manageable
                 if len(self.transcribed_parts) > 10:
                     self.transcribed_parts.pop(0)
-                # ── Injection strategy: batch-on-final ─────────────────────────────
-                # Injecting each chunk immediately creates a multi-second gap between
-                # injections, during which the cursor can drift (focus changes, app
-                # auto-formatting, etc.), causing the next chunk to land at the wrong
-                # position ("jumping cursor" bug).
-                #
-                # Fix: accumulate all chunks silently; inject the complete joined text
-                # in a single atomic operation only when the final chunk is ready.
-                # The _inject_allowed flag prevents stale injections after a timeout.
+
                 if self._inject_allowed.is_set():
                     if is_final_chunk:
                         full_text = " ".join(self.transcribed_parts).strip()
-                        if full_text:
-                            inject_text(full_text + " ")
-                        if self._preview_panel:
+                        
+                        # Stop delayed transcribing timer to not interrupt user
+                        if self._delayed_transcribing_timer is not None:
+                            try:
+                                self._delayed_transcribing_timer.cancel()
+                            except Exception:
+                                pass
+                            self._delayed_transcribing_timer = None
+
+                        _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+
+                        s_ui = get_ui_strings(get_primary_language(self.config))
+                        log_info(
+                            f"process_chunk: ready to show interactive popup. "
+                            f"full_text_len={len(full_text)}, "
+                            f"preview_panel={self._preview_panel is not None}, "
+                            f"inject_allowed={self._inject_allowed.is_set()}"
+                        )
+                        if full_text and self._preview_panel:
+                            self._preview_panel.show_interactive(
+                                full_text,
+                                self._main_thread_queue,
+                                on_confirm=_on_confirm,
+                                on_cancel=_on_cancel,
+                                title=s_ui["edit_confirm_title"],
+                            )
+                            log_info("process_chunk: show_interactive queued on main thread")
+                        elif self._preview_panel:
                             self._preview_panel.hide(self._main_thread_queue, delay=0.8)
                     else:
                         accumulated = " ".join(self.transcribed_parts).strip()
                         if self._preview_panel:
                             self._preview_panel.update_text(accumulated, self._main_thread_queue)
                         log_info(
-                            f"Partial chunk buffered "
-                            f"({len(self.transcribed_parts)} chunk(s) so far) "
-                            "— will inject all text on final chunk."
+                            f"Partial chunk buffered ({len(self.transcribed_parts)} chunk(s))"
                         )
                 else:
                     if self._preview_panel:
@@ -581,7 +678,7 @@ class SVoiceRecApp:
             self.stop_worker.set()
             wait_start = time.time()
 
-            # Schedule a delayed "still working" notification if recognition is slow if recognition is slow
+            # Schedule a delayed "still working" notification if recognition is slow
             self._transcription_cycle_id += 1
             cycle_id = self._transcription_cycle_id
             if self._delayed_transcribing_timer is not None:
@@ -629,6 +726,35 @@ class SVoiceRecApp:
                         f"Worker thread finished. Waited {waited:.1f}s. "
                         "Submitting finish cleanup to main thread."
                     )
+
+            # If Recorder.stop() returned no final audio chunk (e.g. the last
+            # chunk was too short and discarded) but the worker already buffered
+            # one or more partial transcriptions, finalise them now so the text
+            # is not silently lost.
+            if (
+                last_audio is None
+                and self.transcribed_parts
+                and self._inject_allowed.is_set()
+                and self._preview_panel is not None
+                and not (self.worker_thread is not None and self.worker_thread.is_alive())
+            ):
+                self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
+                full_text = " ".join(self.transcribed_parts).strip()
+                if full_text:
+                    log_info(
+                        f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
+                        f"buffered partial chunk(s). full_text_len={len(full_text)}"
+                    )
+                    _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                    s_ui = get_ui_strings(get_primary_language(self.config))
+                    self._preview_panel.show_interactive(
+                        full_text,
+                        self._main_thread_queue,
+                        on_confirm=_on_confirm,
+                        on_cancel=_on_cancel,
+                        title=s_ui["edit_confirm_title"],
+                    )
+                    log_info("Buffered finalization: show_interactive queued on main thread")
 
             # All UI updates and "Finish" run on main thread so menu bar actually updates
             self._submit_for_main_thread(self._do_finish_cleanup)
