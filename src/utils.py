@@ -101,6 +101,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "started_body": "Нажмите горячую клавишу, чтобы начать запись, или используйте иконку в меню-баре.",
         "menu_recording": "● ЗАПИСЬ",
         "menu_processing": "● РАСПОЗН.",
+        "edit_confirm_title": "Редактируй и нажми Enter",
     },
     "en": {
         "preparing_title": "Preparing model...",
@@ -123,6 +124,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "started_body": "Press the hotkey to start recording or use the menu bar icon.",
         "menu_recording": "● RECORDING",
         "menu_processing": "● RECOGNIZING",
+        "edit_confirm_title": "Edit and press Enter",
     },
     "de": {
         "preparing_title": "Modell wird vorbereitet...",
@@ -145,6 +147,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "started_body": "Drücken Sie die Hotkey zum Aufnehmen oder nutzen Sie das Menü-Symbol.",
         "menu_recording": "● AUFNAHME",
         "menu_processing": "● ERKENNUNG",
+        "edit_confirm_title": "Bearbeiten und Enter drücken",
     },
     "es": {
         "preparing_title": "Preparando modelo...",
@@ -167,6 +170,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "started_body": "Pulse la tecla para grabar o use el icono del menú.",
         "menu_recording": "● GRABANDO",
         "menu_processing": "● RECONOCIENDO",
+        "edit_confirm_title": "Editar y pulsar Enter",
     },
     "fr": {
         "preparing_title": "Préparation du modèle...",
@@ -189,6 +193,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "started_body": "Appuyez sur le raccourci pour enregistrer ou utilisez l'icône du menu.",
         "menu_recording": "● ENREGISTREMENT",
         "menu_processing": "● RECONNAISSANCE",
+        "edit_confirm_title": "Modifier et appuyer sur Entrée",
     },
 }
 
