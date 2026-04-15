@@ -23,9 +23,11 @@ from AppKit import (
     NSApplication,
     NSScrollView,
     NSTextView,
+    NSForegroundColorAttributeName,
+    NSFontAttributeName,
 )
 from Foundation import NSAttributedString
-from .utils import get_menu_icon_path, log_info
+from .utils import get_menu_icon_path, log_exception, log_info
 
 class KeyablePanel(NSPanel):
     def canBecomeKeyWindow(self):
@@ -276,7 +278,6 @@ class TranscriptionPreviewPanel:
         """Set text in the NSTextView with white colour preserved."""
         if not self.text_view:
             return
-        from AppKit import NSForegroundColorAttributeName, NSFontAttributeName
         attrs = {
             NSForegroundColorAttributeName: NSColor.whiteColor(),
             NSFontAttributeName: NSFont.systemFontOfSize_(14.0),
@@ -289,7 +290,10 @@ class TranscriptionPreviewPanel:
             self._create_panel(interactive=False)
             self._update_position()
             self.title_field.setStringValue_(title)
-            self.text_field.setStringValue_("")
+            if self.text_field is not None:
+                self.text_field.setStringValue_("")
+            else:
+                log_info("show._do_show: WARNING text_field is None after _create_panel — state mismatch")
             self.panel.orderFront_(None)
             self.panel.animator().setAlphaValue_(0.9)
 
@@ -311,31 +315,43 @@ class TranscriptionPreviewPanel:
                 return  # already handled (guard against double-fire)
             new_text = new_text.strip()
             self._remove_key_monitors()
+            # Close (not just hide) and null out the interactive panel so that the
+            # next _create_panel(interactive=False) call always creates a fresh panel.
+            # If we only call orderOut_ and leave self.panel set, _create_panel sees
+            # "_is_interactive == False == interactive" and returns early — but
+            # self.text_field is still None (it's unused in interactive mode), which
+            # causes a NoneType crash in show()._do_show().
             if self.panel:
-                self.panel.orderOut_(None)
+                self.panel.close()
+                self.panel = None
+                self.text_view = None
+                self.scroll_view = None
             self._is_interactive = False
             log_info(f"_handle_confirm: confirming with text len={len(new_text)}")
             if on_confirm:
                 try:
                     on_confirm(new_text)
                 except Exception as e:
-                    import traceback
-                    print(f"[preview_panel] on_confirm error: {e}\n{traceback.format_exc()}")
+                    log_exception(f"[preview_panel] on_confirm error: {e}")
 
         def _handle_cancel():
             if not self._is_interactive:
                 return
             self._remove_key_monitors()
+            # Same as _handle_confirm: close + null out so next non-interactive
+            # show() creates a fresh panel instead of reusing stale state.
             if self.panel:
-                self.panel.orderOut_(None)
+                self.panel.close()
+                self.panel = None
+                self.text_view = None
+                self.scroll_view = None
             self._is_interactive = False
             log_info("_handle_cancel: popup cancelled")
             if on_cancel:
                 try:
                     on_cancel()
                 except Exception as e:
-                    import traceback
-                    print(f"[preview_panel] on_cancel error: {e}\n{traceback.format_exc()}")
+                    log_exception(f"[preview_panel] on_cancel error: {e}")
 
         def _do_show_interactive():
             try:
@@ -406,8 +422,7 @@ class TranscriptionPreviewPanel:
                 )
                 log_info("_do_show_interactive: key monitors installed, popup ready")
             except Exception as e:
-                import traceback
-                print(f"[preview_panel] _do_show_interactive error: {e}\n{traceback.format_exc()}")
+                log_exception(f"[preview_panel] _do_show_interactive error: {e}")
 
         queue.put((_do_show_interactive, (), {}))
 
@@ -440,7 +455,15 @@ class TranscriptionPreviewPanel:
             if not self.panel:
                 return
             if self._is_interactive:
+                # Properly close the interactive popup (not just hide): remove key
+                # monitors and close the panel so state is fully reset.
+                self._remove_key_monitors()
+                self.panel.close()
+                self.panel = None
+                self.text_view = None
+                self.scroll_view = None
                 self._is_interactive = False
+                return
             else:
                 current_title = str(self.title_field.stringValue())
                 if "✅" not in current_title and "Готово" not in current_title and "Ready" not in current_title:

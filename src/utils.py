@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
+from typing import Optional
 
 # Project root (parent of src/)
 ROOT = Path(__file__).resolve().parent.parent
@@ -332,8 +333,6 @@ def copy_to_clipboard(text):
     except Exception as e:
         log_error(f"Failed to copy to clipboard: {e}")
 
-
-from typing import Optional
 
 def play_sound(sound_name: Optional[str] = None) -> None:
     """Plays a system sound (non-blocking). Uses SOUND_RECORDING_START if no path given."""

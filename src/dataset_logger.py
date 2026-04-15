@@ -5,9 +5,9 @@ Saves triplets of (raw_whisper, ai_edited, user_final) text to a local file
 so the data can later be used for fine-tuning or quality analysis.
 """
 
+import datetime
 import json
 import os
-import time
 from typing import Optional
 
 from .utils import log_error, log_info
@@ -31,7 +31,7 @@ def append_to_dataset(
         dataset_path: Path to the JSONL file.
     """
     record = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "raw_whisper": raw_text,
         "ai_edited": ai_text,
         "user_final": user_final_text,

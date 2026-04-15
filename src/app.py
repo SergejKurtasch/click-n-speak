@@ -440,9 +440,8 @@ class SVoiceRecApp:
 
         # Start worker thread for chunk processing
         self.worker_thread = threading.Thread(target=self.chunk_worker)
-        if self.worker_thread:
-            log_info("Starting chunk worker thread.")
-            self.worker_thread.start()
+        log_info("Starting chunk worker thread.")
+        self.worker_thread.start()
 
         s = get_ui_strings(get_primary_language(self.config))
         self._ensure_preview_panel()
@@ -508,7 +507,7 @@ class SVoiceRecApp:
         log_info("Chunk worker stopped (queue empty, ready for next session).")
 
     def process_chunk(self, audio_chunk, is_final_chunk: bool = False):
-        """Transcribe a single audio chunk and inject text; heavily logged for debugging."""
+        """Transcribe a single audio chunk, accumulate result, and show popup on final chunk."""
         try:
             # Check if stop was requested before starting expensive transcription
             if self.stop_worker.is_set() and not is_final_chunk:
