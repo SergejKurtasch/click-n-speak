@@ -321,6 +321,66 @@ class SVoiceRecApp:
             except Exception as e:
                 log_error(f"Failed to set menu bar status: {e}")
 
+    def _build_confirm_cancel_callbacks(self):
+        """Build on_confirm / on_cancel callbacks for the interactive edit popup.
+
+        Extracted so the same callbacks can be reused both from process_chunk
+        (normal is_final_chunk path) and from the buffered-finalization path in
+        stop_recording_and_process (when Recorder.stop() returns None but partial
+        chunks were already transcribed and buffered).
+        """
+        def _on_confirm(user_text):
+            def _run_injection():
+                try:
+                    log_info("_run_injection: start")
+
+                    # Log to dataset (background thread, file I/O — safe)
+                    append_to_dataset(self._raw_whisper_text, self._ai_edited_text, user_text)
+                    log_info("_run_injection: dataset saved")
+
+                    if user_text:
+                        append_phrase(user_text)
+                        log_info("_run_injection: phrase appended")
+                        mb = self.menu_bar
+                        if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
+                            self._submit_for_main_thread(mb.refresh_last_phrases_submenu)
+
+                    if not user_text:
+                        log_info("_run_injection: no text to inject, skipping")
+                        return
+
+                    prev_pid = self._previous_app_pid
+                    text_to_inject = user_text + " "
+
+                    def _restore_focus():
+                        if prev_pid and NSRunningApplication is not None:
+                            running_app = NSRunningApplication.runningApplicationWithProcessIdentifier_(prev_pid)
+                            if running_app:
+                                log_info("_restore_focus: activating previous app")
+                                running_app.activateWithOptions_(0)
+                        # Now wait for activation, then inject on main thread.
+                        def _wait_then_inject():
+                            time.sleep(0.4)
+                            log_info("_wait_then_inject: submitting inject_text to main thread")
+                            self._submit_for_main_thread(lambda: inject_text(text_to_inject))
+                        threading.Thread(target=_wait_then_inject, daemon=True).start()
+
+                    # Small initial sleep so the panel's orderOut_ is fully
+                    # processed by the main run loop before we activate another app.
+                    time.sleep(0.2)
+                    self._submit_for_main_thread(_restore_focus)
+                    log_info("_run_injection: _restore_focus queued on main thread")
+
+                except Exception as e:
+                    log_exception(f"_run_injection failed: {e}")
+
+            threading.Thread(target=_run_injection, daemon=True).start()
+
+        def _on_cancel():
+            log_info("User cancelled edit popup (Escape). Nothing injected.")
+
+        return _on_confirm, _on_cancel
+
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
         self.transcriber.update_model(model_name)
@@ -542,60 +602,7 @@ class SVoiceRecApp:
                                 pass
                             self._delayed_transcribing_timer = None
 
-                        def _on_confirm(user_text):
-                            def _run_injection():
-                                try:
-                                    log_info("_run_injection: start")
-
-                                    # Log to dataset (background thread, file I/O — safe)
-                                    append_to_dataset(self._raw_whisper_text, self._ai_edited_text, user_text)
-                                    log_info("_run_injection: dataset saved")
-
-                                    if user_text:
-                                        append_phrase(user_text)
-                                        log_info("_run_injection: phrase appended")
-                                        mb = self.menu_bar
-                                        if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
-                                            self._submit_for_main_thread(mb.refresh_last_phrases_submenu)
-
-                                    if not user_text:
-                                        log_info("_run_injection: no text to inject, skipping")
-                                        return
-
-                                    prev_pid = self._previous_app_pid
-                                    text_to_inject = user_text + " "
-
-                                    # Step 1 (main thread): activate previous app.
-                                    # Step 2 (background, 0.4s later): submit inject_text to main thread.
-                                    # inject_text MUST run on the main thread (pynput/CGEventPost + AX).
-                                    # activateWithOptions_ is async — the other app needs ~0.3-0.4s to
-                                    # fully become frontmost before keystrokes land in the right window.
-                                    def _restore_focus():
-                                        if prev_pid and NSRunningApplication is not None:
-                                            running_app = NSRunningApplication.runningApplicationWithProcessIdentifier_(prev_pid)
-                                            if running_app:
-                                                log_info("_restore_focus: activating previous app")
-                                                running_app.activateWithOptions_(0)
-                                        # Now wait for activation, then inject on main thread.
-                                        def _wait_then_inject():
-                                            time.sleep(0.4)
-                                            log_info("_wait_then_inject: submitting inject_text to main thread")
-                                            self._submit_for_main_thread(lambda: inject_text(text_to_inject))
-                                        threading.Thread(target=_wait_then_inject, daemon=True).start()
-
-                                    # Small initial sleep so the panel's orderOut_ is fully
-                                    # processed by the main run loop before we activate another app.
-                                    time.sleep(0.2)
-                                    self._submit_for_main_thread(_restore_focus)
-                                    log_info("_run_injection: _restore_focus queued on main thread")
-
-                                except Exception as e:
-                                    log_exception(f"_run_injection failed: {e}")
-
-                            threading.Thread(target=_run_injection, daemon=True).start()
-
-                        def _on_cancel():
-                            log_info("User cancelled edit popup (Escape). Nothing injected.")
+                        _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
 
                         s_ui = get_ui_strings(get_primary_language(self.config))
                         log_info(
@@ -720,6 +727,35 @@ class SVoiceRecApp:
                         f"Worker thread finished. Waited {waited:.1f}s. "
                         "Submitting finish cleanup to main thread."
                     )
+
+            # If Recorder.stop() returned no final audio chunk (e.g. the last
+            # chunk was too short and discarded) but the worker already buffered
+            # one or more partial transcriptions, finalise them now so the text
+            # is not silently lost.
+            if (
+                last_audio is None
+                and self.transcribed_parts
+                and self._inject_allowed.is_set()
+                and self._preview_panel is not None
+                and not (self.worker_thread is not None and self.worker_thread.is_alive())
+            ):
+                self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
+                full_text = " ".join(self.transcribed_parts).strip()
+                if full_text:
+                    log_info(
+                        f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
+                        f"buffered partial chunk(s). full_text_len={len(full_text)}"
+                    )
+                    _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                    s_ui = get_ui_strings(get_primary_language(self.config))
+                    self._preview_panel.show_interactive(
+                        full_text,
+                        self._main_thread_queue,
+                        on_confirm=_on_confirm,
+                        on_cancel=_on_cancel,
+                        title=s_ui["edit_confirm_title"],
+                    )
+                    log_info("Buffered finalization: show_interactive queued on main thread")
 
             # All UI updates and "Finish" run on main thread so menu bar actually updates
             self._submit_for_main_thread(self._do_finish_cleanup)
