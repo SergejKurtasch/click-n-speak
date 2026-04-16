@@ -472,16 +472,17 @@ class ClickNSpeakApp(rumps.App):
 
     def open_config(self, _: rumps.MenuItem) -> None:
         """Opens config.json in the default editor (no shell)."""
-        subprocess.run(["open", str(get_config_path())], check=True)
+        subprocess.run(["open", str(get_config_path())], check=False)
 
     def open_log_file(self, _: rumps.MenuItem) -> None:
         """Opens the app log file in the default editor (all recognition requests are logged there)."""
         log_path = get_log_file_path()
-        if log_path.exists():
-            subprocess.run(["open", str(log_path)], check=True)
-        else:
-            log_info("Log file not created yet (no logs written).")
-            self.main_app.notify("Лог-файл", "Файл лога еще не создан. Он появится после первой записи.")
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)  # create if user deleted it
+        except OSError:
+            pass
+        subprocess.run(["open", str(log_path)], check=False)
 
     def reload_config(self, _: rumps.MenuItem) -> None:
         """Reloads config from disk and refreshes the menu."""

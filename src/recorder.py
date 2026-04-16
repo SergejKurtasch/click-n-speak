@@ -29,8 +29,8 @@ class AudioRecorder:
         device_id=None,
         silence_threshold=0.01,
         silence_duration=1.0,
-        target_speech_duration=8.0,
-        max_speech_duration=12.0,
+        target_speech_duration=4.0,
+        max_speech_duration=8.0,
         min_speech_duration=1.0,
     ):
         self.sample_rate = sample_rate

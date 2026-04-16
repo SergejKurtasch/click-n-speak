@@ -371,6 +371,12 @@ class TranscriberProcessWrapper:
                 if action == "warmup":
                     transcriber.warmup(language=cmd.get("language"))
                     self.output_queue.put({"type": "warmup_done"})
+                elif action == "prewarm":
+                    # Run a real short transcription on silence to bring GPU/MLX weights
+                    # back into active memory. Fire-and-forget: result is discarded.
+                    silence = np.zeros(16000, dtype=np.float32)  # 1s at 16kHz
+                    transcriber.transcribe(silence, is_final_chunk=False)
+                    self.output_queue.put({"type": "prewarm_done"})
                 elif action == "transcribe":
                     text = transcriber.transcribe(
                         cmd.get("audio_data"),
@@ -408,6 +414,12 @@ class TranscriberProcessWrapper:
         
     def warmup(self, language=None):
         self.input_queue.put({"action": "warmup", "language": language})
+
+    def pre_warm(self) -> None:
+        """Fire-and-forget: push a tiny silent transcription to the child process so
+        GPU/MLX model weights are in active memory before the first real chunk arrives.
+        The prewarm_done response will be silently consumed by the next transcribe() call."""
+        self.input_queue.put({"action": "prewarm"})
         
     def update_model(self, model_name: str) -> None:
         """Tell the child process to load a new model."""

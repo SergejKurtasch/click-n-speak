@@ -247,22 +247,31 @@ def escape_applescript_string(s: str) -> str:
 
 
 def setup_logging() -> None:
-    """Configures logging to file and console."""
-    log_file = get_log_file_path()
-    try:
-        logging.basicConfig(
-            filename=log_file,
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-        )
-    except OSError:
-        logging.basicConfig(level=logging.INFO)
-        logging.getLogger(__name__).warning("Could not write log file %s, logging to console only.", log_file)
+    """Configures logging to file and console.
 
-    # Also log to console
+    Uses WatchedFileHandler so that if the log file is deleted while the app is
+    running, it is automatically recreated on the next log write.
+    """
+    from logging.handlers import WatchedFileHandler
+
+    log_file = get_log_file_path()
+    fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.touch(exist_ok=True)  # create if missing; no-op if already exists
+        fh = WatchedFileHandler(str(log_file), encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except OSError as e:
+        root.warning("Could not set up file logging to %s: %s — logging to console only.", log_file, e)
+
     console = logging.StreamHandler()
     console.setLevel(logging.INFO)
-    logging.getLogger("").addHandler(console)
+    console.setFormatter(fmt)
+    root.addHandler(console)
 
 
 setup_logging()

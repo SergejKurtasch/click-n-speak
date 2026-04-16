@@ -45,8 +45,8 @@ class SVoiceRecApp:
             device_id=self.config.get("device_id"),
             silence_threshold=self.config.get("silence_threshold", 0.01),
             silence_duration=self.config.get("silence_duration", 1.0),
-            target_speech_duration=self.config.get("target_speech_duration", 8.0),
-            max_speech_duration=self.config.get("max_speech_duration", 12.0),
+            target_speech_duration=self.config.get("target_speech_duration", 4.0),
+            max_speech_duration=self.config.get("max_speech_duration", 8.0),
             min_speech_duration=self.config.get("min_speech_duration", 1.0),
         )
         self.transcriber = TranscriberProcessWrapper(
@@ -66,12 +66,13 @@ class SVoiceRecApp:
         self.debounce_interval = 0.3  # seconds
 
         # Streaming state
-        self.chunk_queue = queue.Queue()
+        self.chunk_queue = queue.Queue(maxsize=30)  # ~4 min of 8s chunks; prevents unbounded growth if transcriber hangs
         self.transcribed_parts = []
         self.worker_thread = None  # type: threading.Thread | None
         self.stop_worker = threading.Event()
-        # Guards text injection: cleared on timeout/session-end to prevent stale injections
-        self._inject_allowed = threading.Event()
+        # Session ID incremented on each new recording; workers capture it at start
+        # and skip injection if the ID no longer matches (new session started).
+        self._session_id = 0
 
         # Model warm-up state (cold-start optimization after app rebuild/restart)
         self._model_warming = False
@@ -128,6 +129,10 @@ class SVoiceRecApp:
                 return
 
             self.ai_editor.load()
+            # Guard: user may have disabled AI Editor while load() was running
+            if self.ai_editor is None:
+                log_info("AiEditor was disabled during load — discarding.")
+                return
             if self.ai_editor.is_ready():
                 self.notify("AI Editor Готов", "Умная пунктуация и очистка текста активированы.")
                 log_info("AiEditor loaded and ready.")
@@ -305,7 +310,6 @@ class SVoiceRecApp:
         s = get_ui_strings(get_primary_language(self.config))
         if self._preview_panel:
             self._preview_panel.update_status(s["ready_title"], self._main_thread_queue)
-        self._inject_allowed.clear()  # Session over; no further injections
         log_info("Finish cleanup done. Ready for next recording session.")
 
     def _do_error_cleanup(self) -> None:
@@ -394,8 +398,8 @@ class SVoiceRecApp:
         if hasattr(self, "recorder"):
             self.recorder.silence_threshold = self.config.get("silence_threshold", 0.01)
             self.recorder.silence_duration = self.config.get("silence_duration", 1.0)
-            self.recorder.target_speech_duration = self.config.get("target_speech_duration", 8.0)
-            self.recorder.max_speech_duration = self.config.get("max_speech_duration", 12.0)
+            self.recorder.target_speech_duration = self.config.get("target_speech_duration", 4.0)
+            self.recorder.max_speech_duration = self.config.get("max_speech_duration", 8.0)
             self.recorder.min_speech_duration = self.config.get("min_speech_duration", 1.0)
             log_info("Recorder settings updated.")
 
@@ -416,7 +420,14 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []
         self._ai_edited_text = None
         self.stop_worker.clear()
-        self._inject_allowed.set()   # Allow injection for this recording session
+        self._session_id += 1  # Invalidate any lingering worker from previous session
+
+        # Fire-and-forget prewarm: the child transcriber process will run a tiny silent
+        # transcription so GPU/MLX weights are warm by the time the first real chunk arrives.
+        # Recording and prewarm run in parallel; if GPU was cold this saves ~15-20s on
+        # the first real chunk transcription.
+        self.transcriber.pre_warm()
+        log_info("Pre-warm request sent to transcriber process.")
 
         # Remember active app safely on main thread
         self._previous_app_pid = None
@@ -469,9 +480,13 @@ class SVoiceRecApp:
 
     def on_chunk_received(self, audio_data):
         if self.is_recording:
-            self.chunk_queue.put((audio_data, False))
+            try:
+                self.chunk_queue.put_nowait((audio_data, False))
+            except queue.Full:
+                log_error("chunk_queue full — dropping audio chunk (transcriber may be hung).")
 
     def chunk_worker(self):
+        my_session_id = self._session_id
         log_info("Chunk worker started.")
         while not self.stop_worker.is_set() or not self.chunk_queue.empty():
             try:
@@ -498,7 +513,7 @@ class SVoiceRecApp:
                         self.chunk_queue.task_done()
                         continue
 
-                self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk)
+                self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk, session_id=my_session_id)
                 self.chunk_queue.task_done()
             except queue.Empty:
                 continue
@@ -506,7 +521,7 @@ class SVoiceRecApp:
                 log_exception(f"Error in chunk worker loop: {e}")
         log_info("Chunk worker stopped (queue empty, ready for next session).")
 
-    def process_chunk(self, audio_chunk, is_final_chunk: bool = False):
+    def process_chunk(self, audio_chunk, is_final_chunk: bool = False, session_id: int = 0):
         """Transcribe a single audio chunk, accumulate result, and show popup on final chunk."""
         try:
             # Check if stop was requested before starting expensive transcription
@@ -589,7 +604,7 @@ class SVoiceRecApp:
                 if len(self.transcribed_parts) > 10:
                     self.transcribed_parts.pop(0)
 
-                if self._inject_allowed.is_set():
+                if self._session_id == session_id:
                     if is_final_chunk:
                         full_text = " ".join(self.transcribed_parts).strip()
                         
@@ -608,7 +623,7 @@ class SVoiceRecApp:
                             f"process_chunk: ready to show interactive popup. "
                             f"full_text_len={len(full_text)}, "
                             f"preview_panel={self._preview_panel is not None}, "
-                            f"inject_allowed={self._inject_allowed.is_set()}"
+                            f"session_id={session_id}"
                         )
                         if full_text and self._preview_panel:
                             self._preview_panel.show_interactive(
@@ -632,15 +647,34 @@ class SVoiceRecApp:
                     if self._preview_panel:
                         self._preview_panel.hide(self._main_thread_queue, delay=0.0)
                     log_info(
-                        f"Injection skipped (session timed out): '{text[:60]}'"
+                        f"Injection skipped (session invalidated, worker session_id={session_id}, current={self._session_id}): '{text[:60]}'"
                     )
             else:
                 log_info("Transcriber returned empty text for this chunk.")
+                if is_final_chunk and self.transcribed_parts and self._session_id == session_id:
+                    full_text = " ".join(self.transcribed_parts).strip()
+                    if full_text and self._preview_panel:
+                        self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
+                        _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                        s_ui = get_ui_strings(get_primary_language(self.config))
+                        log_info(
+                            f"process_chunk: final chunk empty but {len(self.transcribed_parts)} "
+                            f"buffered partial(s) available, showing popup. full_text_len={len(full_text)}"
+                        )
+                        self._preview_panel.show_interactive(
+                            full_text,
+                            self._main_thread_queue,
+                            on_confirm=_on_confirm,
+                            on_cancel=_on_cancel,
+                            title=s_ui["edit_confirm_title"],
+                        )
+                        log_info("process_chunk: show_interactive queued (final chunk empty, using buffered partials)")
         except Exception as e:
             log_exception(f"Unhandled exception in process_chunk: {e}")
 
     def stop_recording_and_process(self):
         log_info("Stopping recording and finalizing transcription...")
+        my_session_id = self._session_id
         try:
             self.is_recording = False
             self.is_processing = True
@@ -716,11 +750,12 @@ class SVoiceRecApp:
                         f"Worker thread did not finish within timeout. "
                         f"Waited {waited:.1f}s. Force-resetting is_processing."
                     )
-                    # Force-reset so hotkeys are not permanently blocked
+                    # Force-reset so hotkeys are not permanently blocked.
+                    # We do NOT invalidate the session here: the worker is still
+                    # running and will show the popup once transcription finishes.
+                    # The session is only invalidated when the user starts a new
+                    # recording (via start_recording → _session_id += 1).
                     self.is_processing = False
-                    # Prevent the still-alive worker from injecting text into
-                    # a position where the cursor has already moved.
-                    self._inject_allowed.clear()
                 else:
                     log_info(
                         f"Worker thread finished. Waited {waited:.1f}s. "
@@ -734,7 +769,7 @@ class SVoiceRecApp:
             if (
                 last_audio is None
                 and self.transcribed_parts
-                and self._inject_allowed.is_set()
+                and self._session_id == my_session_id
                 and self._preview_panel is not None
                 and not (self.worker_thread is not None and self.worker_thread.is_alive())
             ):
@@ -885,18 +920,19 @@ class SVoiceRecApp:
             self._schedule_keep_alive()
 
     def _do_keep_alive_warmup(self) -> None:
-        """Perform a lightweight warmup transcription to keep the model in hot memory."""
+        """Perform a real silent transcription to keep GPU/MLX weights in active memory.
+
+        Uses pre_warm() instead of warmup() for two reasons:
+        1. warmup() is a no-op after first call (_warmup_done guard in WhisperTranscriber).
+        2. The old approach drained output_queue directly, which could race with a
+           concurrent transcribe() call and steal its result, causing a 30s timeout.
+        pre_warm() fire-and-forgets; the prewarm_done response is silently consumed
+        by the next transcribe() call (which ignores non-"transcription" messages).
+        """
         try:
-            primary_lang = get_primary_language(self.config)
-            self.transcriber.warmup(language=primary_lang)
-            # Drain the warmup_done response
-            try:
-                res = self.transcriber.output_queue.get(timeout=10)
-                if res.get("type") == "warmup_done":
-                    log_info("Keep-alive warmup completed successfully.")
-                    self._last_transcription_time = time.time()
-            except Exception:
-                pass
+            self.transcriber.pre_warm()
+            log_info("Keep-alive: pre_warm() sent to transcriber process.")
+            self._last_transcription_time = time.time()
         except Exception as e:
             log_error(f"Keep-alive warmup failed: {e}")
 
