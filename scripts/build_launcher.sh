@@ -76,10 +76,18 @@ if [ ! -x "$PYTHON_BIN" ]; then
     echo "ERROR: Could not find python binary in ${PYTHON_DIR}/bin"
     exit 1
 fi
-# Install requirements excluding py2app (not needed in launcher bundle)
-grep -v '^py2app' "$REQUIREMENTS" > /tmp/requirements_launcher.txt
-"$PYTHON_BIN" -m pip install --quiet --no-warn-script-location -r /tmp/requirements_launcher.txt
-rm -f /tmp/requirements_launcher.txt
+# Use requirements_app.txt if available (excludes mlx-lm, py2app, pytest).
+# Falls back to requirements.txt with py2app stripped.
+APP_REQUIREMENTS="${PROJECT_ROOT}/requirements_app.txt"
+if [ -f "${APP_REQUIREMENTS}" ]; then
+    echo "  Using ${APP_REQUIREMENTS} (mlx-lm excluded — AI Editor model is optional)"
+    "$PYTHON_BIN" -m pip install --quiet --no-warn-script-location -r "${APP_REQUIREMENTS}"
+else
+    echo "  Falling back to requirements.txt (stripping py2app)"
+    grep -v '^py2app' "$REQUIREMENTS" > /tmp/requirements_launcher.txt
+    "$PYTHON_BIN" -m pip install --quiet --no-warn-script-location -r /tmp/requirements_launcher.txt
+    rm -f /tmp/requirements_launcher.txt
+fi
 echo "  Dependencies installed"
 
 # Step 5: Write launcher script (no exec: run Python as child so process name stays Click-n-speak)
@@ -143,8 +151,9 @@ cat > "${BUNDLE}/Contents/Info.plist" << PLIST_END
 	<key>CFBundleShortVersionString</key><string>${VERSION}</string>
 	<key>CFBundleIconFile</key><string>icon</string>
 	<key>LSUIElement</key><true/>
-	<key>NSMicrophoneUsageDescription</key><string>This app needs access to your microphone to transcribe speech.</string>
-	<key>NSAppleEventsUsageDescription</key><string>This app needs to control other apps to inject transcribed text.</string>
+	<key>NSMicrophoneUsageDescription</key><string>Click-n-speak records audio from your microphone to transcribe speech into text.</string>
+	<key>NSAppleEventsUsageDescription</key><string>Click-n-speak sends keyboard events to type transcribed text into the active application.</string>
+	<key>NSAccessibilityUsageDescription</key><string>Click-n-speak uses accessibility to detect global hotkeys and to type transcribed text into any application.</string>
 </dict>
 </plist>
 PLIST_END

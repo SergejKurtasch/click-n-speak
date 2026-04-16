@@ -1,0 +1,17 @@
+# Dependencies for the .app bundle (excludes mlx-lm — AI Editor model is optional
+# and downloaded separately via scripts/download_ai_model.py).
+# Also excludes py2app and pytest (build/dev tools, not needed at runtime).
+mlx-whisper
+mlx
+pynput
+sounddevice
+numpy
+scipy
+pyobjc-framework-Quartz
+pyobjc-framework-Cocoa
+pyobjc-framework-ApplicationServices
+pyobjc-framework-AVFoundation
+tokenizers
+huggingface-hub
+rumps
+webrtcvad

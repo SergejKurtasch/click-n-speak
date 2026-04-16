@@ -8,6 +8,7 @@ scipy
 pyobjc-framework-Quartz
 pyobjc-framework-Cocoa
 pyobjc-framework-ApplicationServices
+pyobjc-framework-AVFoundation
 tokenizers
 huggingface-hub
 rumps

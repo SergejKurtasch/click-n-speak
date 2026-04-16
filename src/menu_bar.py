@@ -50,6 +50,7 @@ class ClickNSpeakApp(rumps.App):
         self._last_prompt_mtime = 0.0
         self._accessibility_granted = is_accessibility_trusted()
         self._accessibility_item = None  # set in setup_menu
+        self._wizard_pending = False
 
         # Build Menu
         self.setup_menu()
@@ -140,6 +141,42 @@ class ClickNSpeakApp(rumps.App):
         except Exception as e:
             log_error(f"Error checking prompt file: {e}")
 
+    # ------------------------------------------------------------------
+    # Setup wizard
+    # ------------------------------------------------------------------
+
+    def schedule_setup_wizard(self) -> None:
+        """Schedule the permission wizard to run after 1 s (once the menu bar is visible)."""
+        self._wizard_pending = True
+        log_info("Setup wizard scheduled.")
+
+    @rumps.timer(1.0)
+    def _run_wizard_if_pending(self, _) -> None:
+        """One-shot timer: runs the setup wizard on the first tick after scheduling."""
+        if not self._wizard_pending:
+            return
+        self._wizard_pending = False
+        try:
+            from .setup_wizard import run_setup_wizard
+            run_setup_wizard()
+            # Refresh accessibility status indicator after wizard
+            self._accessibility_granted = is_accessibility_trusted()
+            self._update_accessibility_menu_item()
+        except Exception as exc:
+            log_error(f"Setup wizard error: {exc}")
+
+    def _on_check_permissions(self, _) -> None:
+        """Menu item: re-run the permission wizard on demand."""
+        try:
+            from .permissions import reset_setup
+            from .setup_wizard import run_setup_wizard
+            reset_setup()
+            run_setup_wizard()
+            self._accessibility_granted = is_accessibility_trusted()
+            self._update_accessibility_menu_item()
+        except Exception as exc:
+            log_error(f"Check permissions failed: {exc}")
+
     @rumps.timer(5.0)
     def _check_accessibility_status(self, _):
         """Periodically checks accessibility status and auto-starts hotkeys when granted."""
@@ -179,6 +216,7 @@ class ClickNSpeakApp(rumps.App):
         self._accessibility_item = rumps.MenuItem("", callback=self._on_accessibility_click)
         self._update_accessibility_menu_item()
         self.menu.add(self._accessibility_item)
+        self.menu.add(rumps.MenuItem("🔐 Check Permissions", callback=self._on_check_permissions))
         self.menu.add(None)  # Separator
 
         # Model Selection

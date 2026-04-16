@@ -98,8 +98,9 @@ OPTIONS = {
         "CFBundleIdentifier": "com.sergej.clicknspeak",
         "CFBundleVersion": "0.2.0",
         "CFBundleShortVersionString": "0.2.0",
-        "NSMicrophoneUsageDescription": "This app needs access to your microphone to transcribe speech.",
-        "NSAppleEventsUsageDescription": "This app needs to control other apps to inject transcribed text.",
+        "NSMicrophoneUsageDescription": "Click-n-speak records audio from your microphone to transcribe speech into text.",
+        "NSAppleEventsUsageDescription": "Click-n-speak sends keyboard events to type transcribed text into the active application.",
+        "NSAccessibilityUsageDescription": "Click-n-speak uses accessibility to detect global hotkeys and to type transcribed text into any application.",
     },
     "packages": [
         "rumps",

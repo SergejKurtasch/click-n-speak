@@ -4,6 +4,7 @@ import threading
 
 from src.app import SVoiceRecApp
 from src.menu_bar import ClickNSpeakApp
+from src.permissions import all_permissions_granted, is_setup_done, mark_setup_done
 from src.updater import check_for_update
 from src.utils import (
     ensure_accessibility_permission,
@@ -72,6 +73,14 @@ def main() -> None:
 
         # Link them
         logic_app.set_menu_bar(menu_app)
+
+        # First-launch permission wizard: runs after the menu bar is visible.
+        # Schedules on the main thread via menu_bar so NSAlert has an active NSApp.
+        if not is_setup_done():
+            menu_app.schedule_setup_wizard()
+        elif not all_permissions_granted():
+            # Wizard was completed before but permissions were revoked/missing.
+            menu_app.schedule_setup_wizard()
 
         # Smart accessibility check: only prompt if not already trusted
         trusted = is_accessibility_trusted()
