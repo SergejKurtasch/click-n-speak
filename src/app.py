@@ -601,8 +601,6 @@ class SVoiceRecApp:
                 # -------------------------------------------
                 
                 self.transcribed_parts.append(text)
-                if len(self.transcribed_parts) > 10:
-                    self.transcribed_parts.pop(0)
 
                 if self._session_id == session_id:
                     if is_final_chunk:
