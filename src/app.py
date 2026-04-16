@@ -588,9 +588,13 @@ class SVoiceRecApp:
                     and self.ai_editor.is_ready()
                     and self.config.get("ai_editor_enabled", False)
                 ):
-                    if self.ai_editor.is_hallucination(text):
-                        log_info("AiEditor: skipping refinement due to hallucination filter.")
-                        text = ""
+                    word_count = len(text.split())
+                    if word_count <= 3:
+                        log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
+                    elif self.ai_editor.is_hallucination(text):
+                        # Hallucination filter triggers on some short/unusual inputs —
+                        # skip LLM refinement but keep the original Whisper text.
+                        log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
                     else:
                         refined = self.ai_editor.refine(text)
                         if refined and refined != text:

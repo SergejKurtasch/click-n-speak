@@ -16,9 +16,6 @@ TRANSCRIBER_TIMEOUT_SECONDS = 30
 # almost always silence/noise that cause Whisper to hallucinate for 10-43 seconds.
 MIN_FINAL_CHUNK_SAMPLES = 4800  # 0.3 seconds at 16 kHz
 
-# Consecutive same-word repeats at or above this count are treated as hallucination
-CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD = 2
-
 # Strip leading/trailing punctuation so "hundred", "hundred!", "hundred." count as same word
 _WORD_NORMALIZE = re.compile(r"^[\W_]+|[\W_]+$")
 
@@ -28,23 +25,26 @@ def _normalize_word(w: str) -> str:
     return _WORD_NORMALIZE.sub("", w.lower())
 
 
-def _has_consecutive_word_repetition(text: str, threshold: int = CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD) -> bool:
-    """Return True if the same word appears at least `threshold` times in a row (hallucination indicator)."""
+def _collapse_consecutive_word_repetition(text: str) -> str:
+    """Collapse runs of consecutive identical words to a single occurrence.
+
+    Handles two cases:
+    1. Real Whisper hallucination: model loops on same word dozens of times.
+    2. Sentence boundary: "...купить машину. Машину красного..." — should NOT be dropped.
+    In both cases collapsing is safer than discarding the whole chunk.
+    """
     words = text.split()
-    if len(words) < threshold:
-        return False
-    count = 1
+    if not words:
+        return text
+    result = [words[0]]
     prev = _normalize_word(words[0])
-    for i in range(1, len(words)):
-        curr = _normalize_word(words[i])
+    for w in words[1:]:
+        curr = _normalize_word(w)
         if curr and curr == prev:
-            count += 1
-            if count >= threshold:
-                return True
-        else:
-            count = 1
-            prev = curr
-    return False
+            continue  # skip duplicate, keep first occurrence
+        result.append(w)
+        prev = curr
+    return " ".join(result)
 
 
 def _call_mlx_transcribe(
@@ -291,13 +291,12 @@ class WhisperTranscriber:
                 )
                 return ""
 
-            if _has_consecutive_word_repetition(
-                text, CONSECUTIVE_REPEAT_HALLUCINATION_THRESHOLD
-            ):
+            collapsed = _collapse_consecutive_word_repetition(text)
+            if collapsed != text:
                 log_info(
-                    f"Filtered out hallucination (consecutive word repetition): '{text}'"
+                    f"Collapsed consecutive word repetition: '{text}' → '{collapsed}'"
                 )
-                return ""
+                text = collapsed
 
             if is_final_chunk:
                 log_info(f"Final chunk: keeping after light filter: '{text}'")
