@@ -225,7 +225,9 @@ class AiEditor:
         except Exception:
             prompt = f"{_SYSTEM_PROMPT}\n\nText:\n{text}\n\nCleaned text:"
 
-        max_allowed_tokens = min(200, max(50, int(len(text) * 1.5)))
+        # Russian text ≈ 3–4 chars/token; allow ~0.8× input length in tokens,
+        # capped at 1024 so the LLM never runs unbounded on huge inputs.
+        max_allowed_tokens = min(1024, max(64, int(len(text) * 0.8)))
         output_text = ""
         start_time = time.time()
 
@@ -288,7 +290,7 @@ class AiEditor:
 
         # Non-latin/non-cyrillic characters
         for char in stripped:
-            if char.isspace() or char.isdigit() or char in ".,!?;:()\"'-":
+            if char.isspace() or char.isdigit() or char in ".,!?;:()\"'-&@#%/":
                 continue
             code = ord(char)
             is_latin = (0x0041 <= code <= 0x005A) or (0x0061 <= code <= 0x007A)

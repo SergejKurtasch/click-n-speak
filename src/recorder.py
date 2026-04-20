@@ -177,15 +177,17 @@ class AudioRecorder:
             log_info("Previous stream close still in progress. Waiting up to 5s…")
             close_thread.join(timeout=5.0)
             if close_thread.is_alive():
+                # Thread is a daemon — it will be cleaned up by the OS eventually.
+                # Force-reset our state so the user isn't permanently locked out.
                 log_error(
                     "Previous audio stream close did not complete after 5s. "
-                    "Cannot safely create a new stream — aborting start."
+                    "Force-resetting recorder state to allow new recording."
                 )
-                raise RuntimeError(
-                    "Audio device busy: previous stream close is still pending."
-                )
-            log_info("Previous stream close completed. Proceeding with new recording.")
-            self._close_thread = None
+                self.stream = None
+                self._close_thread = None
+            else:
+                log_info("Previous stream close completed. Proceeding with new recording.")
+                self._close_thread = None
 
         log_info(f"Starting recording on device {self.device_id if self.device_id is not None else 'default'}...")
         self.audio_data = []

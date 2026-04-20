@@ -111,6 +111,19 @@ mkdir -p "${NUMBA_DEST}"
 cp "${NUMBA_STUB_SRC}" "${NUMBA_DEST}/__init__.py"
 echo "  ✅ numba stub installed"
 
+# Step 3c: Replace py2app's generic "applet" stub with a custom C launcher.
+# The applet binary reports its internal name as "applet" which causes macOS TCC
+# to show "applet" in Input Monitoring settings instead of "Click-n-speak".
+echo "Step 3c: Compiling and installing custom launcher..."
+LAUNCHER_SRC="$(cd "$(dirname "$0")" && pwd)/launcher_py2app.c"
+LAUNCHER_BIN="${BUNDLE}/Contents/MacOS/${APP_NAME}"
+if cc -arch arm64 -O2 -o "${LAUNCHER_BIN}" "${LAUNCHER_SRC}" 2>&1; then
+    chmod +x "${LAUNCHER_BIN}"
+    echo "  ✅ Custom launcher installed (replaces py2app applet)"
+else
+    echo "  ⚠️  Launcher compile failed — keeping py2app applet (TCC will show 'applet')"
+fi
+
 # Step 4: Re-sign the bundle (copying new files invalidates the signature)
 # Sign each .so/.dylib individually first — --deep misses some nested binaries on macOS 15+
 echo "Step 4: Re-signing bundle..."
