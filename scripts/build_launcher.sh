@@ -80,7 +80,7 @@ fi
 # Falls back to requirements.txt with py2app stripped.
 APP_REQUIREMENTS="${PROJECT_ROOT}/requirements_app.txt"
 if [ -f "${APP_REQUIREMENTS}" ]; then
-    echo "  Using ${APP_REQUIREMENTS} (mlx-lm excluded — AI Editor model is optional)"
+    echo "  Using ${APP_REQUIREMENTS}"
     "$PYTHON_BIN" -m pip install --quiet --no-warn-script-location -r "${APP_REQUIREMENTS}"
 else
     echo "  Falling back to requirements.txt (stripping py2app)"
@@ -90,25 +90,61 @@ else
 fi
 echo "  Dependencies installed"
 
-# Step 5: Write launcher script (no exec: run Python as child so process name stays Click-n-speak)
-echo "Step 5: Writing launcher script..."
-LAUNCHER="${MACOS}/${APP_NAME}"
-cat > "$LAUNCHER" << 'LAUNCHER_END'
-#!/bin/bash
-set -e
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
-RESOURCES="$APP_PATH/Contents/Resources"
-ROOT="$RESOURCES/app"
-PYTHON="$RESOURCES/python/bin/python3"
-if [ ! -x "$PYTHON" ]; then
-    PYTHON=$(find "$RESOURCES/python/bin" -name 'python*' -type f 2>/dev/null | head -1)
+# Step 4b: Patch mlx_whisper to remove torch/scipy/numba dependencies.
+# torch_whisper.py is never imported — delete it.
+# timing.py uses scipy+numba only for word-timestamps (we never enable word_timestamps) — replace with stub.
+# Then uninstall the now-unused heavy packages to shrink the bundle.
+echo "Step 4b: Patching mlx_whisper and removing unused heavy packages..."
+MLX_WHISPER_DIR="${PYTHON_DIR}/lib/python3.11/site-packages/mlx_whisper"
+
+# Remove unused torch_whisper.py (never imported anywhere in mlx_whisper)
+rm -f "${MLX_WHISPER_DIR}/torch_whisper.py" "${MLX_WHISPER_DIR}/__pycache__/torch_whisper"*.pyc 2>/dev/null || true
+
+# Replace timing.py with a stub — add_word_timestamps is only called when word_timestamps=True,
+# which we never enable; scipy+numba pulled in at module load time would waste 130MB.
+cat > "${MLX_WHISPER_DIR}/timing.py" << 'TIMING_STUB'
+# Stub: word_timestamps feature disabled — avoids scipy+numba dependencies.
+import numpy as np
+
+def add_word_timestamps(*, segments, model, tokenizer, mel, num_frames, **kwargs):
+    return segments
+TIMING_STUB
+rm -f "${MLX_WHISPER_DIR}/__pycache__/timing"*.pyc 2>/dev/null || true
+
+# Uninstall packages that were only needed by torch_whisper.py / timing.py
+UNINSTALL_PKGS="torch torchvision torchaudio scipy sympy networkx llvmlite numba mpmath triton"
+for pkg in $UNINSTALL_PKGS; do
+    "$PYTHON_BIN" -m pip uninstall --quiet -y "$pkg" 2>/dev/null || true
+done
+
+# Remove pip and setuptools — not needed at runtime, save ~20MB
+"$PYTHON_BIN" -m pip uninstall --quiet -y pip setuptools 2>/dev/null || true
+
+# Clean up .pyc caches and __pycache__ dirs to further reduce size
+find "${PYTHON_DIR}/lib/python3.11/site-packages" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+find "${PYTHON_DIR}/lib/python3.11/site-packages" -name "*.pyc" -delete 2>/dev/null || true
+
+# Patch webrtcvad.py — it uses pkg_resources only for __version__ (setuptools was removed)
+WEBRTCVAD_PY="${PYTHON_DIR}/lib/python3.11/site-packages/webrtcvad.py"
+if [ -f "$WEBRTCVAD_PY" ]; then
+    sed -i '' 's/import pkg_resources//' "$WEBRTCVAD_PY"
+    sed -i '' "s/__version__ = pkg_resources.get_distribution('webrtcvad').version/__version__ = '2.0.10'/" "$WEBRTCVAD_PY"
+    echo "  Patched webrtcvad.py (removed pkg_resources dependency)"
 fi
-export CLICK_N_SPEAK_APP="$APP_PATH"
-cd "$ROOT"
-"$PYTHON" main.py
-LAUNCHER_END
+
+SIZE_AFTER=$(du -sh "${PYTHON_DIR}/lib/python3.11/site-packages" 2>/dev/null | cut -f1)
+echo "  site-packages size after cleanup: ${SIZE_AFTER}"
+
+# Step 5: Compile native C launcher so macOS TCC shows "Click-n-speak" in permission dialogs.
+# A bash-script launcher causes TCC to attribute requests to python3, not the app bundle.
+# With a compiled binary that execv's into Python, the responsible-process association
+# (set by LaunchServices when the .app is opened) is preserved through execv.
+echo "Step 5: Compiling native launcher..."
+LAUNCHER="${MACOS}/${APP_NAME}"
+LAUNCHER_SRC="$(cd "$(dirname "$0")" && pwd)/launcher.c"
+cc -arch arm64 -O2 -o "$LAUNCHER" "$LAUNCHER_SRC"
 chmod +x "$LAUNCHER"
+echo "  Compiled native launcher: $LAUNCHER"
 
 # Step 5b: App icon from CnS.png (falls back to icon_base.png)
 ICON_SOURCE=""
@@ -157,6 +193,11 @@ cat > "${BUNDLE}/Contents/Info.plist" << PLIST_END
 </dict>
 </plist>
 PLIST_END
+
+# Step 7: Ad-hoc codesign the bundle so macOS Gatekeeper accepts it locally.
+# Without signing, the kernel may not preserve the responsible-process association through execv.
+echo "Step 7: Signing bundle (ad-hoc)..."
+codesign --force --deep --sign - "${BUNDLE}" 2>/dev/null && echo "  Bundle signed" || echo "  Warning: codesign failed (non-critical for local use)"
 
 echo ""
 echo "=== Build complete ==="

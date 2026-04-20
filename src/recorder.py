@@ -161,8 +161,9 @@ class AudioRecorder:
         chunk = np.concatenate(self.audio_data, axis=0).flatten()
 
         if self.chunk_callback:
-            # Run callback in a separate thread to not block the audio stream
-            threading.Thread(target=self.chunk_callback, args=(chunk,), daemon=True).start()
+            # on_chunk_received just does queue.put_nowait — safe to call directly
+            # from the sounddevice callback thread without spawning a new thread.
+            self.chunk_callback(chunk)
 
     def start(self, chunk_callback=None):
         if self.recording:
@@ -171,15 +172,15 @@ class AudioRecorder:
         # If the previous stream's abort/close is still running in a daemon thread,
         # wait for it before creating a new stream.  The close thread holds a PortAudio
         # lock; creating a new stream while it is still active can deadlock.
-        if self._close_thread is not None and self._close_thread.is_alive():
+        close_thread = self._close_thread
+        if close_thread is not None and close_thread.is_alive():
             log_info("Previous stream close still in progress. Waiting up to 5s…")
-            self._close_thread.join(timeout=5.0)
-            if self._close_thread.is_alive():
+            close_thread.join(timeout=5.0)
+            if close_thread.is_alive():
                 log_error(
                     "Previous audio stream close did not complete after 5s. "
                     "Cannot safely create a new stream — aborting start."
                 )
-                # Raise so app.py's except-block can notify the user.
                 raise RuntimeError(
                     "Audio device busy: previous stream close is still pending."
                 )

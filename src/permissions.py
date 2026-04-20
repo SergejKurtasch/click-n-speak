@@ -134,9 +134,67 @@ def wait_for_accessibility(timeout: float = 120.0, poll_interval: float = 1.0) -
 
 
 # ---------------------------------------------------------------------------
+# Input Monitoring (macOS 15+ requires this for CGEventTap / global hotkeys)
+# ---------------------------------------------------------------------------
+
+def check_input_monitoring() -> bool:
+    """Return True if the process can create a keyboard CGEventTap.
+
+    On macOS 15+ (Sequoia / Darwin 24+) Input Monitoring is a separate TCC
+    permission from Accessibility.  CGEventTapCreate returns None silently
+    when it is missing, causing pynput's listener to exit immediately.
+    """
+    try:
+        from Quartz import (  # type: ignore
+            CGEventTapCreate,
+            CFMachPortInvalidate,
+            kCGSessionEventTap,
+            kCGHeadInsertEventTap,
+            kCGEventTapOptionListenOnly,
+            CGEventMaskBit,
+            kCGEventKeyDown,
+        )
+
+        def _cb(proxy, type_, event, refcon):
+            return event
+
+        tap = CGEventTapCreate(
+            kCGSessionEventTap,
+            kCGHeadInsertEventTap,
+            kCGEventTapOptionListenOnly,
+            CGEventMaskBit(kCGEventKeyDown),
+            _cb,
+            None,
+        )
+        if tap is not None:
+            CFMachPortInvalidate(tap)
+            return True
+        return False
+    except Exception as exc:
+        log.warning("Could not check input monitoring: %s", exc)
+        return False  # assume denied if we can't verify — safer than assuming granted
+
+
+def open_input_monitoring_settings() -> None:
+    """Open System Settings on the Input Monitoring privacy pane."""
+    import subprocess
+    subprocess.run(
+        [
+            "open",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+        ],
+        check=False,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Aggregate status
 # ---------------------------------------------------------------------------
 
 def all_permissions_granted() -> bool:
-    """Return True if both microphone and accessibility are granted."""
-    return check_microphone() == "granted" and check_accessibility()
+    """Return True if microphone, accessibility, and input monitoring are all granted."""
+    return (
+        check_microphone() == "granted"
+        and check_accessibility()
+        and check_input_monitoring()
+    )

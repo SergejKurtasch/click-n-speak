@@ -23,6 +23,7 @@ _ICON_DOWNLOAD = "\u2b07\ufe0f"  # ⬇️  — model needs to download
 from .log_analyzer import generate_terms_hint_from_history
 from .phrase_history import get_last_phrases
 from .updater import check_for_update
+from .permissions import check_input_monitoring, open_input_monitoring_settings
 from .utils import (
     build_initial_prompt,
     copy_to_clipboard,
@@ -36,9 +37,31 @@ from .utils import (
     log_error,
     log_info,
     open_accessibility_settings,
+    relaunch_app,
     save_config_to_disk,
     send_notification,
 )
+
+
+def _prompt_restart(reason: str) -> None:
+    """Show a modal asking the user to relaunch the app. Relaunches on OK."""
+    try:
+        from AppKit import NSAlert  # type: ignore
+        alert = NSAlert.alloc().init()
+        alert.setAlertStyle_(1)
+        alert.setMessageText_("Restart Click-n-speak")
+        alert.setInformativeText_(
+            f"{reason}\n\nClick-n-speak needs to restart to activate the global "
+            f"hotkey (Alt+Space).\n\nRestart now?"
+        )
+        alert.addButtonWithTitle_("Restart Now")
+        alert.addButtonWithTitle_("Later")
+        clicked = alert.runModal() - 1000
+        if clicked == 0:
+            log_info("User accepted restart prompt — relaunching app.")
+            relaunch_app()
+    except Exception as exc:
+        log_error(f"Restart prompt failed: {exc}")
 
 
 class ClickNSpeakApp(rumps.App):
@@ -50,10 +73,15 @@ class ClickNSpeakApp(rumps.App):
         self._last_prompt_mtime = 0.0
         self._accessibility_granted = is_accessibility_trusted()
         self._accessibility_item = None  # set in setup_menu
+        self._input_monitoring_ok: bool | None = None  # None = unknown until health check
+        self._input_monitoring_item = None  # set in setup_menu
         self._wizard_pending = False
 
         # Build Menu
         self.setup_menu()
+
+        # Hook tap-failure callback after menu is built so _input_monitoring_item exists
+        self.main_app.hotkey_handler.on_tap_failed = self._on_tap_failed
         self._migrate_old_prompt()
         # Asynchronously check which Whisper models are already cached
         self._start_model_cache_check()
@@ -152,7 +180,17 @@ class ClickNSpeakApp(rumps.App):
 
     @rumps.timer(1.0)
     def _run_wizard_if_pending(self, _) -> None:
-        """One-shot timer: runs the setup wizard on the first tick after scheduling."""
+        """One-shot timer: runs the setup wizard and checks Input Monitoring on first tick."""
+        # Check Input Monitoring once after NSApp has started
+        if self._input_monitoring_ok is None:
+            self._input_monitoring_ok = check_input_monitoring()
+            self._update_input_monitoring_item()
+            if not self._input_monitoring_ok:
+                log_error(
+                    "Input Monitoring permission not granted — hotkeys will not work. "
+                    "Add Click-n-speak to Privacy & Security → Input Monitoring."
+                )
+
         if not self._wizard_pending:
             return
         self._wizard_pending = False
@@ -174,29 +212,48 @@ class ClickNSpeakApp(rumps.App):
             run_setup_wizard()
             self._accessibility_granted = is_accessibility_trusted()
             self._update_accessibility_menu_item()
+            self._input_monitoring_ok = check_input_monitoring()
+            self._update_input_monitoring_item()
+            # Wizard shows its own restart prompt on completion; no auto-restart here.
         except Exception as exc:
             log_error(f"Check permissions failed: {exc}")
 
     @rumps.timer(5.0)
     def _check_accessibility_status(self, _):
-        """Periodically checks accessibility status and auto-starts hotkeys when granted."""
+        """Periodically refresh permission indicators.
+
+        Does NOT auto-restart the hotkey listener — on macOS 15+, starting the
+        pynput listener after permissions flip live triggers a TSM crash.
+        Instead we prompt the user to relaunch the app.
+        """
+        from .setup_wizard import is_wizard_active
         try:
             trusted = is_accessibility_trusted()
             if trusted != self._accessibility_granted:
                 self._accessibility_granted = trusted
                 self._update_accessibility_menu_item()
-                if trusted:
-                    log_info("Accessibility permission detected — restarting hotkey listener.")
-                    try:
-                        self.main_app.hotkey_handler.restart()
-                        self.main_app.notify("Доступ разрешен", "Горячие клавиши активированы.")
-                    except Exception as e:
-                        log_error(f"Failed to restart hotkey listener: {e}")
+
+            if trusted:
+                im_ok = check_input_monitoring()
+                if im_ok != self._input_monitoring_ok:
+                    self._input_monitoring_ok = im_ok
+                    self._update_input_monitoring_item()
+
+            # If all permissions are now granted but the listener isn't running,
+            # the user must restart. Prompt once (wizard handles its own prompt).
+            if (
+                trusted
+                and self._input_monitoring_ok
+                and not self.main_app.hotkey_handler.is_listener_alive()
+                and not is_wizard_active()
+                and not getattr(self, "_restart_prompt_shown", False)
+            ):
+                self._restart_prompt_shown = True
+                _prompt_restart("All required permissions are now granted.")
         except Exception as e:
             log_error(f"Error in accessibility status check: {e}")
 
     def _update_accessibility_menu_item(self) -> None:
-        """Update the accessibility status menu item text."""
         if self._accessibility_item is None:
             return
         if self._accessibility_granted:
@@ -205,17 +262,53 @@ class ClickNSpeakApp(rumps.App):
             self._accessibility_item.title = "⚠️ Accessibility Required"
 
     def _on_accessibility_click(self, _) -> None:
-        """Handle click on accessibility menu item: open settings if not granted."""
         if not self._accessibility_granted:
             open_accessibility_settings()
         else:
             self.main_app.notify("Доступ", "Права доступа уже предоставлены.")
 
+    # ------------------------------------------------------------------
+    # Input Monitoring (macOS 15+ — separate from Accessibility)
+    # ------------------------------------------------------------------
+
+    def _on_tap_failed(self) -> None:
+        """Called from hotkey health-check thread when CGEventTap creation failed."""
+        self._input_monitoring_ok = False
+        self.main_app._submit_for_main_thread(self._show_input_monitoring_required, [], {})
+
+    def _show_input_monitoring_required(self) -> None:
+        from .setup_wizard import is_wizard_active
+        self._update_input_monitoring_item()
+        if not is_wizard_active():
+            send_notification(
+                "Click-n-speak — Hotkeys Disabled",
+                "Add Click-n-speak to Privacy & Security → Input Monitoring to enable hotkeys.",
+            )
+
+    def _update_input_monitoring_item(self) -> None:
+        if self._input_monitoring_item is None:
+            return
+        if self._input_monitoring_ok is None:
+            self._input_monitoring_item.title = "⌨️ Input Monitoring (checking…)"
+        elif self._input_monitoring_ok:
+            self._input_monitoring_item.title = "✅ Input Monitoring Granted"
+        else:
+            self._input_monitoring_item.title = "⚠️ Input Monitoring Required"
+
+    def _on_input_monitoring_click(self, _) -> None:
+        if not self._input_monitoring_ok:
+            open_input_monitoring_settings()
+        else:
+            self.main_app.notify("Доступ", "Input Monitoring уже разрешён.")
+
     def setup_menu(self):
-        # Accessibility status at the top
+        # Accessibility + Input Monitoring status at the top
         self._accessibility_item = rumps.MenuItem("", callback=self._on_accessibility_click)
         self._update_accessibility_menu_item()
         self.menu.add(self._accessibility_item)
+        self._input_monitoring_item = rumps.MenuItem("", callback=self._on_input_monitoring_click)
+        self._update_input_monitoring_item()
+        self.menu.add(self._input_monitoring_item)
         self.menu.add(rumps.MenuItem("🔐 Check Permissions", callback=self._on_check_permissions))
         self.menu.add(None)  # Separator
 

@@ -84,7 +84,7 @@ def find_native_dylibs():
 
 
 APP = ["main.py"]
-DATA_FILES = ["config.json"]
+DATA_FILES = ["config.json", "CnS.png"]
 
 # Build frameworks list dynamically
 frameworks_list = find_native_dylibs()
@@ -106,6 +106,7 @@ OPTIONS = {
         "rumps",
         "src",
         "_sounddevice_data",
+        "mlx_lm",
     ],
     "includes": [
         "pynput.keyboard._darwin",

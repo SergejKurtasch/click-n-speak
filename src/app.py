@@ -581,42 +581,46 @@ class SVoiceRecApp:
                     # Build raw_whisper_text from pure Whisper output, not AI-edited parts
                     self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
 
-                # --- AI Editor post-processing (optional) ---
-                if (
-                    is_final_chunk
-                    and self.ai_editor is not None
-                    and self.ai_editor.is_ready()
-                    and self.config.get("ai_editor_enabled", False)
-                ):
-                    word_count = len(text.split())
-                    if word_count <= 3:
-                        log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
-                    elif self.ai_editor.is_hallucination(text):
-                        # Hallucination filter triggers on some short/unusual inputs —
-                        # skip LLM refinement but keep the original Whisper text.
-                        log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
-                    else:
-                        refined = self.ai_editor.refine(text)
-                        if refined and refined != text:
-                            log_info(f"AiEditor refined: '{text}' → '{refined}'")
-                            is_ai_edited = True
-                            self._ai_edited_text = refined
-                        text = refined if refined else text
-                # -------------------------------------------
-                
                 self.transcribed_parts.append(text)
 
                 if self._session_id == session_id:
                     if is_final_chunk:
                         full_text = " ".join(self.transcribed_parts).strip()
-                        
-                        # Stop delayed transcribing timer to not interrupt user
-                        if self._delayed_transcribing_timer is not None:
-                            try:
-                                self._delayed_transcribing_timer.cancel()
-                            except Exception:
-                                pass
-                            self._delayed_transcribing_timer = None
+
+                        # --- AI Editor post-processing (optional) ---
+                        # Refine the FULL accumulated text, not just the final chunk,
+                        # so partial chunks (which make up most of the content) are also
+                        # punctuated and capitalized.
+                        if (
+                            self.ai_editor is not None
+                            and self.ai_editor.is_ready()
+                            and self.config.get("ai_editor_enabled", False)
+                        ):
+                            word_count = len(full_text.split())
+                            if word_count <= 3:
+                                log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
+                            elif self.ai_editor.is_hallucination(full_text):
+                                log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
+                            else:
+                                refined = self.ai_editor.refine(full_text)
+                                if refined and refined != full_text:
+                                    log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
+                                    is_ai_edited = True
+                                    self._ai_edited_text = refined
+                                    full_text = refined
+                        # -------------------------------------------
+
+                        # Cancel delayed timer on main thread to avoid race with stop_recording_and_process.
+                        # Both write _delayed_transcribing_timer; submit the cancel so all access
+                        # happens on the same (main) thread via the queue.
+                        def _cancel_delayed_timer():
+                            if self._delayed_transcribing_timer is not None:
+                                try:
+                                    self._delayed_transcribing_timer.cancel()
+                                except Exception:
+                                    pass
+                                self._delayed_transcribing_timer = None
+                        self._submit_for_main_thread(_cancel_delayed_timer)
 
                         _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
 
@@ -653,6 +657,8 @@ class SVoiceRecApp:
                     )
             else:
                 log_info("Transcriber returned empty text for this chunk.")
+                if is_final_chunk and not self.transcribed_parts and self._session_id == session_id:
+                    self.notify("Нет речи", "Не удалось распознать речь. Попробуйте ещё раз.", delay=2.0)
                 if is_final_chunk and self.transcribed_parts and self._session_id == session_id:
                     full_text = " ".join(self.transcribed_parts).strip()
                     if full_text and self._preview_panel:

@@ -1,12 +1,12 @@
-# Dependencies for the .app bundle (excludes mlx-lm — AI Editor model is optional
-# and downloaded separately via scripts/download_ai_model.py).
-# Also excludes py2app and pytest (build/dev tools, not needed at runtime).
+# Dependencies for the .app bundle.
+# mlx-lm is included; the Qwen model itself is downloaded to ~/.cache/huggingface/ at first run.
+# Excludes py2app and pytest (build/dev tools, not needed at runtime).
 mlx-whisper
 mlx
+mlx-lm
 pynput
 sounddevice
 numpy
-scipy
 pyobjc-framework-Quartz
 pyobjc-framework-Cocoa
 pyobjc-framework-ApplicationServices

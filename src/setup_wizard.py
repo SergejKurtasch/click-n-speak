@@ -2,37 +2,46 @@
 First-launch permission setup wizard for Click-n-speak.
 
 Shows a sequential NSAlert-based dialog flow that guides the user through
-granting Microphone and Accessibility permissions. Runs on the main thread.
+granting Microphone, Accessibility, and Input Monitoring permissions.
+Runs on the main thread.
 
 Wizard steps:
   1. Welcome — explains what the app does and what it needs
   2. Microphone — triggers the system permission dialog
-  3. Accessibility — opens System Settings with step-by-step instructions
-  4. Done — confirms the setup and explains how to re-open if needed
+  3. Accessibility — opens System Settings, waits with polling loop
+  4. Input Monitoring — opens System Settings, waits with polling loop
+  5. Done — confirms setup
 """
 import logging
 import threading
+import time
 
 from .permissions import (
     check_accessibility,
+    check_input_monitoring,
     check_microphone,
     mark_setup_done,
     open_accessibility_settings,
+    open_input_monitoring_settings,
     request_microphone_sync,
     wait_for_accessibility,
 )
 
 log = logging.getLogger(__name__)
 
-# How long (seconds) to wait for the user to grant accessibility in settings
 _ACCESSIBILITY_WAIT_TIMEOUT = 120.0
+_INPUT_MONITORING_WAIT_TIMEOUT = 120.0
+
+# Set to True while the wizard is running so background timers skip their notifications
+_WIZARD_ACTIVE = False
+
+
+def is_wizard_active() -> bool:
+    return _WIZARD_ACTIVE
 
 
 def _alert(title: str, body: str, buttons: list[str], style: int = 1) -> int:
-    """Show a synchronous NSAlert and return the index of the clicked button (0-based).
-
-    style: 1 = informational (default), 2 = warning, 0 = critical
-    """
+    """Show a synchronous NSAlert and return the index of the clicked button (0-based)."""
     try:
         from AppKit import NSAlert  # type: ignore
         alert = NSAlert.alloc().init()
@@ -41,151 +50,208 @@ def _alert(title: str, body: str, buttons: list[str], style: int = 1) -> int:
         alert.setInformativeText_(body)
         for btn in buttons:
             alert.addButtonWithTitle_(btn)
-        # runModal returns 1000 for first button, 1001 for second, etc.
-        response = alert.runModal()
-        return response - 1000
+        return alert.runModal() - 1000
     except Exception as exc:
         log.error("NSAlert failed: %s", exc)
-        return 0  # treat as first button
+        return 0
 
 
 def run_setup_wizard() -> None:
-    """Run the full permission setup wizard on the main thread.
-
-    Safe to call even if permissions are already granted — it will skip
-    unnecessary steps and mark setup as done silently.
-    """
+    """Run the full permission setup wizard on the main thread."""
+    global _WIZARD_ACTIVE
+    _WIZARD_ACTIVE = True
     try:
         _run_wizard()
     except Exception as exc:
         log.error("Setup wizard failed: %s", exc)
-        mark_setup_done()  # don't block the app on wizard crash
+        mark_setup_done()
+    finally:
+        _WIZARD_ACTIVE = False
 
 
 def _run_wizard() -> None:
     mic = check_microphone()
     acc = check_accessibility()
+    im = check_input_monitoring()
 
     need_mic = mic not in ("granted", "restricted")
     need_acc = not acc
+    need_im = not im
 
-    if not need_mic and not need_acc:
+    if not need_mic and not need_acc and not need_im:
         log.info("All permissions already granted — skipping wizard.")
         mark_setup_done()
         return
 
-    # ── Step 1: Welcome ──────────────────────────────────────────────────────
+    # Count total steps for progress display
+    steps = [p for p in [need_mic, need_acc, need_im] if p]
+    total_steps = len(steps)
+
+    # ── Welcome ──────────────────────────────────────────────────────────────
     permissions_needed = []
     if need_mic:
-        permissions_needed.append("🎙 Microphone — to hear your speech")
+        permissions_needed.append("🎙  Microphone — to record your speech")
     if need_acc:
-        permissions_needed.append("⌨️ Accessibility — for hotkeys and text insertion")
+        permissions_needed.append("⌨️  Accessibility — to type text into any app")
+    if need_im:
+        permissions_needed.append("🔍  Input Monitoring — for the global hotkey (Alt+Space)")
 
     perm_list = "\n".join(f"  • {p}" for p in permissions_needed)
 
     clicked = _alert(
         "Welcome to Click-n-speak",
-        f"To work correctly, the app needs the following permissions:\n\n"
+        f"The app needs {total_steps} permission{'s' if total_steps > 1 else ''} to work:\n\n"
         f"{perm_list}\n\n"
-        f"The next screens will guide you through granting them. "
-        f"This takes about 30 seconds.",
-        ["Get Started", "Skip"],
+        f"Each step opens System Settings. Follow the on-screen instructions — "
+        f"this takes about a minute.",
+        ["Let's Go", "Skip"],
     )
     if clicked != 0:
         log.info("User skipped the setup wizard.")
         mark_setup_done()
         return
 
-    # ── Step 2: Microphone ───────────────────────────────────────────────────
+    step = 0
+
+    # ── Step: Microphone ─────────────────────────────────────────────────────
     if need_mic:
+        step += 1
+        label = f"Step {step} of {total_steps}"
+
         if mic == "denied":
             _alert(
-                "Microphone Access Denied",
+                f"🎙  Microphone Access  ({label})",
                 "Microphone access was previously denied.\n\n"
-                "Please go to:\n"
-                "  System Settings → Privacy & Security → Microphone\n"
-                "and enable Click-n-speak.",
+                "System Settings will open. Find Click-n-speak under Microphone "
+                "and toggle it ON.",
                 ["Open Settings", "Skip"],
             )
             from .permissions import open_microphone_settings
             open_microphone_settings()
         else:
-            # undetermined — trigger the system dialog
             _alert(
-                "🎙 Microphone Access",
-                "Click-n-speak needs microphone access to transcribe your speech.\n\n"
-                "Click \"Continue\" — a system dialog will appear asking you to "
-                "allow microphone access. Click \"Allow\".",
-                ["Continue"],
+                f"🎙  Microphone Access  ({label})",
+                "Click-n-speak needs to hear your speech.\n\n"
+                "Click \"Request Access\" — macOS will show a permission dialog. "
+                "Click Allow.",
+                ["Request Access"],
             )
             granted = request_microphone_sync(timeout=30.0)
             if not granted:
                 _alert(
                     "Microphone Not Granted",
-                    "Microphone access was not granted.\n\n"
-                    "You can enable it later in:\n"
+                    "Microphone access was not granted. You can enable it later in:\n"
                     "  System Settings → Privacy & Security → Microphone\n\n"
-                    "The app will open System Settings now.",
-                    ["Open Settings", "Skip"],
+                    "Opening System Settings now.",
+                    ["Open Settings", "Continue Anyway"],
                 )
                 from .permissions import open_microphone_settings
                 open_microphone_settings()
             else:
                 _alert(
                     "✅ Microphone Granted",
-                    "Microphone access has been granted. Click-n-speak can now "
-                    "hear your speech.",
-                    ["Continue"],
+                    "Done! Click-n-speak can now hear your speech.",
+                    ["Next →"],
                 )
 
-    # ── Step 3: Accessibility ────────────────────────────────────────────────
+    # ── Step: Accessibility ──────────────────────────────────────────────────
     if need_acc:
+        step += 1
+        label = f"Step {step} of {total_steps}"
+
         clicked = _alert(
-            "⌨️ Accessibility Access",
-            "Accessibility is required for:\n"
-            "  • Global hotkeys (Alt+Space to start/stop recording)\n"
-            "  • Typing transcribed text into any app\n\n"
-            "Click \"Open Settings\" — System Settings will open on the Accessibility "
-            "page. Find \"Click-n-speak\" in the list and toggle it ON.\n\n"
-            "Come back here and click \"Done\" when you've enabled it.",
+            f"⌨️  Accessibility Access  ({label})",
+            "Accessibility lets Click-n-speak type transcribed text into any app.\n\n"
+            "Click \"Open Settings\" — System Settings will open on the Accessibility page.\n\n"
+            "  1. Find Click-n-speak in the list\n"
+            "  2. Toggle it ON\n"
+            "  3. Come back here — this dialog closes automatically.",
             ["Open Settings", "Skip"],
         )
-
         if clicked == 0:
             open_accessibility_settings()
-
-            # Poll in background; show a waiting dialog
-            _wait_for_accessibility_with_dialog()
+            _wait_for_permission_with_dialog(
+                title="Waiting for Accessibility…",
+                body=(
+                    "System Settings → Privacy & Security → Accessibility\n\n"
+                    "Find Click-n-speak and toggle it ON.\n\n"
+                    "This dialog closes automatically once access is granted."
+                ),
+                check_fn=check_accessibility,
+                timeout=_ACCESSIBILITY_WAIT_TIMEOUT,
+                granted_title="✅ Accessibility Granted",
+                granted_body="Accessibility access confirmed. Text injection is now active.",
+            )
         else:
             log.info("User skipped accessibility setup.")
 
-    # ── Step 4: Done ─────────────────────────────────────────────────────────
+    # ── Step: Input Monitoring ───────────────────────────────────────────────
+    if need_im:
+        step += 1
+        label = f"Step {step} of {total_steps}"
+
+        clicked = _alert(
+            f"🔍  Input Monitoring  ({label})",
+            "Input Monitoring lets Click-n-speak detect the global hotkey (Alt+Space).\n\n"
+            "On macOS 15+, this is a separate permission from Accessibility.\n\n"
+            "Click \"Open Settings\" — System Settings will open on the Input Monitoring page.\n\n"
+            "  1. Find Click-n-speak in the list\n"
+            "  2. Toggle it ON\n"
+            "  3. Come back here — this dialog closes automatically.",
+            ["Open Settings", "Skip"],
+        )
+        if clicked == 0:
+            open_input_monitoring_settings()
+            _wait_for_permission_with_dialog(
+                title="Waiting for Input Monitoring…",
+                body=(
+                    "System Settings → Privacy & Security → Input Monitoring\n\n"
+                    "Find Click-n-speak and toggle it ON.\n\n"
+                    "This dialog closes automatically once access is granted."
+                ),
+                check_fn=check_input_monitoring,
+                timeout=_INPUT_MONITORING_WAIT_TIMEOUT,
+                granted_title="✅ Input Monitoring Granted",
+                granted_body="Input Monitoring confirmed. The Alt+Space hotkey is now active.",
+            )
+        else:
+            log.info("User skipped input monitoring setup.")
+
+    # ── Done ─────────────────────────────────────────────────────────────────
     mic_ok = check_microphone() == "granted"
     acc_ok = check_accessibility()
+    im_ok = check_input_monitoring()
 
-    if mic_ok and acc_ok:
-        _alert(
-            "✅ All Set!",
-            "Click-n-speak is ready to use.\n\n"
-            "Press Alt+Space to start recording. Press it again to stop "
-            "and get your transcription.\n\n"
-            "You can always check permissions from the menu bar icon → "
-            "\"Check Permissions\".",
-            ["Start Using Click-n-speak"],
+    if mic_ok and acc_ok and im_ok:
+        # Permissions were just granted in this session — the pynput listener can't
+        # start safely until the process is relaunched (macOS 15+ TSM thread check).
+        clicked = _alert(
+            "✅ All Set — One Last Step",
+            "All permissions are granted.\n\n"
+            "Click-n-speak needs to restart once to activate the global hotkey "
+            "(Alt+Space). After the restart, everything will work immediately.",
+            ["Restart Now", "Later"],
         )
+        mark_setup_done()
+        log.info("Setup wizard completed. User chose: %s", "restart" if clicked == 0 else "later")
+        if clicked == 0:
+            from .utils import relaunch_app
+            relaunch_app()
+        return
     else:
         missing = []
         if not mic_ok:
             missing.append("Microphone")
         if not acc_ok:
             missing.append("Accessibility")
-        missing_str = " and ".join(missing)
+        if not im_ok:
+            missing.append("Input Monitoring")
         _alert(
             "⚠️ Setup Incomplete",
-            f"The following permissions are still missing:\n  • {missing_str}\n\n"
-            f"The app will still start, but some features won't work "
-            f"until you grant the missing permissions.\n\n"
-            f"You can retry anytime from the menu bar icon → \"Check Permissions\".",
+            f"Still missing: {', '.join(missing)}\n\n"
+            f"The app will start, but some features won't work until "
+            f"you grant the remaining permissions.\n\n"
+            f"Retry anytime: menu bar icon → Check Permissions.",
             ["OK"],
             style=2,
         )
@@ -194,80 +260,66 @@ def _run_wizard() -> None:
     log.info("Setup wizard completed.")
 
 
-def _wait_for_accessibility_with_dialog() -> None:
-    """Show a 'waiting' dialog while polling for accessibility in a background thread.
-
-    Closes automatically when accessibility is detected or after timeout.
-    """
+def _wait_for_permission_with_dialog(
+    *,
+    title: str,
+    body: str,
+    check_fn,
+    timeout: float,
+    granted_title: str,
+    granted_body: str,
+) -> None:
+    """Generic polling dialog: shows a waiting alert and closes when check_fn() → True."""
     try:
-        from AppKit import (  # type: ignore
-            NSAlert,
-            NSTimer,
-            NSRunLoop,
-            NSDefaultRunLoopMode,
-            NSDate,
-        )
+        from AppKit import NSAlert, NSRunLoop, NSDefaultRunLoopMode, NSDate, NSApp  # type: ignore
     except ImportError:
-        # Fallback: just wait silently
-        wait_for_accessibility(timeout=_ACCESSIBILITY_WAIT_TIMEOUT)
+        # Headless fallback
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if check_fn():
+                return
+            time.sleep(1.0)
         return
 
-    # Use a simpler approach: short-poll loop on main thread with a progress alert
     granted = [False]
     cancel = [False]
 
-    def _poll_thread():
-        import time
-        deadline = time.monotonic() + _ACCESSIBILITY_WAIT_TIMEOUT
+    def _poll():
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and not cancel[0]:
-            if check_accessibility():
+            if check_fn():
                 granted[0] = True
                 return
             time.sleep(1.0)
 
-    t = threading.Thread(target=_poll_thread, daemon=True)
+    t = threading.Thread(target=_poll, daemon=True)
     t.start()
 
-    # Show a non-modal progress dialog — use a simple runModal alert with a timer
-    # that aborts it once accessibility is detected.
     alert = NSAlert.alloc().init()
     alert.setAlertStyle_(1)
-    alert.setMessageText_("Waiting for Accessibility Permission…")
-    alert.setInformativeText_(
-        "Open System Settings → Privacy & Security → Accessibility.\n"
-        "Find Click-n-speak and toggle it ON.\n\n"
-        "This dialog will close automatically once access is granted."
-    )
+    alert.setMessageText_(title)
+    alert.setInformativeText_(body)
     alert.addButtonWithTitle_("I've Enabled It")
     alert.addButtonWithTitle_("Skip")
 
-    # Pump the run loop until the poller detects the grant or user clicks
     loop = NSRunLoop.currentRunLoop()
-    import time
     start = time.monotonic()
 
-    while not granted[0] and (time.monotonic() - start) < _ACCESSIBILITY_WAIT_TIMEOUT:
-        # Process pending events for 0.5 s
+    while not granted[0] and (time.monotonic() - start) < timeout:
         limit = NSDate.dateWithTimeIntervalSinceNow_(0.5)
         loop.runMode_beforeDate_(NSDefaultRunLoopMode, limit)
 
         if granted[0]:
-            log.info("Accessibility detected — closing wait dialog.")
-            # Dismiss the alert programmatically
+            log.info("%s detected — closing wait dialog.", title)
             try:
-                from AppKit import NSApp  # type: ignore
                 NSApp.abortModal()
             except Exception:
                 pass
-            _alert(
-                "✅ Accessibility Granted",
-                "Accessibility access has been granted. Hotkeys and text insertion are now active.",
-                ["Continue"],
-            )
+            _alert(granted_title, granted_body, ["Next →"])
             return
 
     cancel[0] = True
     t.join(timeout=2.0)
 
     if not granted[0]:
-        log.info("Accessibility not detected within timeout.")
+        log.info("Permission not detected within timeout for: %s", title)

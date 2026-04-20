@@ -410,6 +410,9 @@ class TranscriberProcessWrapper:
     def stop(self):
         self.input_queue.put(None)
         self._process.join(timeout=3.0)
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=1.0)
         
     def warmup(self, language=None):
         self.input_queue.put({"action": "warmup", "language": language})
@@ -433,13 +436,10 @@ class TranscriberProcessWrapper:
             self._process.join(timeout=2.0)
         except Exception as e:
             log_error(f"Error killing transcriber process: {e}")
-        # Drain stale queues
-        for q in (self.input_queue, self.output_queue):
-            while True:
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    break
+        # Replace queues entirely — draining is racy (new items can arrive between
+        # get_nowait() and process restart). New objects guarantee a clean slate.
+        self.input_queue = mp.Queue()
+        self.output_queue = mp.Queue()
         self._process = mp.Process(target=self._run_loop, daemon=True)
         self._process.start()
         log_info("Transcriber process restarted.")

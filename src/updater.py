@@ -41,7 +41,8 @@ def get_current_version() -> Optional[str]:
     Return current app version.
     When run from .app: read from Info.plist. Otherwise read from pyproject.toml.
     """
-    app_bundle = os.environ.get("CLICK_N_SPEAK_APP")
+    from .utils import _get_app_bundle
+    app_bundle = _get_app_bundle()
     if app_bundle:
         plist_path = Path(app_bundle) / "Contents" / "Info.plist"
         if plist_path.exists():

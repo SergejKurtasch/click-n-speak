@@ -3,12 +3,46 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
 
 # Project root (parent of src/)
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _get_app_bundle() -> str | None:
+    """Return the .app bundle path when running as a bundled app, else None.
+
+    Checks CLICK_N_SPEAK_APP env var first (set by the C launcher), then falls
+    back to detecting py2app via sys.frozen (set by py2app at runtime).
+    """
+    env = os.environ.get("CLICK_N_SPEAK_APP")
+    if env:
+        return env
+    if getattr(sys, "frozen", False):
+        # py2app: sys.executable = .../Click-n-speak.app/Contents/MacOS/Click-n-speak
+        return os.path.abspath(os.path.join(sys.executable, "../../.."))
+    return None
+
+
+def relaunch_app() -> bool:
+    """Relaunch the .app bundle in a fresh process and exit the current one.
+
+    Returns False if not running from a bundle (dev mode) so caller can skip.
+    """
+    import subprocess
+    bundle = _get_app_bundle()
+    if not bundle:
+        return False
+    # Fork a helper that waits for this process to exit then opens a new instance.
+    # `open -n` forces a new instance even if bundle is still in the LaunchServices DB.
+    subprocess.Popen(
+        ["sh", "-c", f'sleep 1 && open -n "{bundle}"'],
+        start_new_session=True,
+    )
+    os._exit(0)
 
 # Application Support dir when running from .app (set by launcher)
 APPLICATION_SUPPORT_DIR = Path(os.path.expanduser("~/Library/Application Support/Click-n-speak"))
@@ -20,7 +54,7 @@ SOUND_RECORDING_STOP = "/System/Library/Sounds/Pop.aiff"
 
 def get_menu_icon_path() -> Path:
     """Return the path to the PNG icon used in the menu bar."""
-    app_bundle = os.environ.get("CLICK_N_SPEAK_APP")
+    app_bundle = _get_app_bundle()
     if app_bundle:
         bundle_icon = Path(app_bundle) / "Contents" / "Resources" / "CnS.png"
         if bundle_icon.exists():
@@ -32,7 +66,7 @@ def get_menu_icon_path() -> Path:
 
 def get_config_path() -> Path:
     """Return the path to config.json (project root in dev, Application Support when run from .app)."""
-    app_bundle = os.environ.get("CLICK_N_SPEAK_APP")
+    app_bundle = _get_app_bundle()
     if not app_bundle:
         return ROOT / "config.json"
 
@@ -41,7 +75,8 @@ def get_config_path() -> Path:
 
     if not config_path.exists():
         support_dir.mkdir(parents=True, exist_ok=True)
-        default_in_bundle = Path(app_bundle) / "Contents" / "Resources" / "app" / "config.json"
+        # py2app copies data_files to Contents/Resources/ (no app/ subdir)
+        default_in_bundle = Path(app_bundle) / "Contents" / "Resources" / "config.json"
         if default_in_bundle.exists():
             try:
                 shutil.copy2(default_in_bundle, config_path)
@@ -70,8 +105,7 @@ def get_log_file_path() -> Path:
 
 def get_phrases_file_path() -> Path:
     """Returns the path to the phrase history file (project root in dev, Application Support when run from .app)."""
-    app_bundle = os.environ.get("CLICK_N_SPEAK_APP")
-    if not app_bundle:
+    if not _get_app_bundle():
         return ROOT / "phrase_history.txt"
     support_dir = APPLICATION_SUPPORT_DIR
     support_dir.mkdir(parents=True, exist_ok=True)
@@ -358,16 +392,8 @@ def play_sound(sound_name: Optional[str] = None) -> None:
 
 def is_accessibility_trusted() -> bool:
     """Return True if the app is a trusted accessibility client."""
-    try:
-        from ApplicationServices import AXIsProcessTrusted
-
-        return AXIsProcessTrusted()
-    except ImportError:
-        log_error("ApplicationServices not found, assuming trusted (fallback).")
-        return True
-    except Exception as e:
-        log_error(f"Error checking accessibility permissions: {e}")
-        return True
+    from .permissions import check_accessibility
+    return check_accessibility()
 
 
 def open_accessibility_settings() -> None:

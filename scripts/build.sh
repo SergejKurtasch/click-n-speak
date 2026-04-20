@@ -112,8 +112,17 @@ cp "${NUMBA_STUB_SRC}" "${NUMBA_DEST}/__init__.py"
 echo "  ✅ numba stub installed"
 
 # Step 4: Re-sign the bundle (copying new files invalidates the signature)
+# Sign each .so/.dylib individually first — --deep misses some nested binaries on macOS 15+
 echo "Step 4: Re-signing bundle..."
-codesign --force --deep --sign - "${BUNDLE}" 2>/dev/null || echo "  Warning: codesign failed (non-critical for local use)"
+failed=0
+while IFS= read -r f; do
+    if ! codesign --force --sign - "$f" 2>&1; then
+        echo "  WARNING: failed to sign $f" >&2
+        failed=$((failed + 1))
+    fi
+done < <(find "${BUNDLE}" \( -name "*.so" -o -name "*.dylib" \))
+[ "$failed" -gt 0 ] && echo "  ⚠️  $failed binary/binaries failed to sign" >&2
+codesign --force --sign - "${BUNDLE}" || echo "  Warning: bundle codesign failed (non-critical for local use)"
 
 # Step 5: Verify
 echo ""
@@ -126,6 +135,13 @@ MLX_FILES=$(find "${LIB_DIR}/mlx" -name "*.py" -o -name "*.pyc" -o -name "*.so" 
 echo "  📦 mlx package: ${MLX_FILES} files"
 find "${BUNDLE}" -name "libmlx*.dylib" 2>/dev/null | while read f; do echo "  ✅ $(basename $f) -> $f"; done
 find "${BUNDLE}" -name "libportaudio*" 2>/dev/null | while read f; do echo "  ✅ $(basename $f) -> $f"; done
+
+echo ""
+echo "Resetting TCC permissions (ad-hoc signature changes on every build)..."
+BUNDLE_ID="com.sergej.clicknspeak"
+tccutil reset Accessibility "${BUNDLE_ID}" 2>/dev/null && echo "  ✅ Accessibility reset" || echo "  ⚠️  Accessibility reset failed (may need sudo)"
+tccutil reset ListenEvent "${BUNDLE_ID}" 2>/dev/null && echo "  ✅ Input Monitoring reset" || echo "  ⚠️  Input Monitoring reset failed (may need sudo)"
+echo "  → Re-add the app in System Settings after launching."
 
 echo ""
 echo "To test, run:"

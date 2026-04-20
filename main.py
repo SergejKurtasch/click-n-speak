@@ -1,4 +1,6 @@
+import atexit
 import os
+import signal
 import sys
 import threading
 
@@ -7,7 +9,6 @@ from src.menu_bar import ClickNSpeakApp
 from src.permissions import all_permissions_granted, is_setup_done, mark_setup_done
 from src.updater import check_for_update
 from src.utils import (
-    ensure_accessibility_permission,
     get_config_path,
     get_primary_language,
     get_ui_strings,
@@ -15,7 +16,6 @@ from src.utils import (
     log_error,
     log_info,
     send_notification,
-    wait_for_accessibility,
 )
 
 
@@ -34,30 +34,6 @@ def _run_update_check_after_model_ready(model_ready_event: threading.Event) -> N
         check_for_update(open_url_if_new=True)
     except Exception as e:
         log_error(f"Update check failed: {e}")
-
-
-def _wait_and_start_hotkeys(logic_app) -> None:
-    """Background thread: poll for accessibility and start hotkeys when granted."""
-    log_info("Background thread: waiting for accessibility permission...")
-    granted = wait_for_accessibility(timeout=120, poll_interval=2.0)
-    if granted:
-        log_info("Accessibility granted — starting hotkey listener.")
-        try:
-            logic_app.hotkey_handler.restart()
-            send_notification(
-                "Click-n-speak",
-                "Hotkeys activated",
-                "Accessibility granted. Hotkeys are now active.",
-            )
-        except Exception as e:
-            log_error(f"Failed to start hotkey listener after permission grant: {e}")
-    else:
-        log_info("Accessibility not granted after 120s. Hotkeys remain disabled.")
-        send_notification(
-            "Click-n-speak",
-            "Hotkeys disabled",
-            "Accessibility not granted. Please grant access and restart the app.",
-        )
 
 
 def main() -> None:
@@ -82,10 +58,19 @@ def main() -> None:
             # Wizard was completed before but permissions were revoked/missing.
             menu_app.schedule_setup_wizard()
 
-        # Smart accessibility check: only prompt if not already trusted
+        # Check current accessibility state (no blocking prompt — wizard handles it).
         trusted = is_accessibility_trusted()
-        if not trusted:
-            trusted = ensure_accessibility_permission()
+
+        # Ensure transcriber child process is cleaned up on any exit path.
+        def _cleanup_transcriber():
+            try:
+                logic_app.transcriber.stop()
+            except Exception:
+                pass
+
+        atexit.register(_cleanup_transcriber)
+        for _sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(_sig, lambda *_: (_cleanup_transcriber(), sys.exit(0)))
 
         # Start model warm-up early to reduce first-run transcription latency.
         logic_app.start_model_warmup()
@@ -103,11 +88,11 @@ def main() -> None:
             logic_app.hotkey_handler.start()
             log_info("Hotkey listener started (accessibility already granted).")
         else:
-            # Permissions not yet granted — start background poller
-            log_info("Accessibility not granted yet. Starting background poller.")
-            threading.Thread(
-                target=_wait_and_start_hotkeys, args=(logic_app,), daemon=True
-            ).start()
+            # Wizard will guide user through permissions and prompt a relaunch.
+            # Do NOT auto-start listener on permission change: pynput calls
+            # TSMGetInputSourceProperty from its listener thread, which crashes
+            # on macOS 15+ unless the process was started with permissions already granted.
+            log_info("Accessibility not granted. Waiting for wizard + app restart.")
 
         # Check for updates once per session in background (after warm-up).
         threading.Thread(
