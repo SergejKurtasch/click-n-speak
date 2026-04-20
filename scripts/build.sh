@@ -154,6 +154,11 @@ echo "Resetting TCC permissions (ad-hoc signature changes on every build)..."
 BUNDLE_ID="com.sergej.clicknspeak"
 tccutil reset Accessibility "${BUNDLE_ID}" 2>/dev/null && echo "  ✅ Accessibility reset" || echo "  ⚠️  Accessibility reset failed (may need sudo)"
 tccutil reset ListenEvent "${BUNDLE_ID}" 2>/dev/null && echo "  ✅ Input Monitoring reset" || echo "  ⚠️  Input Monitoring reset failed (may need sudo)"
+# Remove stale path-based TCC entries from old launchers (e.g. Launch-ClickNSpeak.app/applet)
+TCC_DB="${HOME}/Library/Application Support/com.apple.TCC/TCC.db"
+if [ -f "${TCC_DB}" ]; then
+    sqlite3 "${TCC_DB}" "DELETE FROM access WHERE client LIKE '%applet' AND client NOT LIKE 'com.%';" 2>/dev/null && echo "  ✅ Stale path-based TCC entries removed" || true
+fi
 echo "  → Re-add the app in System Settings after launching."
 
 echo ""

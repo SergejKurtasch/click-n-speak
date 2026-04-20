@@ -55,6 +55,7 @@ class SVoiceRecApp:
         # AI Editor: optional LLM post-processing for punctuation and cleanup
         self.ai_editor: Optional[AiEditor] = None
         self._ai_editor_loading = False
+        self._ai_editor_lock = threading.Lock()  # guards _ai_editor_loading read/write
         if self.config.get("ai_editor_enabled", False):
             self._init_ai_editor()
         self.hotkey_handler = HotkeyHandler(
@@ -79,9 +80,13 @@ class SVoiceRecApp:
         self.model_ready_event = threading.Event()
         self._model_warmup_thread: Optional[threading.Thread] = None
 
-        # Delayed notification while waiting for transcription to finish
+        # Delayed notification while waiting for transcription to finish.
+        # _timer_lock guards all reads/writes of _delayed_transcribing_timer because
+        # stop_recording_and_process (background thread) and _do_finish_cleanup (main
+        # thread) both access it; without a lock the cancel can race with creation.
         self._transcription_cycle_id = 0
         self._delayed_transcribing_timer: Optional[threading.Timer] = None
+        self._timer_lock = threading.Lock()
         self._still_working_delay_seconds = 12.0
 
         # Jobs to run on the main thread (menu bar / rumps) so UI updates are applied
@@ -90,6 +95,7 @@ class SVoiceRecApp:
         # Keep-alive & cold-start optimization
         self._last_transcription_time = time.time()  # Initialized to now (warmup counts)
         self._keep_alive_timer: Optional[threading.Timer] = None
+        self._keep_alive_running = False  # Guard against overlapping warmup threads
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
         self._previous_app_pid = None
@@ -104,11 +110,12 @@ class SVoiceRecApp:
 
     def _init_ai_editor(self) -> None:
         """Create and load the AiEditor in a background thread (non-blocking)."""
-        if self._ai_editor_loading:
-            return
-        model_name = self.config.get("ai_editor_model", DEFAULT_MODEL_NAME)
-        self.ai_editor = AiEditor(model_name=model_name)
-        self._ai_editor_loading = True
+        with self._ai_editor_lock:
+            if self._ai_editor_loading:
+                return
+            model_name = self.config.get("ai_editor_model", DEFAULT_MODEL_NAME)
+            self.ai_editor = AiEditor(model_name=model_name)
+            self._ai_editor_loading = True
         threading.Thread(target=self._ai_editor_load_worker, daemon=True).start()
 
     def _ai_editor_load_worker(self) -> None:
@@ -142,7 +149,8 @@ class SVoiceRecApp:
         except Exception as e:
             log_exception(f"AiEditor background load failed: {e}")
         finally:
-            self._ai_editor_loading = False
+            with self._ai_editor_lock:
+                self._ai_editor_loading = False
 
     def start_model_warmup(self) -> None:
         """Start a background warm-up to reduce first-use latency."""
@@ -225,7 +233,8 @@ class SVoiceRecApp:
                     self._init_ai_editor()
             else:
                 self.ai_editor = None
-                self._ai_editor_loading = False
+                with self._ai_editor_lock:
+                    self._ai_editor_loading = False
                 log_info("AiEditor disabled.")
 
     def toggle_recording(self):
@@ -293,12 +302,13 @@ class SVoiceRecApp:
         """Run on main thread after worker has finished: clear status, save phrase, notify."""
         log_info("Finish cleanup started (main thread): clearing status, saving phrase, notifying.")
         self.is_processing = False
-        if self._delayed_transcribing_timer is not None:
-            try:
-                self._delayed_transcribing_timer.cancel()
-            except Exception:
-                pass
-            self._delayed_transcribing_timer = None
+        with self._timer_lock:
+            if self._delayed_transcribing_timer is not None:
+                try:
+                    self._delayed_transcribing_timer.cancel()
+                except Exception:
+                    pass
+                self._delayed_transcribing_timer = None
         mb = self.menu_bar
         if mb is not None:
             try:
@@ -502,16 +512,13 @@ class SVoiceRecApp:
                     f"is_final={is_final_chunk}, chunks_remaining_in_queue={remaining}{drain_note}"
                 )
 
-                # Early cancel: if stop was requested and this is NOT the final chunk,
-                # skip non-final chunks to avoid long waits on stale audio.
+                # Early cancel: skip ALL non-final chunks when stop was requested.
+                # The final chunk (is_final=True) is always processed; it was put into
+                # the queue before stop_worker.set() so it is never skipped here.
                 if self.stop_worker.is_set() and not is_final_chunk:
-                    remaining_after = self.chunk_queue.qsize()
-                    if remaining_after > 0:
-                        log_info(
-                            f"Skipping non-final chunk (stop requested, {remaining_after} more in queue)."
-                        )
-                        self.chunk_queue.task_done()
-                        continue
+                    log_info("Skipping non-final chunk (stop requested).")
+                    self.chunk_queue.task_done()
+                    continue
 
                 self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk, session_id=my_session_id)
                 self.chunk_queue.task_done()
@@ -610,16 +617,15 @@ class SVoiceRecApp:
                                     full_text = refined
                         # -------------------------------------------
 
-                        # Cancel delayed timer on main thread to avoid race with stop_recording_and_process.
-                        # Both write _delayed_transcribing_timer; submit the cancel so all access
-                        # happens on the same (main) thread via the queue.
+                        # Cancel the delayed "still working" timer under the lock.
                         def _cancel_delayed_timer():
-                            if self._delayed_transcribing_timer is not None:
-                                try:
-                                    self._delayed_transcribing_timer.cancel()
-                                except Exception:
-                                    pass
-                                self._delayed_transcribing_timer = None
+                            with self._timer_lock:
+                                if self._delayed_transcribing_timer is not None:
+                                    try:
+                                        self._delayed_transcribing_timer.cancel()
+                                    except Exception:
+                                        pass
+                                    self._delayed_transcribing_timer = None
                         self._submit_for_main_thread(_cancel_delayed_timer)
 
                         _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
@@ -653,7 +659,8 @@ class SVoiceRecApp:
                     if self._preview_panel:
                         self._preview_panel.hide(self._main_thread_queue, delay=0.0)
                     log_info(
-                        f"Injection skipped (session invalidated, worker session_id={session_id}, current={self._session_id}): '{text[:60]}'"
+                        f"Chunk dropped: session invalidated "
+                        f"(worker={session_id}, current={self._session_id}), text='{text[:60]}'"
                     )
             else:
                 log_info("Transcriber returned empty text for this chunk.")
@@ -720,14 +727,11 @@ class SVoiceRecApp:
             self.stop_worker.set()
             wait_start = time.time()
 
-            # Schedule a delayed "still working" notification if recognition is slow
+            # Schedule a delayed "still working" notification if recognition is slow.
+            # Use _timer_lock so creation here (background thread) doesn't race with
+            # cancellation in _do_finish_cleanup or _cancel_delayed_timer (main thread).
             self._transcription_cycle_id += 1
             cycle_id = self._transcription_cycle_id
-            if self._delayed_transcribing_timer is not None:
-                try:
-                    self._delayed_transcribing_timer.cancel()
-                except Exception:
-                    pass
 
             def _delayed_notify() -> None:
                 try:
@@ -740,11 +744,17 @@ class SVoiceRecApp:
                 except Exception as e:
                     log_exception(f"Delayed transcription notify failed: {e}")
 
-            self._delayed_transcribing_timer = threading.Timer(
-                self._still_working_delay_seconds, _delayed_notify
-            )
-            self._delayed_transcribing_timer.daemon = True
-            self._delayed_transcribing_timer.start()
+            with self._timer_lock:
+                if self._delayed_transcribing_timer is not None:
+                    try:
+                        self._delayed_transcribing_timer.cancel()
+                    except Exception:
+                        pass
+                self._delayed_transcribing_timer = threading.Timer(
+                    self._still_working_delay_seconds, _delayed_notify
+                )
+                self._delayed_transcribing_timer.daemon = True
+                self._delayed_transcribing_timer.start()
 
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
@@ -822,39 +832,56 @@ class SVoiceRecApp:
 
     def _file_transcription_worker(self, file_path: str):
         log_info(f"File transcription worker started for {file_path}")
+        # Initialise before try so the except block can always reference it safely.
+        _file_notify_timer: Optional[threading.Timer] = None
+        # Cycle ID prevents stale timer callback from firing after cancellation race.
+        self._file_cycle_id = getattr(self, "_file_cycle_id", 0) + 1
+        _cycle_id = self._file_cycle_id
         try:
             allowed_languages = get_allowed_languages(self.config)
             context = str(self.config.get("initial_prompt", ""))
-            
+
+            # Notify the user if the file is taking longer than 12 seconds.
+            def _file_still_working():
+                if self._file_cycle_id != _cycle_id:
+                    return
+                if self.is_processing and self._preview_panel:
+                    s = get_ui_strings(get_primary_language(self.config))
+                    self._preview_panel.update_status(s["still_working_title"], self._main_thread_queue)
+
+            _file_notify_timer = threading.Timer(self._still_working_delay_seconds, _file_still_working)
+            _file_notify_timer.daemon = True
+            _file_notify_timer.start()
+
             self._last_transcription_time = time.time()
-            
+
             text = self.transcriber.transcribe_file(
-                file_path, 
+                file_path,
                 initial_prompt=context,
                 allowed_languages=allowed_languages,
             )
-            
+            _file_notify_timer.cancel()
+
             self._last_transcription_time = time.time()
-            
+
             if text:
                 log_info(f"File transcription successful, {len(text)} chars.")
-                
+
                 downloads_dir = os.path.expanduser("~/Downloads")
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
                 output_file = os.path.join(downloads_dir, f"{base_name}_transcription.md")
-                
+
                 try:
                     with open(output_file, "w", encoding="utf-8") as f:
                         f.write(f"# Transcription: {os.path.basename(file_path)}\n\n")
                         f.write(text)
                     log_info(f"Saved transcription to {output_file}")
-                    
-                    # Store in parts so _do_finish_cleanup saves it to phrase history
-                    self.transcribed_parts = [f"File saved to {output_file}"] 
-                    
+
+                    self.transcribed_parts = [f"File saved to {output_file}"]
+
                     from .utils import copy_to_clipboard
                     copy_to_clipboard(text)
-                    
+
                     self.notify("Файл распознан", f"Сохранено: {os.path.basename(output_file)} (и скопировано!)", delay=3.0)
                 except Exception as write_err:
                     log_error(f"Failed to write markdown file: {write_err}")
@@ -862,8 +889,10 @@ class SVoiceRecApp:
             else:
                 log_info("File transcription returned empty text.")
                 self.notify("Нет речи", "Не удалось извлечь текст из файла.")
-                
+
         except Exception as e:
+            if _file_notify_timer is not None:
+                _file_notify_timer.cancel()
             log_exception(f"Unhandled exception in _file_transcription_worker: {e}")
             self._submit_for_main_thread(self._do_error_cleanup)
             return
@@ -937,12 +966,18 @@ class SVoiceRecApp:
         pre_warm() fire-and-forgets; the prewarm_done response is silently consumed
         by the next transcribe() call (which ignores non-"transcription" messages).
         """
+        if self._keep_alive_running:
+            log_info("Keep-alive: previous warmup still running — skipping.")
+            return
+        self._keep_alive_running = True
         try:
             self.transcriber.pre_warm()
             log_info("Keep-alive: pre_warm() sent to transcriber process.")
             self._last_transcription_time = time.time()
         except Exception as e:
             log_error(f"Keep-alive warmup failed: {e}")
+        finally:
+            self._keep_alive_running = False
 
     def _stop_keep_alive_timer(self) -> None:
         """Cancel the keep-alive timer."""

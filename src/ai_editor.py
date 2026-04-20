@@ -163,22 +163,25 @@ class AiEditor:
                 exc.append(e)
 
         self._abort_event.clear()
-        try:
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            # Give slight padding to the join so stream_generate timeout triggers first
-            t.join(timeout=_REFINE_TIMEOUT_SECONDS + 0.5)
-        finally:
-            if t.is_alive():
-                self._abort_event.set()
-            self._lock.release()
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        # Give slight padding so the in-loop stream_generate timeout triggers first.
+        t.join(timeout=_REFINE_TIMEOUT_SECONDS + 0.5)
 
         if t.is_alive():
+            # Signal the streaming loop to break, then wait a little for clean exit.
+            # Releasing the lock while the thread is still using self._model / self._tokenizer
+            # would cause a concurrent Metal GPU access — wait up to 2 s for it to stop.
+            self._abort_event.set()
+            t.join(timeout=2.0)
+            self._lock.release()
             log_error(
                 f"AiEditor: LLM thread still alive after {_REFINE_TIMEOUT_SECONDS + 0.5}s "
                 "— timeout wrapper triggered, returning original text."
             )
             return text
+
+        self._lock.release()
 
         if exc:
             log_error(f"AiEditor: error during refinement: {exc[0]}")

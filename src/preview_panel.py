@@ -76,6 +76,9 @@ class TranscriptionPreviewPanel:
         self._is_interactive = False
         self._local_monitor = None   # NSEvent local key monitor
         self._global_monitor = None  # NSEvent global key monitor (fallback)
+        # Prevents both confirm and cancel from firing for the same keypress
+        # (e.g. local + global monitor both deliver the event simultaneously).
+        self._handler_lock = threading.Lock()
 
     def _update_position(self, center=False):
         """Position the panel.
@@ -311,22 +314,21 @@ class TranscriptionPreviewPanel:
     def show_interactive(self, text, queue, on_confirm, on_cancel=None, title="Редактируй и нажми Enter"):
         """Shows the panel in interactive mode near the cursor."""
         def _handle_confirm(new_text):
-            if not self._is_interactive:
-                return  # already handled (guard against double-fire)
+            # _handler_lock ensures only one handler (confirm or cancel) runs to
+            # completion even when local + global monitors deliver the same keypress.
+            with self._handler_lock:
+                if not self._is_interactive:
+                    return  # already handled
+                self._is_interactive = False  # claim ownership atomically
             new_text = new_text.strip()
             self._remove_key_monitors()
-            # Close (not just hide) and null out the interactive panel so that the
-            # next _create_panel(interactive=False) call always creates a fresh panel.
-            # If we only call orderOut_ and leave self.panel set, _create_panel sees
-            # "_is_interactive == False == interactive" and returns early — but
-            # self.text_field is still None (it's unused in interactive mode), which
-            # causes a NoneType crash in show()._do_show().
+            # Close + null out so next _create_panel(interactive=False) always
+            # creates a fresh panel (prevents NoneType crash in show()._do_show()).
             if self.panel:
                 self.panel.close()
                 self.panel = None
                 self.text_view = None
                 self.scroll_view = None
-            self._is_interactive = False
             log_info(f"_handle_confirm: confirming with text len={len(new_text)}")
             if on_confirm:
                 try:
@@ -335,17 +337,16 @@ class TranscriptionPreviewPanel:
                     log_exception(f"[preview_panel] on_confirm error: {e}")
 
         def _handle_cancel():
-            if not self._is_interactive:
-                return
+            with self._handler_lock:
+                if not self._is_interactive:
+                    return  # already handled
+                self._is_interactive = False  # claim ownership atomically
             self._remove_key_monitors()
-            # Same as _handle_confirm: close + null out so next non-interactive
-            # show() creates a fresh panel instead of reusing stale state.
             if self.panel:
                 self.panel.close()
                 self.panel = None
                 self.text_view = None
                 self.scroll_view = None
-            self._is_interactive = False
             log_info("_handle_cancel: popup cancelled")
             if on_cancel:
                 try:
@@ -356,7 +357,7 @@ class TranscriptionPreviewPanel:
         def _do_show_interactive():
             try:
                 log_info("_do_show_interactive: starting")
-                self._remove_key_monitors()
+                self._remove_key_monitors()  # clean up any leftover monitors from prior session
                 self._create_panel(interactive=True)
                 log_info(f"_do_show_interactive: panel created, panel={self.panel is not None}")
                 self._update_position(center=False)
@@ -414,6 +415,10 @@ class TranscriptionPreviewPanel:
                     elif kc == _KEY_ESCAPE:
                         _handle_cancel()
 
+                # Null out first so _remove_key_monitors() in the except block
+                # won't try to remove stale monitors from a previous session.
+                self._local_monitor = None
+                self._global_monitor = None
                 self._local_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
                     _NSKeyDownMask, _local_key_handler
                 )
@@ -423,6 +428,7 @@ class TranscriptionPreviewPanel:
                 log_info("_do_show_interactive: key monitors installed, popup ready")
             except Exception as e:
                 log_exception(f"[preview_panel] _do_show_interactive error: {e}")
+                self._remove_key_monitors()  # ensure no dangling monitors on partial setup failure
 
         queue.put((_do_show_interactive, (), {}))
 
