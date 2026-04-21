@@ -61,7 +61,7 @@ def get_menu_icon_path() -> Path:
             return bundle_icon
 
     # Fallback: project root when running from source
-    return ROOT / "CnS.png"
+    return ROOT / "assets" / "CnS.png"
 
 
 def get_config_path() -> Path:
@@ -464,10 +464,7 @@ def ensure_accessibility_permission() -> bool:
 
 
 def wait_for_accessibility(timeout: float = 30.0, poll_interval: float = 1.0) -> bool:
-    """Poll AXIsProcessTrusted() until it returns True or timeout expires.
-
-    Returns True if accessibility was granted within the timeout.
-    """
+    """Poll AXIsProcessTrusted() until it returns True or timeout expires."""
     import time
 
     deadline = time.monotonic() + timeout

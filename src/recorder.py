@@ -50,7 +50,7 @@ class AudioRecorder:
         self.chunk_callback = None
         self.has_speech_in_chunk = False
         self.current_chunk_duration = 0  # Track time since last split
-        self.vad_buffer = b""
+        self.vad_buffer = bytearray()
         self._close_thread = None  # Track ongoing stream-close operation
 
         if HAVE_VAD:
@@ -98,13 +98,13 @@ class AudioRecorder:
         if HAVE_VAD:
             # indata is natively float32, webrtcvad requires 16-bit PCM
             pcm_data = (indata[:, 0] * 32767).astype(np.int16).tobytes()
-            self.vad_buffer += pcm_data
+            self.vad_buffer.extend(pcm_data)
             
             frame_length = int(self.sample_rate * 0.03) * 2 # 30ms 16-bit
             while len(self.vad_buffer) >= frame_length:
                 frame = self.vad_buffer[:frame_length]
                 self.vad_buffer = self.vad_buffer[frame_length:]
-                if self.vad.is_speech(frame, self.sample_rate):
+                if self.vad.is_speech(bytes(frame), self.sample_rate):
                     self.silence_counter = 0
                     self.has_speech_in_chunk = True
                 else:
@@ -196,7 +196,7 @@ class AudioRecorder:
         self.silence_counter = 0
         self.has_speech_in_chunk = False
         self.current_chunk_duration = 0
-        self.vad_buffer = b""
+        self.vad_buffer = bytearray()
         self._stop_event.clear()
 
         try:

@@ -88,8 +88,7 @@ def _run_wizard() -> None:
         return
 
     # Count total steps for progress display
-    steps = [p for p in [need_mic, need_acc, need_im] if p]
-    total_steps = len(steps)
+    total_steps = sum([need_mic, need_acc, need_im])
 
     # ── Welcome ──────────────────────────────────────────────────────────────
     permissions_needed = []
@@ -285,11 +284,15 @@ def _wait_for_permission_with_dialog(
     granted_title: str,
     granted_body: str,
 ) -> None:
-    """Generic polling dialog: shows a waiting alert and closes when check_fn() → True."""
+    """Poll until check_fn() returns True or timeout elapses.
+
+    Drives the main run loop in 0.5s ticks so AppKit events keep processing.
+    Shows a confirmation alert when the permission is detected.
+    """
     try:
-        from AppKit import NSAlert, NSRunLoop, NSDefaultRunLoopMode, NSDate, NSApp  # type: ignore
+        from AppKit import NSRunLoop, NSDefaultRunLoopMode, NSDate  # type: ignore
     except ImportError:
-        # Headless fallback
+        # Headless fallback (e.g. tests without AppKit)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if check_fn():
@@ -311,13 +314,6 @@ def _wait_for_permission_with_dialog(
     t = threading.Thread(target=_poll, daemon=True)
     t.start()
 
-    alert = NSAlert.alloc().init()
-    alert.setAlertStyle_(1)
-    alert.setMessageText_(title)
-    alert.setInformativeText_(body)
-    alert.addButtonWithTitle_("I've Enabled It")
-    alert.addButtonWithTitle_("Skip")
-
     loop = NSRunLoop.currentRunLoop()
     start = time.monotonic()
 
@@ -326,11 +322,7 @@ def _wait_for_permission_with_dialog(
         loop.runMode_beforeDate_(NSDefaultRunLoopMode, limit)
 
         if granted[0]:
-            log.info("%s detected — closing wait dialog.", title)
-            try:
-                NSApp.abortModal()
-            except Exception:
-                pass
+            log.info("%s detected.", title)
             _alert(granted_title, granted_body, ["Next →"])
             return
 

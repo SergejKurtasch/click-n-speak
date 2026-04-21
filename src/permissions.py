@@ -227,5 +227,5 @@ def all_permissions_granted() -> bool:
     return (
         check_microphone() == "granted"
         and check_accessibility()
-        and check_input_monitoring()
+        and check_input_monitoring_fast()
     )

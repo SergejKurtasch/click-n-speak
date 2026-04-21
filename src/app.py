@@ -1,8 +1,8 @@
 import json
-import os
 import queue
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 from .hotkey_handler import HotkeyHandler
@@ -204,15 +204,15 @@ class SVoiceRecApp:
             self._model_warming = False
 
     def load_config(self, path):
-        if not os.path.exists(path):
+        config_path = Path(path)
+        if not config_path.exists():
             log_info(f"Warning: Configuration file {path} not found. Using defaults.")
             self.load_config_data({})
             return
 
         try:
-            with open(path, "r") as f:
-                data = json.load(f)
-                self.load_config_data(data)
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            self.load_config_data(data)
         except Exception as e:
             log_error(f"Error loading config: {e}. Using defaults.")
             self.load_config_data({})
@@ -831,7 +831,7 @@ class SVoiceRecApp:
             lambda: self.menu_bar.set_status(recording=False, processing=True) if self.menu_bar else None
         )
         
-        self.notify("Распознавание файла", f"Обработка {os.path.basename(file_path)}...")
+        self.notify("Распознавание файла", f"Обработка {Path(file_path).name}...")
         
         threading.Thread(target=self._file_transcription_worker, args=(file_path,), daemon=True).start()
 

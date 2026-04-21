@@ -381,5 +381,61 @@ class TestMlxWhisperImportError(unittest.TestCase):
                     sys.modules["mlx_whisper"] = mlx_mod
 
 
+# ---------------------------------------------------------------------------
+# 9. get_menu_icon_path() dev fallback points to assets/
+# ---------------------------------------------------------------------------
+
+class TestMenuIconPath(unittest.TestCase):
+    def test_dev_fallback_points_to_assets(self):
+        """In dev mode (no bundle), get_menu_icon_path() must return assets/CnS.png."""
+        from src.utils import get_menu_icon_path, ROOT
+        with unittest.mock.patch("src.utils._get_app_bundle", return_value=None):
+            path = get_menu_icon_path()
+        expected = ROOT / "assets" / "CnS.png"
+        self.assertEqual(path, expected, f"Expected {expected}, got {path}")
+
+    def test_bundle_path_returns_resources_icon(self):
+        """When running from .app bundle, icon must come from Contents/Resources."""
+        from src.utils import get_menu_icon_path
+        fake_bundle = "/fake/Click-n-speak.app"
+        with unittest.mock.patch("src.utils._get_app_bundle", return_value=fake_bundle), \
+             unittest.mock.patch("pathlib.Path.exists", return_value=True):
+            path = get_menu_icon_path()
+        from pathlib import Path
+        expected = Path(fake_bundle) / "Contents" / "Resources" / "CnS.png"
+        self.assertEqual(path, expected)
+
+
+# ---------------------------------------------------------------------------
+# 10. all_permissions_granted() uses fast TCC check (no CGEventTap dialog)
+# ---------------------------------------------------------------------------
+
+class TestAllPermissionsGrantedNoCGEventTap(unittest.TestCase):
+    def test_uses_fast_check_not_cgeventtap(self):
+        """all_permissions_granted() must call check_input_monitoring_fast(), not check_input_monitoring()."""
+        from src import permissions
+
+        fast_called = {"n": 0}
+        tap_called = {"n": 0}
+
+        def _fast():
+            fast_called["n"] += 1
+            return True
+
+        def _tap():
+            tap_called["n"] += 1
+            return True
+
+        with unittest.mock.patch.object(permissions, "check_microphone", return_value="granted"), \
+             unittest.mock.patch.object(permissions, "check_accessibility", return_value=True), \
+             unittest.mock.patch.object(permissions, "check_input_monitoring_fast", side_effect=_fast), \
+             unittest.mock.patch.object(permissions, "check_input_monitoring", side_effect=_tap):
+            result = permissions.all_permissions_granted()
+
+        self.assertTrue(result)
+        self.assertEqual(fast_called["n"], 1, "check_input_monitoring_fast must be called")
+        self.assertEqual(tap_called["n"], 0, "check_input_monitoring (CGEventTap) must NOT be called")
+
+
 if __name__ == "__main__":
     unittest.main()
