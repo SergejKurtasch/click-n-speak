@@ -78,7 +78,7 @@ if [ ! -x "$PYTHON_BIN" ]; then
 fi
 # Use requirements_app.txt if available (excludes mlx-lm, py2app, pytest).
 # Falls back to requirements.txt with py2app stripped.
-APP_REQUIREMENTS="${PROJECT_ROOT}/requirements_app.txt"
+APP_REQUIREMENTS="${PROJECT_ROOT}/scripts/requirements_app.txt"
 if [ -f "${APP_REQUIREMENTS}" ]; then
     echo "  Using ${APP_REQUIREMENTS}"
     "$PYTHON_BIN" -m pip install --quiet --no-warn-script-location -r "${APP_REQUIREMENTS}"

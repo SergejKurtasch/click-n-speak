@@ -1,3 +1,0 @@
-Current initial prompt:
-
-Например, я часто использую англоязычные термины: PCA, survival, prompt, readmission, Face, DimaTorzok, Readmission, Hagenface, train, Hagen, Edge, use, .lm, production, main. А также русские выражения: играет музыка, музыка играет, играет музыка играет, музыка играет музыка, может быть.
