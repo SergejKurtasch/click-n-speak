@@ -1,86 +1,102 @@
-# Click-n-speak 🎙️
+# Click-n-speak
 
-Click-n-speak is a lightweight, local, and cross-platform (focused on macOS) speech recognition tool that runs seamlessly in your Menu Bar. It uses **MLX Whisper** for fast, on-device transcription leveraging Apple Silicon GPUs, and allows you to inject recognized text directly into any active application using global hotkeys.
+A macOS menu-bar app for local, private speech-to-text. Press a hotkey anywhere, speak, and the transcribed text is typed directly into the active application.
 
-## 🔥 Key Features
+All processing runs on-device using Apple Silicon — no data leaves your machine.
 
-- **100% Local & Private**: All speech recognition happens on your machine. No data is sent to the cloud.
-- **Apple Silicon Optimized**: Powered by [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper), achieving blazingly fast transcription speeds.
-- **Global Hotkey Integration**: Press `<alt>+<space>` anywhere to start speaking, and the text will be injected right where your cursor is.
-- **Multilingual Support on the Fly**: Seamlessly transcribes multiple languages without needing to change system keyboard layouts.
-- **Adaptive Silence Detection**: Automatically handles micro-pauses (for thinking) and longer pauses to trigger transcription naturally.
-- **Menu Bar Control**: Easily select models, change primary languages, tweak microphone sensitivity, or set the app to launch at login.
+## Features
 
-## 🛠 Tech Stack
+- **100% local** — Whisper via MLX, no cloud, no internet required for transcription
+- **AI cleanup** — optional Qwen 2.5 1.5B (4-bit) post-processes each transcription for punctuation and grammar
+- **Global hotkey** — `Alt+Space` starts and stops recording from any app
+- **Adaptive VAD** — silence detection adjusts to speech pace; short pauses buffer, longer pauses trigger send
+- **Multilingual** — primary + additional languages in one session, no layout switching
+- **Setup wizard** — first-launch wizard guides through all required permissions automatically
+- **Menu bar UI** — model selection, language config, prompt editing, phrase history
 
-- **Python 3.10+**
-- **MLX Whisper** - For fast inference.
-- **Pynput & ApplicationServices** - For global hotkey listening and text injection.
-- **Sounddevice** - For listening to microphone streams.
-- **Rumps** - For the native macOS menu bar interface.
+## Requirements
 
-## 🚀 Quick Start (Recommended)
+- macOS 13+ (Apple Silicon recommended)
+- Python 3.11
 
-You can download the latest pre-built version for macOS from the [Releases](https://github.com/SergejKurtasch/click-n-speak/releases) page.
-Simply download the **Click-n-speak.dmg**, open it, and drag the app to your **Applications** folder.
+## Quick Start
 
-## 🛠 Installation & Setup (Development)
+Download the latest `.dmg` from the [Releases](https://github.com/SergejKurtasch/click-n-speak/releases) page, open it, and drag **Click-n-speak.app** to `/Applications`.
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/Click-n-speak.git
-   cd Click-n-speak
-   ```
+On first launch a setup wizard walks through granting Microphone, Accessibility, and Input Monitoring permissions.
 
-2. **Set up a virtual environment:**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
+## Development Setup
 
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-   *Note: On macOS, `pynput` and text injection require Accessibility permissions.*
+```bash
+git clone https://github.com/SergejKurtasch/click-n-speak.git
+cd click-n-speak
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
 
-4. **Run the App:**
-   ```bash
-   python main.py
-   ```
+## Building a .app Bundle
 
-## 📦 Building a macOS `.app` Bundle
+Two build paths are available:
 
-To distribute Click-n-speak as a standalone macOS application:
+**py2app bundle** (faster build, larger size):
+```bash
+bash scripts/build.sh
+```
 
-1. Ensure all dependencies (plus `py2app`) are installed in your `venv`.
-2. Run the build and DMG scripts:
-   ```bash
-   bash scripts/build.sh
-   bash scripts/make_dmg.sh
-   ```
-3. The packaged app will be available in the `dist/` directory as `Click-n-speak.dmg`.
+**Launcher bundle** (native C launcher, correct TCC attribution):
+```bash
+bash scripts/build_launcher.sh
+bash scripts/install.sh        # copies to /Applications
+```
 
-### ⚠️ Important: macOS Accessibility Permissions
-For the bundled `Click-n-speak.app` to listen to global hotkeys and inject text, you **must** grant it permissions in macOS System Settings:
-1. Go to **System Settings** -> **Privacy & Security**.
-2. Navigate to **Accessibility**.
-3. Click the `+` button and add `dist/Click-n-speak.app`.
-4. Ensure the toggle is turned ON.
-5. (Optional) Check **Input Monitoring** to ensure hotkeys are intercepted globally.
+The built app lands in `dist/Click-n-speak.app`. After each build, TCC permissions reset automatically — re-add the app in System Settings when prompted.
 
-## ⚙️ Configuration
+To create a distributable DMG:
+```bash
+bash scripts/make_dmg.sh
+```
 
-The app relies on a `config.json` file in the root directory. You can edit this file directly or use the Menu Bar UI:
+## Configuration
+
+The app stores its config in `~/Library/Application Support/Click-n-speak/config.json`. Key fields:
+
 ```json
 {
-    "autostart": false,
-    "model_name": "mlx-community/whisper-large-v3-mlx",
-    "languages": ["ru", "en"],
-    "silence_duration": 1.0
+    "primary_language": "ru",
+    "additional_languages": ["en"],
+    "model_name": "mlx-community/whisper-large-v3-turbo",
+    "ai_editor_enabled": true,
+    "ai_editor_model": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "silence_duration": 1.0,
+    "target_speech_duration": 4.0,
+    "max_speech_duration": 8.0,
+    "autostart": false
 }
 ```
 
-## 📝 License
+All fields are also editable via the menu bar UI.
+
+## Tech Stack
+
+| Component | Library |
+|---|---|
+| Speech recognition | [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) |
+| AI text cleanup | [mlx-lm](https://github.com/ml-explore/mlx-lm) + Qwen 2.5 1.5B |
+| Voice activity detection | webrtcvad |
+| Global hotkeys | pynput |
+| Audio capture | sounddevice |
+| Menu bar UI | rumps |
+| macOS permissions | pyobjc (Cocoa, Quartz, ApplicationServices, AVFoundation) |
+
+## Running Tests
+
+```bash
+source venv/bin/activate
+pytest tests/
+```
+
+## License
 
 MIT License. See [LICENSE](LICENSE) for details.
