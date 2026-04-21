@@ -3,12 +3,15 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 import mlx_whisper  # needed for mocking or ensuring it's not actually called
-from src.transcriber import WhisperTranscriber, _has_consecutive_word_repetition
+from src.transcriber import WhisperTranscriber, _collapse_consecutive_word_repetition
 
-def test_has_consecutive_word_repetition():
-    assert _has_consecutive_word_repetition("hello hello", 2) == True
-    assert _has_consecutive_word_repetition("hello world hello", 2) == False
-    assert _has_consecutive_word_repetition("test test test", 2) == True
+def test_collapse_consecutive_word_repetition():
+    # Consecutive duplicates are collapsed
+    assert _collapse_consecutive_word_repetition("hello hello") == "hello"
+    # Non-consecutive: no change
+    assert _collapse_consecutive_word_repetition("hello world hello") == "hello world hello"
+    # Three-in-a-row: collapsed to one
+    assert _collapse_consecutive_word_repetition("test test test") == "test"
 
 @patch("src.transcriber._call_mlx_transcribe")
 def test_transcribe_hallucination_filtered(mock_call):

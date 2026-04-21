@@ -12,8 +12,14 @@ from src.transcriber import (
     TranscriberProcessWrapper,
     MIN_FINAL_CHUNK_SAMPLES,
     TRANSCRIBER_TIMEOUT_SECONDS,
-    _has_consecutive_word_repetition,
+    _collapse_consecutive_word_repetition,
 )
+
+# Alias for backwards-compat with older test references
+def _has_consecutive_word_repetition(text: str, min_count: int) -> bool:
+    """Legacy helper: returns True if collapse changes the text."""
+    collapsed = _collapse_consecutive_word_repetition(text)
+    return collapsed != text
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +162,8 @@ def test_is_processing_reset_on_worker_timeout():
         app.is_recording = False
         app.is_processing = True
         app.transcribed_parts = []
+        app._raw_whisper_chunks = []
+        app._session_id = 1
         app.chunk_queue = queue.Queue()
         app.stop_worker = threading.Event()
         app.recorder = MagicMock()
@@ -165,6 +173,8 @@ def test_is_processing_reset_on_worker_timeout():
         app._main_thread_queue = queue.Queue()
         app._transcription_cycle_id = 0
         app._delayed_transcribing_timer = None
+        app._timer_lock = threading.Lock()
+        app._preview_panel = None
         app._still_working_delay_seconds = 999  # don't fire during test
 
         # Create a worker thread that never finishes
@@ -188,35 +198,22 @@ def test_is_processing_reset_on_worker_timeout():
 # ---------------------------------------------------------------------------
 
 def test_min_speech_duration_filtering():
-    """Test that audio shorter than min_speech_duration is discarded by the recorder."""
+    """Audio shorter than min_speech_duration must not be returned by recorder.stop()."""
     from src.recorder import AudioRecorder
     import numpy as np
-    
-    recorder = AudioRecorder(sample_rate=16000, min_speech_duration=1.0)
-    recorder.silence_counter = 100  # Force it to think silence happened
-    recorder.recording = True
-    
-    # 0.5s of audio (8000 samples)
-    audio = np.ones((8000, 1), dtype=np.float32)
-    recorder.frames = [audio]
-    
-    # Trigger callback logic (mocking the structure)
-    recorder._is_user_speaking = False
-    
-    # Call stop, which forces flush.
-    # We monkey-patch the thread so it runs synchronously for testing
-    original_thread = threading.Thread
-    def sync_thread(target, *args, **kwargs):
-        target()
-        mock = MagicMock()
-        mock.start = lambda: None
-        return mock
 
-    with patch('threading.Thread', side_effect=sync_thread):
-        recorder.stop()
-    
-    # Should be empty because 0.5s < 1.0s
-    assert recorder.output_queue.empty()
+    recorder = AudioRecorder(sample_rate=16000, min_speech_duration=1.0)
+    recorder.recording = True
+    # Inject 0.2s of audio (below min_speech_duration of 1.0s)
+    tiny = np.ones((3200, 1), dtype=np.float32)
+    recorder.audio_data = [tiny]
+    recorder.has_speech_in_chunk = True
+
+    with patch.object(recorder, "_stop_stream_with_timeout"):
+        result = recorder.stop()
+
+    # stop() should discard the tiny chunk and return None
+    assert result is None
 
 # ---------------------------------------------------------------------------
 # Fix: Keep-alive memory pressure check
@@ -228,12 +225,19 @@ def test_keep_alive_memory_pressure():
     
     app = SVoiceRecApp.__new__(SVoiceRecApp)
     # Mock psutil
-    with patch("psutil.virtual_memory") as mock_mem:
-        mock_mem.return_value.percent = MEMORY_PRESSURE_THRESHOLD_PERCENT + 10
+    # psutil is imported lazily inside _is_memory_pressure_high, so patch via sys.modules
+    import sys, types
+    mock_psutil = MagicMock()
+    sys.modules["psutil"] = mock_psutil
+
+    try:
+        mock_psutil.virtual_memory.return_value.percent = MEMORY_PRESSURE_THRESHOLD_PERCENT + 10
         assert app._is_memory_pressure_high() is True
-        
-        mock_mem.return_value.percent = MEMORY_PRESSURE_THRESHOLD_PERCENT - 10
+
+        mock_psutil.virtual_memory.return_value.percent = MEMORY_PRESSURE_THRESHOLD_PERCENT - 10
         assert app._is_memory_pressure_high() is False
+    finally:
+        sys.modules.pop("psutil", None)
 
 # ---------------------------------------------------------------------------
 # Fix: recorder.stop() timeout
