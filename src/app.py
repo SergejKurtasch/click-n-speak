@@ -95,7 +95,7 @@ class SVoiceRecApp:
         # Keep-alive & cold-start optimization
         self._last_transcription_time = time.time()  # Initialized to now (warmup counts)
         self._keep_alive_timer: Optional[threading.Timer] = None
-        self._keep_alive_running = False  # Guard against overlapping warmup threads
+        self._keep_alive_lock = threading.Lock()  # atomic guard for keep-alive warmup
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
         self._previous_app_pid = None
@@ -121,26 +121,28 @@ class SVoiceRecApp:
     def _ai_editor_load_worker(self) -> None:
         """Background worker: load the LLM model and notify when ready."""
         try:
-            if self.ai_editor is None:
+            # Capture a local reference so that update_config() setting
+            # self.ai_editor = None mid-load does not cause AttributeError.
+            editor = self.ai_editor
+            if editor is None:
                 return
 
             # Check cache BEFORE trying to load — prevents silent multi-hour downloads
-            if not self.ai_editor.is_model_cached():
-                model_name = self.ai_editor.model_name
+            if not editor.is_model_cached():
                 log_error(
-                    f"AiEditor: model '{model_name}' is not cached locally. "
+                    f"AiEditor: model '{editor.model_name}' is not cached locally. "
                     "Download it first by running in your terminal:\n"
                     "  python scripts/download_ai_model.py"
                 )
                 self.notify("AI Editor: Модель не найдена", "Запустите скрипт загрузки и перезапустите приложение.")
                 return
 
-            self.ai_editor.load()
+            editor.load()
             # Guard: user may have disabled AI Editor while load() was running
             if self.ai_editor is None:
                 log_info("AiEditor was disabled during load — discarding.")
                 return
-            if self.ai_editor.is_ready():
+            if editor.is_ready():
                 self.notify("AI Editor Готов", "Умная пунктуация и очистка текста активированы.")
                 log_info("AiEditor loaded and ready.")
             else:
@@ -171,18 +173,21 @@ class SVoiceRecApp:
             log_info("Starting Whisper warm-up in background thread.")
             primary_lang = get_primary_language(self.config)
             self.transcriber.warmup(language=primary_lang)
-            # Wait for warmup_done
-            while True:
+            # Wait for warmup_done with a hard deadline so a crashed child process
+            # does not leave _model_warming=True and permanently block all recordings.
+            deadline = time.monotonic() + 60.0
+            while time.monotonic() < deadline:
                 try:
-                    res = self.transcriber.output_queue.get(timeout=0.2)
+                    res = self.transcriber.output_queue.get(timeout=0.5)
                     if res["type"] == "warmup_done":
                         break
                     elif res["type"] == "error":
                         log_error(f"Warmup error: {res['message']}")
                         break
-                except Exception:
-                    # Ignore timeout and retry
-                    pass
+                except queue.Empty:
+                    continue
+            else:
+                log_error("Warmup timed out after 60s — child process may have crashed.")
             log_info("Whisper warm-up finished.")
             s = get_ui_strings(get_primary_language(self.config))
             if self._preview_panel:
@@ -421,7 +426,7 @@ class SVoiceRecApp:
                 self._preview_panel.update_status(s["still_working_title"], self._main_thread_queue)
             return
         log_info("Starting recording...")
-        self.is_recording = True
+        # is_recording already set to True in toggle_recording() before this thread started
         self._submit_for_main_thread(
             lambda: self.menu_bar.set_status(recording=True) if self.menu_bar else None
         )
@@ -867,14 +872,14 @@ class SVoiceRecApp:
             if text:
                 log_info(f"File transcription successful, {len(text)} chars.")
 
-                downloads_dir = os.path.expanduser("~/Downloads")
-                base_name = os.path.splitext(os.path.basename(file_path))[0]
-                output_file = os.path.join(downloads_dir, f"{base_name}_transcription.md")
+                from pathlib import Path
+                src = Path(file_path)
+                output_file = Path.home() / "Downloads" / f"{src.stem}_transcription.md"
 
                 try:
-                    with open(output_file, "w", encoding="utf-8") as f:
-                        f.write(f"# Transcription: {os.path.basename(file_path)}\n\n")
-                        f.write(text)
+                    output_file.write_text(
+                        f"# Transcription: {src.name}\n\n{text}", encoding="utf-8"
+                    )
                     log_info(f"Saved transcription to {output_file}")
 
                     self.transcribed_parts = [f"File saved to {output_file}"]
@@ -882,7 +887,7 @@ class SVoiceRecApp:
                     from .utils import copy_to_clipboard
                     copy_to_clipboard(text)
 
-                    self.notify("Файл распознан", f"Сохранено: {os.path.basename(output_file)} (и скопировано!)", delay=3.0)
+                    self.notify("Файл распознан", f"Сохранено: {output_file.name} (и скопировано!)", delay=3.0)
                 except Exception as write_err:
                     log_error(f"Failed to write markdown file: {write_err}")
                     self.notify("Ошибка", "Не удалось сохранить файл.")
@@ -966,10 +971,9 @@ class SVoiceRecApp:
         pre_warm() fire-and-forgets; the prewarm_done response is silently consumed
         by the next transcribe() call (which ignores non-"transcription" messages).
         """
-        if self._keep_alive_running:
+        if not self._keep_alive_lock.acquire(blocking=False):
             log_info("Keep-alive: previous warmup still running — skipping.")
             return
-        self._keep_alive_running = True
         try:
             self.transcriber.pre_warm()
             log_info("Keep-alive: pre_warm() sent to transcriber process.")
@@ -977,7 +981,7 @@ class SVoiceRecApp:
         except Exception as e:
             log_error(f"Keep-alive warmup failed: {e}")
         finally:
-            self._keep_alive_running = False
+            self._keep_alive_lock.release()
 
     def _stop_keep_alive_timer(self) -> None:
         """Cancel the keep-alive timer."""

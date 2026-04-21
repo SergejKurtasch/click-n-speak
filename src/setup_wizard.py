@@ -19,6 +19,7 @@ import time
 from .permissions import (
     check_accessibility,
     check_input_monitoring,
+    check_input_monitoring_fast,
     check_microphone,
     mark_setup_done,
     open_accessibility_settings,
@@ -72,7 +73,10 @@ def run_setup_wizard() -> None:
 def _run_wizard() -> None:
     mic = check_microphone()
     acc = check_accessibility()
-    im = check_input_monitoring()
+    # Use the fast TCC check (no CGEventTap created, no dialog triggered).
+    # Falls back to False when TCC.db is inaccessible — we show the step and let
+    # the step itself trigger the native dialog at the right moment.
+    im = check_input_monitoring_fast()
 
     need_mic = mic not in ("granted", "restricted")
     need_acc = not acc
@@ -190,32 +194,44 @@ def _run_wizard() -> None:
         step += 1
         label = f"Step {step} of {total_steps}"
 
-        clicked = _alert(
-            f"🔍  Input Monitoring  ({label})",
-            "Input Monitoring lets Click-n-speak detect the global hotkey (Alt+Space).\n\n"
-            "On macOS 15+, this is a separate permission from Accessibility.\n\n"
-            "Click \"Open Settings\" — System Settings will open on the Input Monitoring page.\n\n"
-            "  1. Find Click-n-speak in the list\n"
-            "  2. Toggle it ON\n"
-            "  3. Come back here — this dialog closes automatically.",
-            ["Open Settings", "Skip"],
-        )
-        if clicked == 0:
-            open_input_monitoring_settings()
-            _wait_for_permission_with_dialog(
-                title="Waiting for Input Monitoring…",
-                body=(
-                    "System Settings → Privacy & Security → Input Monitoring\n\n"
-                    "Find Click-n-speak and toggle it ON.\n\n"
-                    "This dialog closes automatically once access is granted."
-                ),
-                check_fn=check_input_monitoring,
-                timeout=_INPUT_MONITORING_WAIT_TIMEOUT,
-                granted_title="✅ Input Monitoring Granted",
-                granted_body="Input Monitoring confirmed. The Alt+Space hotkey is now active.",
-            )
+        # Trigger the native macOS permission dialog NOW (first CGEventTap attempt).
+        # This must happen before we show any wizard instructions, so the system
+        # dialog appears while the user reads our guidance — not earlier during
+        # the wizard preamble.
+        already_granted = check_input_monitoring()
+
+        if already_granted:
+            log.info("Input Monitoring already granted — skipping prompt.")
         else:
-            log.info("User skipped input monitoring setup.")
+            # Dialog may have just appeared in the background (first-ever request),
+            # or was previously denied (dialog won't appear again — go to Settings).
+            clicked = _alert(
+                f"🔍  Input Monitoring  ({label})",
+                "Input Monitoring lets Click-n-speak detect the global hotkey (Alt+Space).\n\n"
+                "macOS should be showing a permission dialog right now — click Allow in it.\n\n"
+                "If no dialog appeared (permission was previously denied), "
+                "click \"Open Settings\" to enable it manually.",
+                ["Open Settings", "Skip"],
+            )
+            if clicked == 0:
+                open_input_monitoring_settings()
+                _wait_for_permission_with_dialog(
+                    title="Waiting for Input Monitoring…",
+                    body=(
+                        "Did a system dialog appear? Click Allow in it.\n\n"
+                        "Or in System Settings → Privacy & Security → Input Monitoring:\n"
+                        "  • If Click-n-speak is listed with toggle OFF → toggle it ON\n"
+                        "  • If Click-n-speak is not listed → close this dialog, "
+                        "quit and relaunch the app — macOS will ask again\n\n"
+                        "This dialog closes automatically once access is granted."
+                    ),
+                    check_fn=check_input_monitoring,
+                    timeout=_INPUT_MONITORING_WAIT_TIMEOUT,
+                    granted_title="✅ Input Monitoring Granted",
+                    granted_body="Input Monitoring confirmed. The Alt+Space hotkey is now active.",
+                )
+            else:
+                log.info("User skipped input monitoring setup.")
 
     # ── Done ─────────────────────────────────────────────────────────────────
     mic_ok = check_microphone() == "granted"

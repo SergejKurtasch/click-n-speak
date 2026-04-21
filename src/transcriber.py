@@ -5,7 +5,6 @@ import queue
 import traceback
 
 import numpy as np
-import mlx_whisper
 
 from .utils import log_error, log_exception, log_info
 
@@ -56,6 +55,11 @@ def _call_mlx_transcribe(
     **extra_kwargs,
 ):
     """Call mlx_whisper.transcribe; fall back without extra_kwargs if API does not support them."""
+    try:
+        import mlx_whisper  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("mlx_whisper is not installed — cannot transcribe.") from exc
+
     base_kw = {
         "path_or_hf_repo": model_name,
         "initial_prompt": initial_prompt,

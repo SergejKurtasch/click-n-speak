@@ -175,6 +175,37 @@ def check_input_monitoring() -> bool:
         return False  # assume denied if we can't verify — safer than assuming granted
 
 
+def check_input_monitoring_fast() -> bool:
+    """Check Input Monitoring permission without triggering the macOS permission dialog.
+
+    Reads TCC.db directly via sqlite3.  Returns False if the DB is inaccessible
+    (no Full Disk Access) — the caller should then show the step and let
+    check_input_monitoring() trigger the native dialog at the right moment.
+    """
+    import subprocess
+    tcc_db = (
+        Path.home() / "Library" / "Application Support" / "com.apple.TCC" / "TCC.db"
+    )
+    if not tcc_db.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "sqlite3", "-readonly", str(tcc_db),
+                "SELECT auth_value FROM access "
+                "WHERE service='kTCCServiceListenEvent' LIMIT 1;",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        # auth_value=2 means "allowed"
+        return result.returncode == 0 and result.stdout.strip() == "2"
+    except Exception as exc:
+        log.warning("TCC fast-check failed (non-critical): %s", exc)
+        return False
+
+
 def open_input_monitoring_settings() -> None:
     """Open System Settings on the Input Monitoring privacy pane."""
     import subprocess
