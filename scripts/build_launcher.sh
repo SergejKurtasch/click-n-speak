@@ -146,26 +146,26 @@ cc -arch arm64 -O2 -o "$LAUNCHER" "$LAUNCHER_SRC"
 chmod +x "$LAUNCHER"
 echo "  Compiled native launcher: $LAUNCHER"
 
-# Step 5b: App icon from CnS.png (falls back to icon_base.png)
+# Step 5b: App icon from assets/CnS.png (falls back to assets/icon_base.png)
 ICON_SOURCE=""
-if [ -f "${PROJECT_ROOT}/CnS.png" ]; then
-    ICON_SOURCE="${PROJECT_ROOT}/CnS.png"
-elif [ -f "${PROJECT_ROOT}/icon_base.png" ]; then
-    ICON_SOURCE="${PROJECT_ROOT}/icon_base.png"
+if [ -f "${PROJECT_ROOT}/assets/CnS.png" ]; then
+    ICON_SOURCE="${PROJECT_ROOT}/assets/CnS.png"
+elif [ -f "${PROJECT_ROOT}/assets/icon_base.png" ]; then
+    ICON_SOURCE="${PROJECT_ROOT}/assets/icon_base.png"
 fi
 
 if [ -n "$ICON_SOURCE" ]; then
     echo "Step 5b: Building app icon..."
     (cd "${PROJECT_ROOT}" && bash "${PROJECT_ROOT}/scripts/make_icons.sh" "$ICON_SOURCE" >/dev/null 2>&1)
-    if [ -f "${PROJECT_ROOT}/icon.icns" ]; then
-        cp "${PROJECT_ROOT}/icon.icns" "${RESOURCES}/"
+    if [ -f "${PROJECT_ROOT}/assets/icon.icns" ]; then
+        cp "${PROJECT_ROOT}/assets/icon.icns" "${RESOURCES}/"
         echo "  App icon copied to bundle"
     fi
 fi
 
 # Also ship the PNG icon for use in the menu bar (if present).
-if [ -f "${PROJECT_ROOT}/CnS.png" ]; then
-    cp "${PROJECT_ROOT}/CnS.png" "${RESOURCES}/CnS.png"
+if [ -f "${PROJECT_ROOT}/assets/CnS.png" ]; then
+    cp "${PROJECT_ROOT}/assets/CnS.png" "${RESOURCES}/CnS.png"
 fi
 
 # Step 6: Info.plist (version from pyproject.toml)

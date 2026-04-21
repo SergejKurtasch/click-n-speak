@@ -3,8 +3,8 @@
 # Script to create a macOS .icns file from a base PNG image
 
 # Optional first argument overrides the default base image path.
-BASE_IMAGE="${1:-icon_base.png}"
-ICONSET="icon.iconset"
+BASE_IMAGE="${1:-assets/icon_base.png}"
+ICONSET="assets/icon.iconset"
 
 if [ ! -f "$BASE_IMAGE" ]; then
     echo "Error: $BASE_IMAGE not found."
@@ -31,4 +31,4 @@ iconutil -c icns "$ICONSET"
 # Cleanup
 rm -rf "$ICONSET"
 
-echo "icon.icns created successfully."
+echo "assets/icon.icns created successfully."

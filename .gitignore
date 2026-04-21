@@ -8,6 +8,11 @@ venv/
 # IDEs
 .vscode/
 .idea/
+.cursor/
+
+# Cache
+.mypy_cache/
+.ruff_cache/
 
 # OS
 .DS_Store
@@ -26,9 +31,19 @@ empty_package/
 logs/
 temp/
 
+# Personal / generated — not for repo
+current_prompt.txt
+phrase_history.txt
+
+# Dev notes / AI assistant instructions — internal only
+CLAUDE.md
+
+# Untracked dev files
+scripts/launcher.c
+
+# Auto-excluded (already handled by other tools)
 .pre-commit-config.yaml
 pyproject.toml
-phrase_history.txt
 transparent Vector Illustration
 training1.md
 training2.md
