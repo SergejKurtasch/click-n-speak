@@ -65,7 +65,6 @@ def run_setup_wizard() -> None:
         _run_wizard()
     except Exception as exc:
         log.error("Setup wizard failed: %s", exc)
-        mark_setup_done()
     finally:
         _WIZARD_ACTIVE = False
 
@@ -122,15 +121,16 @@ def _run_wizard() -> None:
         label = f"Step {step} of {total_steps}"
 
         if mic == "denied":
-            _alert(
+            clicked = _alert(
                 f"🎙  Microphone Access  ({label})",
                 "Microphone access was previously denied.\n\n"
                 "System Settings will open. Find Click-n-speak under Microphone "
                 "and toggle it ON.",
                 ["Open Settings", "Skip"],
             )
-            from .permissions import open_microphone_settings
-            open_microphone_settings()
+            if clicked == 0:
+                from .permissions import open_microphone_settings
+                open_microphone_settings()
         else:
             _alert(
                 f"🎙  Microphone Access  ({label})",
@@ -141,15 +141,16 @@ def _run_wizard() -> None:
             )
             granted = request_microphone_sync(timeout=30.0)
             if not granted:
-                _alert(
+                clicked = _alert(
                     "Microphone Not Granted",
                     "Microphone access was not granted. You can enable it later in:\n"
                     "  System Settings → Privacy & Security → Microphone\n\n"
-                    "Opening System Settings now.",
+                    "Open System Settings to enable it now?",
                     ["Open Settings", "Continue Anyway"],
                 )
-                from .permissions import open_microphone_settings
-                open_microphone_settings()
+                if clicked == 0:
+                    from .permissions import open_microphone_settings
+                    open_microphone_settings()
             else:
                 _alert(
                     "✅ Microphone Granted",
@@ -175,11 +176,6 @@ def _run_wizard() -> None:
             open_accessibility_settings()
             _wait_for_permission_with_dialog(
                 title="Waiting for Accessibility…",
-                body=(
-                    "System Settings → Privacy & Security → Accessibility\n\n"
-                    "Find Click-n-speak and toggle it ON.\n\n"
-                    "This dialog closes automatically once access is granted."
-                ),
                 check_fn=check_accessibility,
                 timeout=_ACCESSIBILITY_WAIT_TIMEOUT,
                 granted_title="✅ Accessibility Granted",
@@ -216,14 +212,6 @@ def _run_wizard() -> None:
                 open_input_monitoring_settings()
                 _wait_for_permission_with_dialog(
                     title="Waiting for Input Monitoring…",
-                    body=(
-                        "Did a system dialog appear? Click Allow in it.\n\n"
-                        "Or in System Settings → Privacy & Security → Input Monitoring:\n"
-                        "  • If Click-n-speak is listed with toggle OFF → toggle it ON\n"
-                        "  • If Click-n-speak is not listed → close this dialog, "
-                        "quit and relaunch the app — macOS will ask again\n\n"
-                        "This dialog closes automatically once access is granted."
-                    ),
                     check_fn=check_input_monitoring,
                     timeout=_INPUT_MONITORING_WAIT_TIMEOUT,
                     granted_title="✅ Input Monitoring Granted",
@@ -278,7 +266,6 @@ def _run_wizard() -> None:
 def _wait_for_permission_with_dialog(
     *,
     title: str,
-    body: str,
     check_fn,
     timeout: float,
     granted_title: str,
@@ -303,7 +290,7 @@ def _wait_for_permission_with_dialog(
     granted = [False]
     cancel = [False]
 
-    def _poll():
+    def _poll() -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and not cancel[0]:
             if check_fn():

@@ -175,10 +175,15 @@ class AiEditor:
             # would cause a concurrent Metal GPU access — wait up to 2 s for it to stop.
             self._abort_event.set()
             t.join(timeout=2.0)
+            if t.is_alive():
+                log_error(
+                    "AiEditor: LLM thread still alive after abort+2s wait "
+                    "— releasing lock despite possible GPU access (thread is stuck)."
+                )
             self._lock.release()
             log_error(
-                f"AiEditor: LLM thread still alive after {_REFINE_TIMEOUT_SECONDS + 0.5}s "
-                "— timeout wrapper triggered, returning original text."
+                f"AiEditor: LLM thread timed out after {_REFINE_TIMEOUT_SECONDS + 0.5}s "
+                "— returning original text."
             )
             return text
 

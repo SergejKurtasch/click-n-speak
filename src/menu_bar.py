@@ -274,7 +274,7 @@ class ClickNSpeakApp(rumps.App):
     def _on_tap_failed(self) -> None:
         """Called from hotkey health-check thread when CGEventTap creation failed."""
         self._input_monitoring_ok = False
-        self.main_app._submit_for_main_thread(self._show_input_monitoring_required, [], {})
+        self.main_app._submit_for_main_thread(self._show_input_monitoring_required)
 
     def _show_input_monitoring_required(self) -> None:
         from .setup_wizard import is_wizard_active

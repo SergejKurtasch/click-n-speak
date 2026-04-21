@@ -407,12 +407,16 @@ class TestMenuIconPath(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 10. all_permissions_granted() uses fast TCC check (no CGEventTap dialog)
+# 10. all_permissions_granted() uses CGEventTap check (not TCC.db fast check)
 # ---------------------------------------------------------------------------
 
-class TestAllPermissionsGrantedNoCGEventTap(unittest.TestCase):
-    def test_uses_fast_check_not_cgeventtap(self):
-        """all_permissions_granted() must call check_input_monitoring_fast(), not check_input_monitoring()."""
+class TestAllPermissionsGrantedUsesCGEventTap(unittest.TestCase):
+    def test_uses_cgeventtap_not_fast_check(self):
+        """all_permissions_granted() must call check_input_monitoring() (CGEventTap), not check_input_monitoring_fast().
+
+        The fast TCC.db check always returns False on Macs with SIP enabled (no Full Disk Access),
+        causing the setup wizard to re-run on every launch even when Input Monitoring is granted.
+        """
         from src import permissions
 
         fast_called = {"n": 0}
@@ -433,8 +437,8 @@ class TestAllPermissionsGrantedNoCGEventTap(unittest.TestCase):
             result = permissions.all_permissions_granted()
 
         self.assertTrue(result)
-        self.assertEqual(fast_called["n"], 1, "check_input_monitoring_fast must be called")
-        self.assertEqual(tap_called["n"], 0, "check_input_monitoring (CGEventTap) must NOT be called")
+        self.assertEqual(tap_called["n"], 1, "check_input_monitoring (CGEventTap) must be called")
+        self.assertEqual(fast_called["n"], 0, "check_input_monitoring_fast (TCC.db) must NOT be called")
 
 
 if __name__ == "__main__":

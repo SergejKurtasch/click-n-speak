@@ -69,7 +69,12 @@ def request_microphone_sync(timeout: float = 30.0) -> bool:
 
     Returns True if the user granted access, False otherwise.
     Falls back to opening System Settings if AVFoundation is unavailable.
+
+    Drives the NSRunLoop in 0.5 s ticks so AppKit events keep processing while
+    waiting — avoids a hard block on the main thread.
     """
+    import time as _time
+
     try:
         from AVFoundation import AVCaptureDevice, AVMediaTypeAudio  # type: ignore
     except Exception as exc:
@@ -77,16 +82,29 @@ def request_microphone_sync(timeout: float = 30.0) -> bool:
         open_microphone_settings()
         return False
 
-    event = threading.Event()
     result: list[bool] = [False]
+    done: list[bool] = [False]
 
     def _handler(granted: bool) -> None:
         result[0] = bool(granted)
+        done[0] = True
         log.info("Microphone permission response: granted=%s", result[0])
-        event.set()
 
     AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVMediaTypeAudio, _handler)
-    event.wait(timeout=timeout)
+
+    try:
+        from AppKit import NSRunLoop, NSDefaultRunLoopMode, NSDate  # type: ignore
+        loop = NSRunLoop.currentRunLoop()
+        start = _time.monotonic()
+        while not done[0] and (_time.monotonic() - start) < timeout:
+            limit = NSDate.dateWithTimeIntervalSinceNow_(0.5)
+            loop.runMode_beforeDate_(NSDefaultRunLoopMode, limit)
+    except ImportError:
+        # Headless fallback (tests / non-AppKit environment)
+        deadline = _time.monotonic() + timeout
+        while not done[0] and _time.monotonic() < deadline:
+            _time.sleep(0.5)
+
     return result[0]
 
 
@@ -193,7 +211,8 @@ def check_input_monitoring_fast() -> bool:
             [
                 "sqlite3", "-readonly", str(tcc_db),
                 "SELECT auth_value FROM access "
-                "WHERE service='kTCCServiceListenEvent' LIMIT 1;",
+                "WHERE service='kTCCServiceListenEvent' "
+                "AND (client='com.sergej.clicknspeak' OR client LIKE '%python%') LIMIT 1;",
             ],
             capture_output=True,
             text=True,
@@ -223,9 +242,14 @@ def open_input_monitoring_settings() -> None:
 # ---------------------------------------------------------------------------
 
 def all_permissions_granted() -> bool:
-    """Return True if microphone, accessibility, and input monitoring are all granted."""
+    """Return True if microphone, accessibility, and input monitoring are all granted.
+
+    Uses check_input_monitoring() (CGEventTap) rather than the fast TCC.db read because
+    TCC.db is inaccessible on most Macs with SIP enabled, causing the fast check to always
+    return False and triggering the setup wizard again on every launch.
+    """
     return (
         check_microphone() == "granted"
         and check_accessibility()
-        and check_input_monitoring_fast()
+        and check_input_monitoring()
     )

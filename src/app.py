@@ -723,10 +723,13 @@ class SVoiceRecApp:
             log_info(f"Chunk queue size at stop: {queue_size} (worker will finish queue)")
 
             if last_audio is not None and len(last_audio) > 0:
-                self.chunk_queue.put((last_audio, True))
-                log_info(
-                    "Final audio chunk added to queue (worker will process it in order)."
-                )
+                try:
+                    self.chunk_queue.put_nowait((last_audio, True))
+                    log_info(
+                        "Final audio chunk added to queue (worker will process it in order)."
+                    )
+                except Exception:
+                    log_error("Chunk queue full — final audio chunk dropped.")
 
             # Signal worker to finish and wait for it (long timeout so "Finish" only after real completion)
             self.stop_worker.set()
