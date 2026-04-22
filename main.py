@@ -118,7 +118,9 @@ def main() -> None:
 
         atexit.register(_cleanup_and_exit)
         for _sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(_sig, lambda *_: (_cleanup_and_exit(), sys.exit(0)))
+            # os._exit(0) after cleanup: skips thread wait so the process exits
+            # immediately, killing daemon child processes (transcriber) instantly.
+            signal.signal(_sig, lambda *_: (_cleanup_and_exit(), os._exit(0)))
 
         # Start model warm-up early to reduce first-run transcription latency.
         logic_app.start_model_warmup()

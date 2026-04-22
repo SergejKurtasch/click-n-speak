@@ -882,12 +882,17 @@ class ClickNSpeakApp(rumps.App):
             self.main_app.notify("Ошибка", "Не удалось обновить объекты входа.")
 
     def quit_application(self, sender=None):
+        import os as _os
         log_info("Quit requested — cleaning up before exit.")
         try:
             self.main_app.stop()
         except Exception as e:
             log_error(f"Cleanup error on quit: {e}")
-        rumps.quit_application()
+        log_info("Cleanup complete — exiting process.")
+        # os._exit(0) kills the process immediately without waiting for non-daemon
+        # threads (e.g. pynput listener). All cleanup is done above; the child
+        # transcriber process (daemon=True) is also killed instantly.
+        _os._exit(0)
 
     def set_status(self, recording=False, processing=False):
         # Make the state highly visible in the menu bar; language from primary setting.
