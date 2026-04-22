@@ -43,6 +43,186 @@ from .utils import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Language Selection Panel (NSPanel — stays open across multiple clicks)
+# ---------------------------------------------------------------------------
+
+LANGS = ["ru", "en", "de", "es", "fr"]
+LANG_LABELS = {
+    "ru": "RU — Russian",
+    "en": "EN — English",
+    "de": "DE — German",
+    "es": "ES — Spanish",
+    "fr": "FR — French",
+}
+
+try:
+    from Foundation import NSObject
+    import objc as _objc
+
+    class _LangDelegate(NSObject):
+        """NSObject target for language panel button callbacks."""
+
+        @_objc.python_method
+        def setup(self, on_primary, on_additional):
+            self._on_primary = on_primary
+            self._on_additional = on_additional
+            self._primary_btns: dict = {}
+            self._additional_btns: dict = {}
+
+        def primaryClicked_(self, sender):
+            from AppKit import NSControlStateValueOn, NSControlStateValueOff
+            lang = LANGS[sender.tag()]
+            for lk, btn in self._primary_btns.items():
+                btn.setState_(NSControlStateValueOn if lk == lang else NSControlStateValueOff)
+            self._on_primary(lang)
+
+        def additionalClicked_(self, sender):
+            from AppKit import NSControlStateValueOn
+            lang = LANGS[sender.tag()]
+            self._on_additional(lang, sender.state() == NSControlStateValueOn)
+
+    _HAVE_PANEL = True
+except Exception:
+    _LangDelegate = None  # type: ignore
+    _HAVE_PANEL = False
+
+
+class LanguageSelectionPanel:
+    """Floating NSPanel for primary/additional language selection.
+
+    Stays open across multiple clicks so the user can toggle languages
+    without the macOS menu collapsing on each selection.
+    """
+
+    _W, _H = 230, 340
+    _ROW, _MARGIN = 24, 14
+
+    def __init__(self, config: dict, on_primary_change, on_additional_toggle):
+        self._config = config
+        self._on_primary = on_primary_change
+        self._on_additional = on_additional_toggle
+        self._panel = None
+        self._delegate = None
+
+    def show(self) -> None:
+        """Create or bring to front the panel. Must be called on the main thread."""
+        if not _HAVE_PANEL:
+            log_error("AppKit not available — cannot show language panel.")
+            return
+        if self._panel is not None:
+            try:
+                self._panel.makeKeyAndOrderFront_(None)
+                self._refresh()
+                return
+            except Exception:
+                self._panel = None
+                self._delegate = None
+        try:
+            self._build()
+        except Exception as exc:
+            log_error(f"Language panel build failed: {exc}")
+
+    def close(self) -> None:
+        if self._panel is not None:
+            self._panel.orderOut_(None)
+        self._panel = None
+        self._delegate = None
+
+    def _build(self) -> None:
+        from AppKit import (
+            NSPanel, NSButton, NSTextField, NSMakeRect, NSFont,
+            NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
+            NSBackingStoreBuffered, NSFloatingWindowLevel,
+            NSScreen, NSControlStateValueOn, NSControlStateValueOff,
+        )
+        try:
+            from AppKit import NSWindowStyleMaskNonactivatingPanel as _NON_ACTIVATING
+        except ImportError:
+            _NON_ACTIVATING = 128  # NSNonactivatingPanelMask
+
+        w, h, row, mg = self._W, self._H, self._ROW, self._MARGIN
+        sf = NSScreen.mainScreen().frame()
+        x = sf.size.width - w - 20
+        y = sf.size.height - h - 30  # below menu bar
+
+        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(x, y, w, h),
+            _NON_ACTIVATING | NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
+            NSBackingStoreBuffered,
+            False,
+        )
+        panel.setTitle_("Languages")
+        panel.setLevel_(NSFloatingWindowLevel)
+        panel.setHidesOnDeactivate_(False)
+        panel.setBecomesKeyOnlyIfNeeded_(True)
+
+        cv = panel.contentView()
+        delegate = _LangDelegate.alloc().init()
+        delegate.setup(self._on_primary, self._on_additional)
+
+        primary = self._config.get("primary_language", "ru")
+        additional = list(self._config.get("additional_languages") or [])
+        y_cur = h - 32
+
+        def _header(text: str) -> None:
+            nonlocal y_cur
+            lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(mg, y_cur, w - 2 * mg, 18))
+            lbl.setStringValue_(text)
+            lbl.setBezeled_(False)
+            lbl.setDrawsBackground_(False)
+            lbl.setEditable_(False)
+            lbl.setSelectable_(False)
+            lbl.setFont_(NSFont.boldSystemFontOfSize_(11))
+            cv.addSubview_(lbl)
+            y_cur -= 6
+
+        def _button(i: int, lang: str, btype: int, state: int, action: str, store: dict) -> None:
+            nonlocal y_cur
+            y_cur -= row
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(mg + 8, y_cur, w - 2 * mg - 8, row))
+            btn.setButtonType_(btype)
+            btn.setTitle_(LANG_LABELS[lang])
+            btn.setState_(state)
+            btn.setTarget_(delegate)
+            btn.setAction_(action)
+            btn.setTag_(i)
+            cv.addSubview_(btn)
+            store[lang] = btn
+
+        _header("Primary Language")
+        for i, lang in enumerate(LANGS):
+            _button(i, lang, 4,  # 4 = NSButtonTypeRadio
+                    NSControlStateValueOn if lang == primary else NSControlStateValueOff,
+                    "primaryClicked:", delegate._primary_btns)
+
+        y_cur -= 12
+        _header("Additional Languages")
+        for i, lang in enumerate(LANGS):
+            _button(i, lang, 3,  # 3 = NSButtonTypeSwitch (checkbox)
+                    NSControlStateValueOn if lang in additional else NSControlStateValueOff,
+                    "additionalClicked:", delegate._additional_btns)
+
+        self._delegate = delegate
+        self._panel = panel
+        panel.makeKeyAndOrderFront_(None)
+
+    def _refresh(self) -> None:
+        """Sync button states with current config."""
+        if self._delegate is None:
+            return
+        try:
+            from AppKit import NSControlStateValueOn, NSControlStateValueOff
+            primary = self._config.get("primary_language", "ru")
+            additional = list(self._config.get("additional_languages") or [])
+            for lang, btn in self._delegate._primary_btns.items():
+                btn.setState_(NSControlStateValueOn if lang == primary else NSControlStateValueOff)
+            for lang, btn in self._delegate._additional_btns.items():
+                btn.setState_(NSControlStateValueOn if lang in additional else NSControlStateValueOff)
+        except Exception as exc:
+            log_error(f"Language panel refresh error: {exc}")
+
+
 def _prompt_restart(reason: str) -> None:
     """Show a modal asking the user to relaunch the app. Relaunches on OK."""
     try:
@@ -76,6 +256,7 @@ class ClickNSpeakApp(rumps.App):
         self._input_monitoring_ok: bool | None = None  # None = unknown until health check
         self._input_monitoring_item = None  # set in setup_menu
         self._wizard_pending = False
+        self._language_panel: LanguageSelectionPanel | None = None
 
         # Build Menu
         self.setup_menu()
@@ -312,83 +493,20 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(rumps.MenuItem("🔐 Check Permissions", callback=self._on_check_permissions))
         self.menu.add(None)  # Separator
 
-        # Model Selection
+        # Model selection submenu
         current_model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
-
         self.menu.add("Model")
         for label, model_id in WHISPER_MODELS:
-            # Start with download icon as placeholder; cache check will update it
             title = f"{_ICON_DOWNLOAD} {label}"
             item = rumps.MenuItem(title, callback=self.change_model)
             if model_id == current_model:
                 item.state = 1
             self.menu["Model"].add(item)
 
-        # Languages: primary (single) and additional (multiple)
-        langs = ["ru", "en", "de", "es", "fr"]
-        primary = get_primary_language(self.config)
-        additional = self.config.get("additional_languages")
-        if not isinstance(additional, list):
-            additional = []
-        # Backward compat: derive from old "languages" list
-        if not additional:
-            lang_list = self.config.get("languages", [])
-            if isinstance(lang_list, list) and len(lang_list) > 1:
-                additional = [str(x).lower().strip() for x in lang_list[1:] if x]
-
-        self.menu.add("Primary Language")
-        for lang in langs:
-            item = rumps.MenuItem(lang.upper(), callback=self._change_primary_language)
-            if lang == primary:
-                item.state = 1
-            self.menu["Primary Language"].add(item)
-
-        self.menu.add("Additional Languages")
-        for lang in langs:
-            item = rumps.MenuItem(lang.upper(), callback=self._toggle_additional_language)
-            if lang in additional:
-                item.state = 1
-            self.menu["Additional Languages"].add(item)
-
-        # Sensitivity / Delays
-        self.menu.add("Silence Delay")
-        sensitivity_options = [("Fast (0.5s)", 0.5), ("Normal (1.0s)", 1.0), ("Slow (2.0s)", 2.0)]
-        current_delay = self.config.get("silence_duration", 1.0)
-        for title, val in sensitivity_options:
-            item = rumps.MenuItem(title, callback=self.set_sensitivity)
-            if (
-                (val == 0.5 and current_delay <= 0.6)
-                or (val == 1.0 and 0.6 < current_delay <= 1.2)
-                or (val == 2.0 and current_delay > 1.2)
-            ):
-                item.state = 1
-            self.menu["Silence Delay"].add(item)
-            
-        self.menu.add("Min Speech Duration")
-        speech_options = [("Short (0.3s)", 0.3), ("Normal (1.0s)", 1.0), ("Long (2.0s)", 2.0)]
-        current_speech = self.config.get("min_speech_duration", 1.0)
-        for title, val in speech_options:
-            item = rumps.MenuItem(title, callback=self.set_min_speech_duration)
-            if (
-                (val == 0.3 and current_speech <= 0.5)
-                or (val == 1.0 and 0.5 < current_speech <= 1.5)
-                or (val == 2.0 and current_speech > 1.5)
-            ):
-                item.state = 1
-            self.menu["Min Speech Duration"].add(item)
+        # Language selection — opens floating NSPanel that stays open across clicks
+        self.menu.add(rumps.MenuItem("🌐 Languages...", callback=self._open_language_panel))
 
         self.menu.add(None)  # Separator
-
-        self.menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
-        self.menu.add(rumps.MenuItem("Open Log File", callback=self.open_log_file))
-        self._last_phrases_parent = rumps.MenuItem("Last 5 phrases")
-        self.menu.add(self._last_phrases_parent)
-        self._refresh_last_phrases_submenu()
-        self.menu.add(rumps.MenuItem("Edit Initial Prompt", callback=self.edit_initial_prompt))
-        self.menu.add(rumps.MenuItem("Update Initial Prompt from History", callback=self.update_initial_prompt_from_history))
-        self.menu.add(rumps.MenuItem("Revert Initial Prompt", callback=self.revert_initial_prompt))
-        
-        self.menu.add(None) # Separator
 
         # AI Editor toggle
         ai_editor_item = rumps.MenuItem("✦ AI Editor (Punctuation & Cleanup)", callback=self._toggle_ai_editor)
@@ -396,15 +514,35 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(ai_editor_item)
         self.menu.add(rumps.MenuItem("  ↳ Download AI Editor Model", callback=self._download_ai_model))
 
-        self.menu.add(rumps.MenuItem("Transcribe Audio File...", callback=self.transcribe_audio_file))
+        # Initial Prompt submenu
+        prompt_menu = rumps.MenuItem("📝 Initial Prompt")
+        prompt_menu.add(rumps.MenuItem("Edit...", callback=self.edit_initial_prompt))
+        prompt_menu.add(rumps.MenuItem("Update from History", callback=self.update_initial_prompt_from_history))
+        prompt_menu.add(rumps.MenuItem("Revert to Previous", callback=self.revert_initial_prompt))
+        self.menu.add(prompt_menu)
 
-        self.menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
-        self.menu.add(rumps.MenuItem("Check for Updates", callback=self.check_for_updates))
+        # Last 5 phrases
+        self._last_phrases_parent = rumps.MenuItem("Last 5 Phrases")
+        self.menu.add(self._last_phrases_parent)
+        self._refresh_last_phrases_submenu()
 
-        # Autostart option
-        autostart_item = rumps.MenuItem("Launch at Login", callback=self.toggle_autostart)
+        self.menu.add(rumps.MenuItem("🎵 Transcribe Audio File...", callback=self.transcribe_audio_file))
+
+        self.menu.add(None)  # Separator
+
+        self.menu.add(rumps.MenuItem("🔄 Check for Updates", callback=self.check_for_updates))
+
+        # Autostart
+        autostart_item = rumps.MenuItem("🚀 Launch at Login", callback=self.toggle_autostart)
         autostart_item.state = 1 if self.config.get("autostart", False) else 0
         self.menu.add(autostart_item)
+
+        # Advanced submenu
+        advanced_menu = rumps.MenuItem("⚙️ Advanced")
+        advanced_menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
+        advanced_menu.add(rumps.MenuItem("Open Log File", callback=self.open_log_file))
+        advanced_menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
+        self.menu.add(advanced_menu)
 
         self.menu.add(None)
 
@@ -478,41 +616,39 @@ class ClickNSpeakApp(rumps.App):
                 item.state = 0  # type: ignore
         sender.state = 1
 
-    def _change_primary_language(self, sender):
-        new_lang = sender.title.lower()
-        log_info(f"Setting primary language to {new_lang}")
+    def _open_language_panel(self, _) -> None:
+        """Open (or bring to front) the floating language selection panel."""
+        if self._language_panel is None:
+            self._language_panel = LanguageSelectionPanel(
+                config=self.config,
+                on_primary_change=self._apply_primary_language,
+                on_additional_toggle=self._apply_additional_language,
+            )
+        self._language_panel.show()
 
-        self.config["primary_language"] = new_lang
-        self.main_app.update_config({"primary_language": new_lang})
-
-        # Update UI: uncheck others in the "Primary Language" submenu
-        for item in self.menu["Primary Language"].values():
-            if hasattr(item, "state"):
-                item.state = 0  # type: ignore
-        sender.state = 1
-
+    def _apply_primary_language(self, lang: str) -> None:
+        """Apply a primary language change (called from the language panel)."""
+        log_info(f"Setting primary language to {lang}")
+        self.config["primary_language"] = lang
+        self.main_app.update_config({"primary_language": lang})
         self._update_language_hint_and_prompt()
         self.save_config()
         self.main_app.load_config_data(self.config)
-
-        # Reset mtime tracker for the new language file so we don't falsely trigger it
         self._last_prompt_path = None
         self._last_prompt_mtime = 0.0
 
-    def _toggle_additional_language(self, sender):
-        lang = sender.title.lower()
+    def _apply_additional_language(self, lang: str, is_on: bool) -> None:
+        """Toggle an additional language (called from the language panel)."""
         additional = list(self.config.get("additional_languages") or [])
         if not additional and isinstance(self.config.get("languages"), list) and len(self.config["languages"]) > 1:
             additional = [str(x).lower().strip() for x in self.config["languages"][1:] if x]
-        if lang in additional:
-            additional.remove(lang)
-        else:
+        if is_on and lang not in additional:
             additional.append(lang)
+        elif not is_on and lang in additional:
+            additional.remove(lang)
         self.config["additional_languages"] = additional
         self.main_app.update_config({"additional_languages": additional})
-        sender.state = 1 if lang in additional else 0
         log_info(f"Additional languages: {additional}")
-
         self._update_language_hint_and_prompt()
         self.save_config()
         self.main_app.load_config_data(self.config)
@@ -553,32 +689,6 @@ class ClickNSpeakApp(rumps.App):
             
         self.config["initial_prompt"] = final_prompt
 
-    def set_sensitivity(self, sender):
-        delay_map = {"Fast (0.5s)": 0.5, "Normal (1.0s)": 1.0, "Slow (2.0s)": 2.0}
-        val = delay_map.get(sender.title, 1.0)
-        self.config["silence_duration"] = val
-        self.save_config()
-
-        for item in self.menu["Silence Delay"].values():
-            item.state = 0
-        sender.state = 1
-
-        # Update app settings
-        self.main_app.update_recorder_settings(silence_duration=val)
-
-    def set_min_speech_duration(self, sender):
-        speech_map = {"Short (0.3s)": 0.3, "Normal (1.0s)": 1.0, "Long (2.0s)": 2.0}
-        val = speech_map.get(sender.title, 1.0)
-        self.config["min_speech_duration"] = val
-        self.save_config()
-
-        for item in self.menu["Min Speech Duration"].values():
-            item.state = 0
-        sender.state = 1
-
-        # Update app settings
-        self.main_app.update_recorder_settings(min_speech_duration=val)
-
     def _refresh_last_phrases_submenu(self) -> None:
         """Rebuild the 'Last 5 phrases' submenu from the phrase history file."""
         parent = self._last_phrases_parent
@@ -618,8 +728,12 @@ class ClickNSpeakApp(rumps.App):
     def reload_config(self, _: rumps.MenuItem) -> None:
         """Reloads config from disk and refreshes the menu."""
         self.main_app.load_config(str(get_config_path()))
+        self.config = self.main_app.config  # sync reference in case load replaced the dict
         self.main_app.notify("Конфигурация", "Настройки успешно перезагружены.")
-        # Re-setup menu (simplest way to update states)
+        # Close language panel so it rebuilds with the fresh config on next open
+        if self._language_panel is not None:
+            self._language_panel.close()
+            self._language_panel = None
         self.menu.clear()
         self.setup_menu()
 
@@ -803,6 +917,14 @@ class ClickNSpeakApp(rumps.App):
         except Exception as e:
             log_error(f"Error toggling autostart: {e}")
             self.main_app.notify("Ошибка", "Не удалось обновить объекты входа.")
+
+    def quit_application(self, sender=None):
+        log_info("Quit requested — cleaning up before exit.")
+        try:
+            self.main_app.stop()
+        except Exception as e:
+            log_error(f"Cleanup error on quit: {e}")
+        rumps.quit_application()
 
     def set_status(self, recording=False, processing=False):
         # Make the state highly visible in the menu bar; language from primary setting.
