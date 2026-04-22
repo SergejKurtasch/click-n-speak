@@ -108,7 +108,7 @@ class LanguageSelectionPanel:
     without the macOS menu collapsing on each selection.
     """
 
-    _W, _H = 230, 340
+    _W, _H = 230, 318
     _ROW, _MARGIN = 24, 14
 
     def __init__(self, config: dict, on_primary_change, on_additional_toggle):
@@ -117,6 +117,7 @@ class LanguageSelectionPanel:
         self._on_additional = on_additional_toggle
         self._panel = None
         self._delegate = None
+        self._outside_monitor = None
 
     def show(self) -> None:
         """Create or bring to front the panel. Must be called on the main thread."""
@@ -137,6 +138,7 @@ class LanguageSelectionPanel:
             log_error(f"Language panel build failed: {exc}")
 
     def close(self) -> None:
+        self._remove_outside_monitor()
         if self._panel is not None:
             self._panel.orderOut_(None)
         self._panel = None
@@ -144,8 +146,18 @@ class LanguageSelectionPanel:
 
     def _on_panel_closed(self) -> None:
         """Called by the window delegate when the panel's close button is clicked."""
+        self._remove_outside_monitor()
         self._panel = None
         self._delegate = None
+
+    def _remove_outside_monitor(self) -> None:
+        if self._outside_monitor is not None:
+            try:
+                from AppKit import NSEvent
+                NSEvent.removeMonitor_(self._outside_monitor)
+            except Exception:
+                pass
+            self._outside_monitor = None
 
     def _build(self) -> None:
         from AppKit import (
@@ -226,7 +238,8 @@ class LanguageSelectionPanel:
                     NSControlStateValueOn if lang == primary else NSControlStateValueOff,
                     "primaryClicked:", delegate._primary_btns)
 
-        y_cur -= 12
+        # Section gap must exceed header height (18px) to avoid overlap with last button
+        y_cur -= 22
         _header("Additional Languages")
         for i, lang in enumerate(LANGS):
             _button(i, lang, NSButtonTypeSwitch,
@@ -236,6 +249,37 @@ class LanguageSelectionPanel:
         self._delegate = delegate
         self._panel = panel
         panel.makeKeyAndOrderFront_(None)
+
+        # Close panel when user clicks outside it (standard macOS menu-bar popup behaviour)
+        try:
+            from AppKit import NSEvent
+            try:
+                from AppKit import NSEventMaskLeftMouseDown, NSEventMaskRightMouseDown
+                _mask = NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown
+            except ImportError:
+                _mask = (1 << 1) | (1 << 2)  # left=2, right=4
+
+            def _outside_click(event, _self=self):
+                if _self._panel is None:
+                    return
+                try:
+                    mouse = NSEvent.mouseLocation()
+                    frame = _self._panel.frame()
+                    inside = (
+                        frame.origin.x <= mouse.x <= frame.origin.x + frame.size.width
+                        and frame.origin.y <= mouse.y <= frame.origin.y + frame.size.height
+                    )
+                    if not inside:
+                        _self._panel.orderOut_(None)
+                        _self._on_panel_closed()
+                except Exception:
+                    pass
+
+            self._outside_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                _mask, _outside_click
+            )
+        except Exception as exc:
+            log_error(f"Language panel: could not install outside-click monitor: {exc}")
 
     def _refresh(self) -> None:
         """Sync button states with current config."""
