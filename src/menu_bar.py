@@ -152,7 +152,7 @@ class LanguageSelectionPanel:
             NSPanel, NSButton, NSTextField, NSMakeRect, NSFont,
             NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
             NSBackingStoreBuffered, NSFloatingWindowLevel,
-            NSScreen, NSStatusBar,
+            NSScreen,
             NSControlStateValueOn, NSControlStateValueOff,
             NSButtonTypeRadio, NSButtonTypeSwitch,
         )
@@ -165,9 +165,13 @@ class LanguageSelectionPanel:
 
         # screens()[0] is always the display carrying the menu bar; mainScreen() is
         # the display with the current key window and may differ on multi-monitor setups.
+        # Compute menu-bar height from the gap between frame and visibleFrame — this
+        # avoids NSStatusBar.thickness which returns objc.native_selector in some
+        # PyObjC versions instead of a float.
         screen = NSScreen.screens()[0]
         sf = screen.frame()
-        bar_h = NSStatusBar.systemStatusBar().thickness
+        vf = screen.visibleFrame()
+        bar_h = (sf.origin.y + sf.size.height) - (vf.origin.y + vf.size.height)
         x = sf.size.width - w - 20
         y = sf.size.height - h - bar_h - 4
 
