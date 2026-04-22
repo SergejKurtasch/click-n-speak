@@ -529,6 +529,7 @@ class ClickNSpeakApp(rumps.App):
         advanced_menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
         self.menu.add(advanced_menu)
 
+        self.menu.add(rumps.MenuItem("🔁 Restart", callback=self.restart_application))
         self.menu.add(None)
 
     # ------------------------------------------------------------------
@@ -880,6 +881,20 @@ class ClickNSpeakApp(rumps.App):
         except Exception as e:
             log_error(f"Error toggling autostart: {e}")
             self.main_app.notify("Ошибка", "Не удалось обновить объекты входа.")
+
+    def restart_application(self, sender=None):
+        log_info("Restart requested — cleaning up before relaunch.")
+        try:
+            self.main_app.stop()
+        except Exception as e:
+            log_error(f"Cleanup error on restart: {e}")
+        # relaunch_app() spawns a detached shell that waits 1s then opens a new
+        # instance, then calls os._exit(0) to kill this process immediately.
+        # Falls back to plain exit if not running from a .app bundle (dev mode).
+        if not relaunch_app():
+            log_info("Not running from .app bundle — skipping relaunch.")
+            import os as _os
+            _os._exit(0)
 
     def quit_application(self, sender=None):
         import os as _os
