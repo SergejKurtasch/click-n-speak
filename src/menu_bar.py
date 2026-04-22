@@ -66,237 +66,133 @@ LANG_PROMPTS = {
 
 try:
     from Foundation import NSObject
+    from AppKit import NSView, NSMakeRect
     import objc as _objc
 
-    class _LangDelegate(NSObject):
-        """NSObject target for language panel button callbacks."""
+    class _LangMenuController(NSObject):
+        """Builds the language selection NSMenu with sticky view-based items.
+
+        NSMenuItem.setView_() prevents the menu from closing when buttons inside
+        the view are clicked — the standard macOS pattern for multi-select menus.
+        """
 
         @_objc.python_method
-        def setup(self, on_primary, on_additional, on_close=None):
+        def configure(self, config: dict, on_primary, on_additional) -> None:
+            self._config = config
             self._on_primary = on_primary
             self._on_additional = on_additional
-            self._on_close = on_close
             self._primary_btns: dict = {}
             self._additional_btns: dict = {}
 
+        @_objc.python_method
+        def build_submenu(self):
+            from AppKit import (
+                NSMenu, NSMenuItem, NSButton, NSTextField, NSFont,
+                NSButtonTypeRadio, NSButtonTypeSwitch,
+                NSControlStateValueOn, NSControlStateValueOff,
+            )
+
+            VIEW_W = 220
+            ROW_H = 22
+            HEADER_H = 20
+            MARGIN = 14
+
+            menu = NSMenu.alloc().init()
+            menu.setAutoenablesItems_(False)
+            self._primary_btns = {}
+            self._additional_btns = {}
+
+            primary = self._config.get("primary_language", "ru")
+            additional = list(self._config.get("additional_languages") or [])
+
+            def _header_item(text: str) -> None:
+                view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, HEADER_H))
+                lbl = NSTextField.alloc().initWithFrame_(
+                    NSMakeRect(MARGIN, 2, VIEW_W - 2 * MARGIN, HEADER_H - 4)
+                )
+                lbl.setStringValue_(text)
+                lbl.setBezeled_(False)
+                lbl.setDrawsBackground_(False)
+                lbl.setEditable_(False)
+                lbl.setSelectable_(False)
+                lbl.setFont_(NSFont.boldSystemFontOfSize_(11))
+                view.addSubview_(lbl)
+                mi = NSMenuItem.alloc().init()
+                mi.setView_(view)
+                mi.setEnabled_(False)
+                menu.addItem_(mi)
+
+            def _radio_item(idx: int, lang: str) -> None:
+                view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, ROW_H))
+                btn = NSButton.alloc().initWithFrame_(
+                    NSMakeRect(MARGIN, 1, VIEW_W - 2 * MARGIN, ROW_H - 2)
+                )
+                btn.setButtonType_(NSButtonTypeRadio)
+                btn.setTitle_(LANG_LABELS[lang])
+                btn.setState_(NSControlStateValueOn if lang == primary else NSControlStateValueOff)
+                btn.setTarget_(self)
+                btn.setAction_("primaryClicked:")
+                btn.setTag_(idx)
+                view.addSubview_(btn)
+                self._primary_btns[lang] = btn
+                mi = NSMenuItem.alloc().init()
+                mi.setView_(view)
+                menu.addItem_(mi)
+
+            def _checkbox_item(idx: int, lang: str) -> None:
+                view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, ROW_H))
+                btn = NSButton.alloc().initWithFrame_(
+                    NSMakeRect(MARGIN, 1, VIEW_W - 2 * MARGIN, ROW_H - 2)
+                )
+                btn.setButtonType_(NSButtonTypeSwitch)
+                btn.setTitle_(LANG_LABELS[lang])
+                btn.setState_(NSControlStateValueOn if lang in additional else NSControlStateValueOff)
+                btn.setTarget_(self)
+                btn.setAction_("additionalClicked:")
+                btn.setTag_(idx)
+                view.addSubview_(btn)
+                self._additional_btns[lang] = btn
+                mi = NSMenuItem.alloc().init()
+                mi.setView_(view)
+                menu.addItem_(mi)
+
+            _header_item("Primary Language")
+            for i, lang in enumerate(LANGS):
+                _radio_item(i, lang)
+
+            menu.addItem_(NSMenuItem.separatorItem())
+            _header_item("Additional Languages")
+            for i, lang in enumerate(LANGS):
+                _checkbox_item(i, lang)
+
+            return menu
+
         def primaryClicked_(self, sender):
             from AppKit import NSControlStateValueOn, NSControlStateValueOff
-            lang = LANGS[sender.tag()]
+            idx = sender.tag()
+            if idx < 0 or idx >= len(LANGS):
+                return
+            lang = LANGS[idx]
             for lk, btn in self._primary_btns.items():
                 btn.setState_(NSControlStateValueOn if lk == lang else NSControlStateValueOff)
             self._on_primary(lang)
 
         def additionalClicked_(self, sender):
             from AppKit import NSControlStateValueOn
-            lang = LANGS[sender.tag()]
+            idx = sender.tag()
+            if idx < 0 or idx >= len(LANGS):
+                return
+            lang = LANGS[idx]
+            # NSButton (Switch type) auto-toggles before the action fires;
+            # sender.state() already reflects the new state.
             self._on_additional(lang, sender.state() == NSControlStateValueOn)
 
-        def windowWillClose_(self, notification):
-            if self._on_close:
-                self._on_close()
-
-    _HAVE_PANEL = True
-except Exception:
-    _LangDelegate = None  # type: ignore
-    _HAVE_PANEL = False
-
-
-class LanguageSelectionPanel:
-    """Floating NSPanel for primary/additional language selection.
-
-    Stays open across multiple clicks so the user can toggle languages
-    without the macOS menu collapsing on each selection.
-    """
-
-    _W, _H = 230, 318
-    _ROW, _MARGIN = 24, 14
-
-    def __init__(self, config: dict, on_primary_change, on_additional_toggle):
-        self._config = config
-        self._on_primary = on_primary_change
-        self._on_additional = on_additional_toggle
-        self._panel = None
-        self._delegate = None
-        self._outside_monitor = None
-
-    def show(self) -> None:
-        """Create or bring to front the panel. Must be called on the main thread."""
-        if not _HAVE_PANEL:
-            log_error("AppKit not available — cannot show language panel.")
-            return
-        if self._panel is not None:
-            try:
-                self._panel.makeKeyAndOrderFront_(None)
-                self._refresh()
-                return
-            except Exception:
-                self._panel = None
-                self._delegate = None
-        try:
-            self._build()
-        except Exception as exc:
-            log_error(f"Language panel build failed: {exc}")
-
-    def close(self) -> None:
-        self._remove_outside_monitor()
-        if self._panel is not None:
-            self._panel.orderOut_(None)
-        self._panel = None
-        self._delegate = None
-
-    def _on_panel_closed(self) -> None:
-        """Called by the window delegate when the panel's close button is clicked."""
-        self._remove_outside_monitor()
-        self._panel = None
-        self._delegate = None
-
-    def _remove_outside_monitor(self) -> None:
-        if self._outside_monitor is not None:
-            try:
-                from AppKit import NSEvent
-                NSEvent.removeMonitor_(self._outside_monitor)
-            except Exception:
-                pass
-            self._outside_monitor = None
-
-    def _build(self) -> None:
-        from AppKit import (
-            NSPanel, NSButton, NSTextField, NSMakeRect, NSFont,
-            NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
-            NSBackingStoreBuffered, NSFloatingWindowLevel,
-            NSScreen,
-            NSControlStateValueOn, NSControlStateValueOff,
-            NSButtonTypeRadio, NSButtonTypeSwitch,
-        )
-        try:
-            from AppKit import NSWindowStyleMaskNonactivatingPanel as _NON_ACTIVATING
-        except ImportError:
-            _NON_ACTIVATING = 128  # NSNonactivatingPanelMask
-
-        w, h, row, mg = self._W, self._H, self._ROW, self._MARGIN
-
-        # screens()[0] is always the display carrying the menu bar; mainScreen() is
-        # the display with the current key window and may differ on multi-monitor setups.
-        # Compute menu-bar height from the gap between frame and visibleFrame — this
-        # avoids NSStatusBar.thickness which returns objc.native_selector in some
-        # PyObjC versions instead of a float.
-        screen = NSScreen.screens()[0]
-        sf = screen.frame()
-        vf = screen.visibleFrame()
-        bar_h = (sf.origin.y + sf.size.height) - (vf.origin.y + vf.size.height)
-        x = sf.size.width - w - 20
-        y = sf.size.height - h - bar_h - 4
-
-        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, w, h),
-            _NON_ACTIVATING | NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
-            NSBackingStoreBuffered,
-            False,
-        )
-        panel.setTitle_("Languages")
-        panel.setLevel_(NSFloatingWindowLevel)
-        panel.setHidesOnDeactivate_(False)
-        panel.setBecomesKeyOnlyIfNeeded_(True)
-
-        cv = panel.contentView()
-        delegate = _LangDelegate.alloc().init()
-        delegate.setup(self._on_primary, self._on_additional, on_close=self._on_panel_closed)
-        panel.setDelegate_(delegate)
-
-        primary = self._config.get("primary_language", "ru")
-        additional = list(self._config.get("additional_languages") or [])
-        y_cur = h - 32
-
-        def _header(text: str) -> None:
-            nonlocal y_cur
-            lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(mg, y_cur, w - 2 * mg, 18))
-            lbl.setStringValue_(text)
-            lbl.setBezeled_(False)
-            lbl.setDrawsBackground_(False)
-            lbl.setEditable_(False)
-            lbl.setSelectable_(False)
-            lbl.setFont_(NSFont.boldSystemFontOfSize_(11))
-            cv.addSubview_(lbl)
-            y_cur -= 6
-
-        def _button(i: int, lang: str, btype, state: int, action: str, store: dict) -> None:
-            nonlocal y_cur
-            y_cur -= row
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(mg + 8, y_cur, w - 2 * mg - 8, row))
-            btn.setButtonType_(btype)
-            btn.setTitle_(LANG_LABELS[lang])
-            btn.setState_(state)
-            btn.setTarget_(delegate)
-            btn.setAction_(action)
-            btn.setTag_(i)
-            cv.addSubview_(btn)
-            store[lang] = btn
-
-        _header("Primary Language")
-        for i, lang in enumerate(LANGS):
-            _button(i, lang, NSButtonTypeRadio,
-                    NSControlStateValueOn if lang == primary else NSControlStateValueOff,
-                    "primaryClicked:", delegate._primary_btns)
-
-        # Section gap must exceed header height (18px) to avoid overlap with last button
-        y_cur -= 22
-        _header("Additional Languages")
-        for i, lang in enumerate(LANGS):
-            _button(i, lang, NSButtonTypeSwitch,
-                    NSControlStateValueOn if lang in additional else NSControlStateValueOff,
-                    "additionalClicked:", delegate._additional_btns)
-
-        self._delegate = delegate
-        self._panel = panel
-        panel.makeKeyAndOrderFront_(None)
-
-        # Close panel when user clicks outside it (standard macOS menu-bar popup behaviour)
-        try:
-            from AppKit import NSEvent
-            try:
-                from AppKit import NSEventMaskLeftMouseDown, NSEventMaskRightMouseDown
-                _mask = NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown
-            except ImportError:
-                _mask = (1 << 1) | (1 << 2)  # left=2, right=4
-
-            def _outside_click(event, _self=self):
-                if _self._panel is None:
-                    return
-                try:
-                    mouse = NSEvent.mouseLocation()
-                    frame = _self._panel.frame()
-                    inside = (
-                        frame.origin.x <= mouse.x <= frame.origin.x + frame.size.width
-                        and frame.origin.y <= mouse.y <= frame.origin.y + frame.size.height
-                    )
-                    if not inside:
-                        _self._panel.orderOut_(None)
-                        _self._on_panel_closed()
-                except Exception:
-                    pass
-
-            self._outside_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                _mask, _outside_click
-            )
-        except Exception as exc:
-            log_error(f"Language panel: could not install outside-click monitor: {exc}")
-
-    def _refresh(self) -> None:
-        """Sync button states with current config."""
-        if self._delegate is None:
-            return
-        try:
-            from AppKit import NSControlStateValueOn, NSControlStateValueOff
-            primary = self._config.get("primary_language", "ru")
-            additional = list(self._config.get("additional_languages") or [])
-            for lang, btn in self._delegate._primary_btns.items():
-                btn.setState_(NSControlStateValueOn if lang == primary else NSControlStateValueOff)
-            for lang, btn in self._delegate._additional_btns.items():
-                btn.setState_(NSControlStateValueOn if lang in additional else NSControlStateValueOff)
-        except Exception as exc:
-            log_error(f"Language panel refresh error: {exc}")
-            self._panel = None
-            self._delegate = None
+    _HAVE_LANG_MENU = True
+except Exception as _lang_menu_exc:
+    import logging as _logging
+    _logging.getLogger(__name__).error("Language submenu unavailable: %s", _lang_menu_exc)
+    _LangMenuController = None  # type: ignore
+    _HAVE_LANG_MENU = False
 
 
 def _prompt_restart(reason: str) -> None:
@@ -332,7 +228,7 @@ class ClickNSpeakApp(rumps.App):
         self._input_monitoring_ok: bool | None = None  # None = unknown until health check
         self._input_monitoring_item = None  # set in setup_menu
         self._wizard_pending = False
-        self._language_panel: LanguageSelectionPanel | None = None
+        self._lang_menu_controller: "_LangMenuController | None" = None
 
         # Build Menu
         self.setup_menu()
@@ -579,8 +475,21 @@ class ClickNSpeakApp(rumps.App):
                 item.state = 1
             self.menu["Model"].add(item)
 
-        # Language selection — opens floating NSPanel that stays open across clicks
-        self.menu.add(rumps.MenuItem("🌐 Languages...", callback=self._open_language_panel))
+        # Language selection — native submenu, stays open after clicks via NSMenuItem.setView_()
+        lang_item = rumps.MenuItem("🌐 Languages")
+        self.menu.add(lang_item)
+        if _HAVE_LANG_MENU:
+            try:
+                self._lang_menu_controller = _LangMenuController.alloc().init()
+                self._lang_menu_controller.configure(
+                    self.config,
+                    self._apply_primary_language,
+                    self._apply_additional_language,
+                )
+                ns_submenu = self._lang_menu_controller.build_submenu()
+                lang_item._menuitem.setSubmenu_(ns_submenu)
+            except Exception as exc:
+                log_error(f"Language submenu build failed: {exc}")
 
         self.menu.add(None)  # Separator
 
@@ -692,16 +601,6 @@ class ClickNSpeakApp(rumps.App):
                 item.state = 0  # type: ignore
         sender.state = 1
 
-    def _open_language_panel(self, _) -> None:
-        """Open (or bring to front) the floating language selection panel."""
-        if self._language_panel is None:
-            self._language_panel = LanguageSelectionPanel(
-                config=self.config,
-                on_primary_change=self._apply_primary_language,
-                on_additional_toggle=self._apply_additional_language,
-            )
-        self._language_panel.show()
-
     def _apply_primary_language(self, lang: str) -> None:
         """Apply a primary language change (called from the language panel)."""
         log_info(f"Setting primary language to {lang}")
@@ -797,10 +696,7 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.load_config(str(get_config_path()))
         self.config = self.main_app.config  # sync reference in case load replaced the dict
         self.main_app.notify("Конфигурация", "Настройки успешно перезагружены.")
-        # Close language panel so it rebuilds with the fresh config on next open
-        if self._language_panel is not None:
-            self._language_panel.close()
-            self._language_panel = None
+        self._lang_menu_controller = None  # will be rebuilt in setup_menu()
         self.menu.clear()
         self.setup_menu()
 
@@ -987,9 +883,6 @@ class ClickNSpeakApp(rumps.App):
 
     def quit_application(self, sender=None):
         log_info("Quit requested — cleaning up before exit.")
-        if self._language_panel is not None:
-            self._language_panel.close()
-            self._language_panel = None
         try:
             self.main_app.stop()
         except Exception as e:

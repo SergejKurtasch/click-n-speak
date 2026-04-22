@@ -1,8 +1,10 @@
 import atexit
+import fcntl
 import os
 import signal
 import sys
 import threading
+from pathlib import Path
 
 from src.app import SVoiceRecApp
 from src.menu_bar import ClickNSpeakApp
@@ -36,9 +38,48 @@ def _run_update_check_after_model_ready(model_ready_event: threading.Event) -> N
         log_error(f"Update check failed: {e}")
 
 
+_LOCK_FILE: Path = Path.home() / "Library" / "Application Support" / "Click-n-speak" / ".instance.lock"
+_lock_fd = None
+
+
+def _acquire_instance_lock() -> bool:
+    """Acquire an exclusive file lock so only one main instance runs at a time.
+
+    Returns True if the lock was acquired (this is the primary instance).
+    Returns False if another instance already holds the lock.
+    A stale lock from a crashed process is automatically reclaimed because the
+    OS releases file locks when a process dies.
+    """
+    global _lock_fd
+    try:
+        _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _lock_fd = open(_LOCK_FILE, "w")
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_fd.write(str(os.getpid()))
+        _lock_fd.flush()
+        return True
+    except (IOError, OSError):
+        return False
+
+
+def _release_instance_lock() -> None:
+    global _lock_fd
+    if _lock_fd is not None:
+        try:
+            fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+            _lock_fd.close()
+        except Exception:
+            pass
+        _lock_fd = None
+
+
 def main() -> None:
     # Ensure we are in the right directory
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+    if not _acquire_instance_lock():
+        log_error("Another Click-n-speak instance is already running. Exiting.")
+        sys.exit(0)
 
     try:
         # Initialize the core application logic
@@ -61,16 +102,23 @@ def main() -> None:
         # Check current accessibility state (no blocking prompt — wizard handles it).
         trusted = is_accessibility_trusted()
 
-        # Ensure transcriber child process is cleaned up on any exit path.
-        def _cleanup_transcriber():
+        # Ensure full cleanup on any exit path.
+        def _full_cleanup():
             try:
-                logic_app.transcriber.stop()
+                logic_app.stop()
             except Exception:
-                pass
+                try:
+                    logic_app.transcriber.stop()
+                except Exception:
+                    pass
 
-        atexit.register(_cleanup_transcriber)
+        def _cleanup_and_exit():
+            _full_cleanup()
+            _release_instance_lock()
+
+        atexit.register(_cleanup_and_exit)
         for _sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(_sig, lambda *_: (_cleanup_transcriber(), sys.exit(0)))
+            signal.signal(_sig, lambda *_: (_cleanup_and_exit(), sys.exit(0)))
 
         # Start model warm-up early to reduce first-run transcription latency.
         logic_app.start_model_warmup()
