@@ -28,10 +28,10 @@ class AudioRecorder:
         sample_rate=16000,
         device_id=None,
         silence_threshold=0.01,
-        silence_duration=1.0,
+        silence_duration=0.5,
         target_speech_duration=4.0,
         max_speech_duration=8.0,
-        min_speech_duration=1.0,
+        min_speech_duration=0.5,
     ):
         self.sample_rate = sample_rate
         self.recording = False

@@ -44,10 +44,10 @@ class SVoiceRecApp:
             sample_rate=self.config.get("sample_rate", 16000),
             device_id=self.config.get("device_id"),
             silence_threshold=self.config.get("silence_threshold", 0.01),
-            silence_duration=self.config.get("silence_duration", 1.0),
+            silence_duration=self.config.get("silence_duration", 0.5),
             target_speech_duration=self.config.get("target_speech_duration", 4.0),
             max_speech_duration=self.config.get("max_speech_duration", 8.0),
-            min_speech_duration=self.config.get("min_speech_duration", 1.0),
+            min_speech_duration=self.config.get("min_speech_duration", 0.5),
         )
         self.transcriber = TranscriberProcessWrapper(
             model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
@@ -412,10 +412,10 @@ class SVoiceRecApp:
 
         if hasattr(self, "recorder"):
             self.recorder.silence_threshold = self.config.get("silence_threshold", 0.01)
-            self.recorder.silence_duration = self.config.get("silence_duration", 1.0)
+            self.recorder.silence_duration = self.config.get("silence_duration", 0.5)
             self.recorder.target_speech_duration = self.config.get("target_speech_duration", 4.0)
             self.recorder.max_speech_duration = self.config.get("max_speech_duration", 8.0)
-            self.recorder.min_speech_duration = self.config.get("min_speech_duration", 1.0)
+            self.recorder.min_speech_duration = self.config.get("min_speech_duration", 0.5)
             log_info("Recorder settings updated.")
 
     def start_recording(self):
@@ -909,12 +909,15 @@ class SVoiceRecApp:
 
     def stop(self):
         self.stop_worker.set()
-        if self.worker_thread is not None and self.worker_thread.is_alive():
-            self.worker_thread.join()
-        if self.hotkey_handler:
-            self.hotkey_handler.stop()
+        # Stop the transcriber child process first so the worker thread can
+        # unblock from its blocking transcribe() call instead of waiting up to
+        # TRANSCRIBER_TIMEOUT_SECONDS (30s) for the child to respond.
         if hasattr(self, "transcriber"):
             self.transcriber.stop()
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=5.0)
+        if self.hotkey_handler:
+            self.hotkey_handler.stop()
         self._stop_keep_alive_timer()
 
     # ── Keep-alive & Wake-from-sleep ───────────────────────────────────────

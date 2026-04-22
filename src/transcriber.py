@@ -412,11 +412,19 @@ class TranscriberProcessWrapper:
                 self.output_queue.put({"type": "error", "message": str(e), "trace": traceback.format_exc()})
 
     def stop(self):
-        self.input_queue.put(None)
+        try:
+            self.input_queue.put_nowait(None)
+        except Exception:
+            pass
         self._process.join(timeout=3.0)
         if self._process.is_alive():
             self._process.terminate()
-            self._process.join(timeout=1.0)
+            self._process.join(timeout=3.0)
+        if self._process.is_alive():
+            self._process.kill()
+            self._process.join(timeout=2.0)
+        if self._process.is_alive():
+            log_error("Transcriber process still alive after SIGKILL — giving up.")
         
     def warmup(self, language=None):
         self.input_queue.put({"action": "warmup", "language": language})
