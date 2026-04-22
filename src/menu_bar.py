@@ -55,6 +55,14 @@ LANG_LABELS = {
     "es": "ES — Spanish",
     "fr": "FR — French",
 }
+# Whisper initial-prompt hints — shared by LanguageSelectionPanel and _update_language_hint_and_prompt
+LANG_PROMPTS = {
+    "ru": "Русский язык.",
+    "en": "English language.",
+    "de": "Deutscher Text.",
+    "es": "Texto en español.",
+    "fr": "Texte en français.",
+}
 
 try:
     from Foundation import NSObject
@@ -64,9 +72,10 @@ try:
         """NSObject target for language panel button callbacks."""
 
         @_objc.python_method
-        def setup(self, on_primary, on_additional):
+        def setup(self, on_primary, on_additional, on_close=None):
             self._on_primary = on_primary
             self._on_additional = on_additional
+            self._on_close = on_close
             self._primary_btns: dict = {}
             self._additional_btns: dict = {}
 
@@ -81,6 +90,10 @@ try:
             from AppKit import NSControlStateValueOn
             lang = LANGS[sender.tag()]
             self._on_additional(lang, sender.state() == NSControlStateValueOn)
+
+        def windowWillClose_(self, notification):
+            if self._on_close:
+                self._on_close()
 
     _HAVE_PANEL = True
 except Exception:
@@ -129,12 +142,19 @@ class LanguageSelectionPanel:
         self._panel = None
         self._delegate = None
 
+    def _on_panel_closed(self) -> None:
+        """Called by the window delegate when the panel's close button is clicked."""
+        self._panel = None
+        self._delegate = None
+
     def _build(self) -> None:
         from AppKit import (
             NSPanel, NSButton, NSTextField, NSMakeRect, NSFont,
             NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
             NSBackingStoreBuffered, NSFloatingWindowLevel,
-            NSScreen, NSControlStateValueOn, NSControlStateValueOff,
+            NSScreen, NSStatusBar,
+            NSControlStateValueOn, NSControlStateValueOff,
+            NSButtonTypeRadio, NSButtonTypeSwitch,
         )
         try:
             from AppKit import NSWindowStyleMaskNonactivatingPanel as _NON_ACTIVATING
@@ -142,9 +162,14 @@ class LanguageSelectionPanel:
             _NON_ACTIVATING = 128  # NSNonactivatingPanelMask
 
         w, h, row, mg = self._W, self._H, self._ROW, self._MARGIN
-        sf = NSScreen.mainScreen().frame()
+
+        # screens()[0] is always the display carrying the menu bar; mainScreen() is
+        # the display with the current key window and may differ on multi-monitor setups.
+        screen = NSScreen.screens()[0]
+        sf = screen.frame()
+        bar_h = NSStatusBar.systemStatusBar().thickness
         x = sf.size.width - w - 20
-        y = sf.size.height - h - 30  # below menu bar
+        y = sf.size.height - h - bar_h - 4
 
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(x, y, w, h),
@@ -159,7 +184,8 @@ class LanguageSelectionPanel:
 
         cv = panel.contentView()
         delegate = _LangDelegate.alloc().init()
-        delegate.setup(self._on_primary, self._on_additional)
+        delegate.setup(self._on_primary, self._on_additional, on_close=self._on_panel_closed)
+        panel.setDelegate_(delegate)
 
         primary = self._config.get("primary_language", "ru")
         additional = list(self._config.get("additional_languages") or [])
@@ -177,7 +203,7 @@ class LanguageSelectionPanel:
             cv.addSubview_(lbl)
             y_cur -= 6
 
-        def _button(i: int, lang: str, btype: int, state: int, action: str, store: dict) -> None:
+        def _button(i: int, lang: str, btype, state: int, action: str, store: dict) -> None:
             nonlocal y_cur
             y_cur -= row
             btn = NSButton.alloc().initWithFrame_(NSMakeRect(mg + 8, y_cur, w - 2 * mg - 8, row))
@@ -192,14 +218,14 @@ class LanguageSelectionPanel:
 
         _header("Primary Language")
         for i, lang in enumerate(LANGS):
-            _button(i, lang, 4,  # 4 = NSButtonTypeRadio
+            _button(i, lang, NSButtonTypeRadio,
                     NSControlStateValueOn if lang == primary else NSControlStateValueOff,
                     "primaryClicked:", delegate._primary_btns)
 
         y_cur -= 12
         _header("Additional Languages")
         for i, lang in enumerate(LANGS):
-            _button(i, lang, 3,  # 3 = NSButtonTypeSwitch (checkbox)
+            _button(i, lang, NSButtonTypeSwitch,
                     NSControlStateValueOn if lang in additional else NSControlStateValueOff,
                     "additionalClicked:", delegate._additional_btns)
 
@@ -221,6 +247,8 @@ class LanguageSelectionPanel:
                 btn.setState_(NSControlStateValueOn if lang in additional else NSControlStateValueOff)
         except Exception as exc:
             log_error(f"Language panel refresh error: {exc}")
+            self._panel = None
+            self._delegate = None
 
 
 def _prompt_restart(reason: str) -> None:
@@ -630,10 +658,10 @@ class ClickNSpeakApp(rumps.App):
         """Apply a primary language change (called from the language panel)."""
         log_info(f"Setting primary language to {lang}")
         self.config["primary_language"] = lang
-        self.main_app.update_config({"primary_language": lang})
         self._update_language_hint_and_prompt()
-        self.save_config()
-        self.main_app.load_config_data(self.config)
+        # update_config saves to disk and calls load_config_data internally —
+        # pass the full config so custom_prompts/initial_prompt are persisted too.
+        self.main_app.update_config(self.config)
         self._last_prompt_path = None
         self._last_prompt_mtime = 0.0
 
@@ -647,32 +675,23 @@ class ClickNSpeakApp(rumps.App):
         elif not is_on and lang in additional:
             additional.remove(lang)
         self.config["additional_languages"] = additional
-        self.main_app.update_config({"additional_languages": additional})
-        log_info(f"Additional languages: {additional}")
         self._update_language_hint_and_prompt()
-        self.save_config()
-        self.main_app.load_config_data(self.config)
+        log_info(f"Additional languages: {additional}")
+        self.main_app.update_config(self.config)
 
     def _update_language_hint_and_prompt(self):
         """Setup initial_prompt: use user's custom text if exists, else generate a fresh auto-hint."""
-        prompts = {
-            "ru": "Русский язык.",
-            "en": "English language.",
-            "de": "Deutscher Text.",
-            "es": "Texto en español.",
-            "fr": "Texte en français.",
-        }
         primary = get_primary_language(self.config)
         additional = self.config.get("additional_languages") or []
-        
+
         custom_dict = self.config.get("custom_prompts", {})
         if primary in custom_dict and custom_dict[primary].strip():
             # Apply user's custom prompt for this language
             final_prompt = custom_dict[primary].strip()
         else:
             # Build and write a new base auto-hint for this language
-            main_prompt = prompts.get(primary, "")
-            extra_prompts_list = [prompts.get(str(l), "") for l in additional if prompts.get(str(l))]
+            main_prompt = LANG_PROMPTS.get(primary, "")
+            extra_prompts_list = [LANG_PROMPTS.get(str(l), "") for l in additional if LANG_PROMPTS.get(str(l))]
             extra_prompts = " ".join(extra_prompts_list)
             final_prompt = f"{main_prompt} {extra_prompts}".strip()
             
@@ -920,6 +939,9 @@ class ClickNSpeakApp(rumps.App):
 
     def quit_application(self, sender=None):
         log_info("Quit requested — cleaning up before exit.")
+        if self._language_panel is not None:
+            self._language_panel.close()
+            self._language_panel = None
         try:
             self.main_app.stop()
         except Exception as e:
