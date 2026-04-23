@@ -17,8 +17,7 @@ WHISPER_MODELS = [
     ("Base",     "mlx-community/whisper-base-mlx"),
 ]
 
-_ICON_CACHED   = "\U0001f7e2"   # 🟢  — model is on disk, instant switch
-_ICON_DOWNLOAD = "\u2b07\ufe0f"  # ⬇️  — model needs to download
+_ICON_CACHED = "🟢"  # 🟢  — model is on disk, instant switch
 
 from .log_analyzer import generate_terms_hint_from_history
 from .phrase_history import get_last_phrases
@@ -31,6 +30,8 @@ from .utils import (
     get_config_path,
     get_log_file_path,
     get_menu_icon_path,
+    get_menu_item_icon_path,
+    get_menubar_icon_path,
     get_primary_language,
     get_ui_strings,
     is_accessibility_trusted,
@@ -241,7 +242,7 @@ try:
 
             for i, (_ts, text) in enumerate(self._phrases):
                 title = (text[:self._MAX_TITLE - 1] + "…") if len(text) > self._MAX_TITLE else text
-                self._ns_menu.addItem_(self._phrase_item(i, f"📋  {title}"))
+                self._ns_menu.addItem_(self._phrase_item(i, title))
 
             if has_more:
                 self._ns_menu.addItem_(NSMenuItem.separatorItem())
@@ -268,7 +269,10 @@ try:
 
         @_objc.python_method
         def _phrase_item(self, index: int, display_title: str):
-            from AppKit import NSMenuItem, NSButton, NSButtonTypeMomentaryLight, NSTextAlignmentLeft
+            from AppKit import (
+                NSMenuItem, NSButton, NSButtonTypeMomentaryLight,
+                NSTextAlignmentLeft, NSImage,
+            )
             view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self._VIEW_W, self._ROW_H))
             btn = NSButton.alloc().initWithFrame_(
                 NSMakeRect(self._MARGIN, 1, self._VIEW_W - 2 * self._MARGIN, self._ROW_H - 2)
@@ -280,6 +284,14 @@ try:
             btn.setTag_(index)
             btn.setTarget_(self)
             btn.setAction_("copyClicked:")
+            icon_path = get_menu_item_icon_path("copy-phrase")
+            if icon_path:
+                img = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
+                if img:
+                    img.setSize_((16, 16))
+                    img.setTemplate_(True)
+                    btn.setImage_(img)
+                    btn.setImagePosition_(2)  # NSImageLeft
             view.addSubview_(btn)
             mi = NSMenuItem.alloc().init()
             mi.setView_(view)
@@ -402,6 +414,7 @@ class ClickNSpeakApp(rumps.App):
     def __init__(self, main_app):
         icon_path = str(get_menu_icon_path())
         super(ClickNSpeakApp, self).__init__("", icon=icon_path)
+        self.template = True  # render menubar icon as template (adapts to dark/light mode)
         self.main_app = main_app
         self.config = main_app.config
         self._last_prompt_mtime = 0.0
@@ -594,9 +607,13 @@ class ClickNSpeakApp(rumps.App):
         if self._accessibility_item is None:
             return
         if self._accessibility_granted:
-            self._accessibility_item.title = "✅ Accessibility Granted"
+            self._accessibility_item.title = "Accessibility Granted"
+            p = get_menu_item_icon_path("accessibility-ok")
         else:
-            self._accessibility_item.title = "⚠️ Accessibility Required"
+            self._accessibility_item.title = "Accessibility Required"
+            p = get_menu_item_icon_path("accessibility-warn")
+        if p:
+            self._accessibility_item.set_icon(str(p), dimensions=[16, 16], template=True)
 
     def _on_accessibility_click(self, _) -> None:
         if not self._accessibility_granted:
@@ -626,11 +643,14 @@ class ClickNSpeakApp(rumps.App):
         if self._input_monitoring_item is None:
             return
         if self._input_monitoring_ok is None:
-            self._input_monitoring_item.title = "⌨️ Input Monitoring (checking…)"
+            self._input_monitoring_item.title = "Input Monitoring (checking…)"
         elif self._input_monitoring_ok:
-            self._input_monitoring_item.title = "✅ Input Monitoring Granted"
+            self._input_monitoring_item.title = "Input Monitoring Granted"
         else:
-            self._input_monitoring_item.title = "⚠️ Input Monitoring Required"
+            self._input_monitoring_item.title = "Input Monitoring Required"
+        p = get_menu_item_icon_path("input-monitoring")
+        if p:
+            self._input_monitoring_item.set_icon(str(p), dimensions=[16, 16], template=True)
 
     def _on_input_monitoring_click(self, _) -> None:
         if not self._input_monitoring_ok:
@@ -639,6 +659,10 @@ class ClickNSpeakApp(rumps.App):
             self.main_app.notify("Доступ", "Input Monitoring уже разрешён.")
 
     def setup_menu(self):
+        def _icon(name: str) -> dict:
+            p = get_menu_item_icon_path(name)
+            return {"icon": str(p), "dimensions": [16, 16], "template": True} if p else {}
+
         # Accessibility + Input Monitoring status at the top
         self._accessibility_item = rumps.MenuItem("", callback=self._on_accessibility_click)
         self._update_accessibility_menu_item()
@@ -646,21 +670,23 @@ class ClickNSpeakApp(rumps.App):
         self._input_monitoring_item = rumps.MenuItem("", callback=self._on_input_monitoring_click)
         self._update_input_monitoring_item()
         self.menu.add(self._input_monitoring_item)
-        self.menu.add(rumps.MenuItem("🔐 Check Permissions", callback=self._on_check_permissions))
+        self.menu.add(rumps.MenuItem("Check Permissions", **_icon("check-permissions"), callback=self._on_check_permissions))
         self.menu.add(None)  # Separator
 
         # Model selection submenu
         current_model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
-        self.menu.add("Model")
+        self.menu.add(rumps.MenuItem("Model", **_icon("model")))
+        _dl_icon = get_menu_item_icon_path("download-model")
         for label, model_id in WHISPER_MODELS:
-            title = f"{_ICON_DOWNLOAD} {label}"
-            item = rumps.MenuItem(title, callback=self.change_model)
+            item = rumps.MenuItem(label, callback=self.change_model)
+            if _dl_icon:
+                item.set_icon(str(_dl_icon), dimensions=[16, 16], template=True)
             if model_id == current_model:
                 item.state = 1
             self.menu["Model"].add(item)
 
         # Language selection — native submenu, stays open after clicks via NSMenuItem.setView_()
-        lang_item = rumps.MenuItem("🌐 Languages")
+        lang_item = rumps.MenuItem("Languages", **_icon("languages"))
         self.menu.add(lang_item)
         if _HAVE_LANG_MENU:
             try:
@@ -678,20 +704,20 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(None)  # Separator
 
         # AI Editor toggle
-        ai_editor_item = rumps.MenuItem("✦ AI Editor (Punctuation & Cleanup)", callback=self._toggle_ai_editor)
+        ai_editor_item = rumps.MenuItem("AI Editor (Punctuation & Cleanup)", **_icon("ai-editor"), callback=self._toggle_ai_editor)
         ai_editor_item.state = 1 if self.config.get("ai_editor_enabled", False) else 0
         self.menu.add(ai_editor_item)
-        self.menu.add(rumps.MenuItem("  ↳ Download AI Editor Model", callback=self._download_ai_model))
+        self.menu.add(rumps.MenuItem("Download AI Editor Model", **_icon("download-model"), callback=self._download_ai_model))
 
         # Initial Prompt submenu
-        prompt_menu = rumps.MenuItem("📝 Initial Prompt")
+        prompt_menu = rumps.MenuItem("Initial Prompt", **_icon("initial-prompt"))
         prompt_menu.add(rumps.MenuItem("Edit...", callback=self.edit_initial_prompt))
         prompt_menu.add(rumps.MenuItem("Update from History", callback=self.update_initial_prompt_from_history))
         prompt_menu.add(rumps.MenuItem("Revert to Previous", callback=self.revert_initial_prompt))
         self.menu.add(prompt_menu)
 
         # Phrase history
-        self._last_phrases_parent = rumps.MenuItem("Last Phrases")
+        self._last_phrases_parent = rumps.MenuItem("Last Phrases", **_icon("last-phrases"))
         self.menu.add(self._last_phrases_parent)
         if _HAVE_PHRASE_MENU:
             try:
@@ -706,26 +732,29 @@ class ClickNSpeakApp(rumps.App):
         else:
             self._refresh_last_phrases_submenu()
 
-        self.menu.add(rumps.MenuItem("🎵 Transcribe Audio File...", callback=self.transcribe_audio_file))
+        self.menu.add(rumps.MenuItem("Transcribe Audio File...", **_icon("transcribe-file"), callback=self.transcribe_audio_file))
 
         self.menu.add(None)  # Separator
 
-        self.menu.add(rumps.MenuItem("🔄 Check for Updates", callback=self.check_for_updates))
+        self.menu.add(rumps.MenuItem("Check for Updates", **_icon("check-updates"), callback=self.check_for_updates))
 
         # Autostart
-        autostart_item = rumps.MenuItem("🚀 Launch at Login", callback=self.toggle_autostart)
+        autostart_item = rumps.MenuItem("Launch at Login", **_icon("launch-at-login"), callback=self.toggle_autostart)
         autostart_item.state = 1 if is_launch_at_login_enabled() else 0
         self.menu.add(autostart_item)
 
         # Advanced submenu
-        advanced_menu = rumps.MenuItem("⚙️ Advanced")
+        advanced_menu = rumps.MenuItem("Advanced", **_icon("advanced"))
         advanced_menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
         advanced_menu.add(rumps.MenuItem("Open Log File", callback=self.open_log_file))
         advanced_menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
         self.menu.add(advanced_menu)
 
-        self.menu.add(rumps.MenuItem("🔁 Restart", callback=self.restart_application))
+        self.menu.add(rumps.MenuItem("Restart", **_icon("restart"), callback=self.restart_application))
         self.menu.add(None)
+
+        # Apply the idle icon on startup (overrides CnS.png set in __init__)
+        self.set_menubar_state("idle")
 
     # ------------------------------------------------------------------
     # Whisper model cache check
@@ -750,22 +779,26 @@ class ClickNSpeakApp(rumps.App):
         for label, model_id in WHISPER_MODELS:
             try:
                 snapshot_download(repo_id=model_id, local_files_only=True)
-                icon = _ICON_CACHED
+                cached = True
             except Exception:
-                icon = _ICON_DOWNLOAD
+                cached = False
 
-            new_title = f"{icon} {label}"
-
-            def _apply(title: str = new_title, lbl: str = label) -> None:
+            def _apply(lbl: str = label, is_cached: bool = cached) -> None:
                 try:
                     for item in self.menu["Model"].values():
-                        # Strip any existing icon prefix to compare base labels
+                        # Strip 🟢 prefix to find the base label
                         base = item.title
-                        for pfx in (_ICON_CACHED, _ICON_DOWNLOAD):
-                            if base.startswith(pfx):
-                                base = base[len(pfx):].lstrip()
+                        if base.startswith(_ICON_CACHED):
+                            base = base[len(_ICON_CACHED):].lstrip()
                         if base == lbl:
-                            item.title = title
+                            if is_cached:
+                                item.title = f"{_ICON_CACHED} {lbl}"
+                                item.set_icon(None)
+                            else:
+                                item.title = lbl
+                                p = get_menu_item_icon_path("download-model")
+                                if p:
+                                    item.set_icon(str(p), dimensions=[16, 16], template=True)
                             break
                 except Exception as exc:
                     log_error(f"Model cache indicator update failed for '{lbl}': {exc}")
@@ -777,11 +810,10 @@ class ClickNSpeakApp(rumps.App):
                 _apply()
 
     def change_model(self, sender):
-        # Strip cache-status icon prefix (e.g. "🟢 Turbo" → "Turbo")
+        # Strip 🟢 prefix if present (e.g. "🟢 Turbo" → "Turbo")
         clean_label = sender.title
-        for pfx in (_ICON_CACHED, _ICON_DOWNLOAD):
-            if clean_label.startswith(pfx):
-                clean_label = clean_label[len(pfx):].lstrip()
+        if clean_label.startswith(_ICON_CACHED):
+            clean_label = clean_label[len(_ICON_CACHED):].lstrip()
 
         model_id = {lbl: mid for lbl, mid in WHISPER_MODELS}.get(clean_label)
         if not model_id:
@@ -874,15 +906,17 @@ class ClickNSpeakApp(rumps.App):
             return
 
         max_title_len = 56
+        copy_icon = get_menu_item_icon_path("copy-phrase")
+        copy_icon_kwargs = {"icon": str(copy_icon), "dimensions": [16, 16], "template": True} if copy_icon else {}
         for i, (_ts, text) in enumerate(reversed(phrases)):
             title = (text[: max_title_len - 1] + "…") if len(text) > max_title_len else text
             if not title:
                 title = "(empty)"
             # Append zero-width spaces so identical display titles remain unique rumps keys,
             # preventing NSMenuItem leaks when the same phrase appears multiple times.
-            unique_title = f"📋  {title}" + "​" * i
+            unique_title = title + "​" * i
             parent.add(
-                rumps.MenuItem(unique_title, callback=lambda s, t=text: copy_to_clipboard(t))
+                rumps.MenuItem(unique_title, **copy_icon_kwargs, callback=lambda s, t=text: copy_to_clipboard(t))
             )
 
         if has_more:
@@ -1121,12 +1155,15 @@ class ClickNSpeakApp(rumps.App):
         except Exception:
             _os._exit(0)
 
+    def set_menubar_state(self, state: str) -> None:
+        """Switch the menu bar icon. state: 'idle' | 'recording' | 'processing'"""
+        self.icon = str(get_menubar_icon_path(state))
+
     def set_status(self, recording=False, processing=False):
-        # Make the state highly visible in the menu bar; language from primary setting.
-        s = get_ui_strings(get_primary_language(self.config))
+        self.title = ""
         if recording:
-            self.title = s["menu_recording"]
+            self.set_menubar_state("recording")
         elif processing:
-            self.title = s["menu_processing"]
+            self.set_menubar_state("processing")
         else:
-            self.title = ""
+            self.set_menubar_state("idle")

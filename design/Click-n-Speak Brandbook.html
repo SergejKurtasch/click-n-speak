@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Click-n-Speak — Brandbook</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #f0f0f0;
+  --surface: rgba(255,255,255,0.78);
+  --border: rgba(0,0,0,0.08);
+  --text: #111;
+  --text2: #555;
+  --text3: #999;
+  --accent: #F0B429;
+  --r: 12px;
+  --r-sm: 8px;
+}
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.page { max-width: 1100px; margin: 0 auto; padding: 64px 40px 120px; }
+
+/* Header */
+.hdr { display:flex; align-items:center; gap:20px; margin-bottom:72px; }
+.hdr-logo { width:52px; height:52px; background:#111; border-radius:14px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.hdr h1 { font-size:28px; font-weight:600; letter-spacing:-0.5px; }
+.hdr p { font-size:13px; color:var(--text2); margin-top:2px; }
+
+/* Sections */
+.sec { margin-bottom:80px; }
+.sec-lbl { font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--text3); margin-bottom:18px; padding-bottom:10px; border-bottom:1px solid var(--border); }
+.sec-title { font-size:20px; font-weight:600; margin-bottom:4px; }
+.sec-desc { font-size:13px; color:var(--text2); margin-bottom:24px; }
+
+/* Card */
+.card { background:var(--surface); border:1px solid var(--border); border-radius:var(--r); backdrop-filter:blur(20px); padding:28px; }
+
+/* ── 1. MENU BAR STATES ── */
+.mb-states { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+.mb-state { background:#1a1a1a; border-radius:var(--r); padding:28px 20px; display:flex; flex-direction:column; align-items:center; gap:16px; position:relative; }
+.mb-tag { position:absolute; top:10px; right:12px; font-size:10px; color:rgba(255,255,255,.22); font-family:monospace; }
+.mb-lbl { font-size:11px; color:rgba(255,255,255,.35); font-weight:500; letter-spacing:.06em; text-transform:uppercase; }
+
+/* Simulated menu bar strip */
+.mb-strip { width:100%; height:22px; background:rgba(24,24,24,.98); border-radius:6px; display:flex; align-items:center; justify-content:flex-end; padding:0 8px; gap:8px; }
+.mb-strip-dot { width:4px; height:4px; border-radius:50%; background:rgba(255,255,255,.18); }
+.mb-icon-slot { display:flex; align-items:center; gap:4px; }
+
+/* Recording pulse */
+@keyframes pulse { 0%{transform:scale(1);opacity:.6} 100%{transform:scale(2.2);opacity:0} }
+.rec-dot { width:5px; height:5px; border-radius:50%; background:var(--accent); position:relative; }
+.rec-dot::after { content:''; position:absolute; inset:0; border-radius:50%; background:var(--accent); animation:pulse 1.2s ease-out infinite; }
+
+/* ── 2. MENU ICONS ── */
+.icon-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(185px,1fr)); gap:1px; background:var(--border); border:1px solid var(--border); border-radius:var(--r); overflow:hidden; }
+.icon-item { background:#fff; padding:14px 16px; display:flex; align-items:center; gap:12px; }
+.icon-item:hover { background:#fafafa; }
+.icon-box { width:28px; height:28px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.icon-name { font-size:12px; color:var(--text2); line-height:1.3; }
+.icon-key { font-size:10px; color:var(--text3); font-family:monospace; }
+
+/* ── 3. COLORS ── */
+.clr-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:12px; }
+.clr-swatch { border-radius:var(--r-sm); overflow:hidden; border:1px solid var(--border); }
+.clr-block { height:72px; }
+.clr-info { padding:10px 12px; background:#fff; }
+.clr-name { font-size:12px; font-weight:500; }
+.clr-hex { font-size:11px; color:var(--text3); font-family:monospace; }
+
+/* ── 4. POPUPS ── */
+.popup-grid { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+.popup-stage { padding:32px; border-radius:var(--r); display:flex; align-items:center; justify-content:center; min-height:280px; }
+.stage-light { background:linear-gradient(135deg,#c8c8cc 0%,#ddd 100%); }
+.stage-dark  { background:linear-gradient(135deg,#1a1a1e 0%,#2d2d35 100%); }
+
+.popup { width:100%; max-width:300px; border-radius:14px; overflow:hidden; }
+.popup.light { background:rgba(246,246,246,.94); backdrop-filter:blur(24px); box-shadow:0 8px 40px rgba(0,0,0,.18),0 0 0 .5px rgba(0,0,0,.1); }
+.popup.dark  { background:rgba(36,36,40,.94); backdrop-filter:blur(24px); box-shadow:0 8px 40px rgba(0,0,0,.5),0 0 0 .5px rgba(255,255,255,.08); }
+
+.popup-tbar { height:36px; display:flex; align-items:center; padding:0 14px; gap:8px; }
+.popup.light .popup-tbar { border-bottom:1px solid rgba(0,0,0,.07); }
+.popup.dark  .popup-tbar { border-bottom:1px solid rgba(255,255,255,.06); }
+.p-title { font-size:13px; font-weight:600; flex:1; text-align:center; margin-right:14px; }
+.popup.light .p-title { color:#111; }
+.popup.dark  .p-title { color:rgba(255,255,255,.9); }
+.p-dots { display:flex; gap:6px; }
+.p-dot { width:10px; height:10px; border-radius:50%; }
+.p-dot.cl { background:#FF5F57; }
+.p-dot.mn { background:#FFBD2E; }
+.p-dot.mx { background:#28C840; }
+
+.popup-body { padding:16px; }
+
+/* Waveform bars */
+@keyframes wavebar { 0%,100%{transform:scaleY(.15)} 50%{transform:scaleY(1)} }
+.wf { display:flex; align-items:center; gap:3px; height:32px; }
+.wf-bar { width:3px; border-radius:2px; transform-origin:center; animation:wavebar .8s ease-in-out infinite; }
+.popup.light .wf-bar { background:#111; }
+.popup.dark  .wf-bar { background:rgba(255,255,255,.85); }
+
+/* Settings rows */
+.s-row { display:flex; align-items:center; justify-content:space-between; padding:10px 0; }
+.popup.light .s-row { border-bottom:1px solid rgba(0,0,0,.05); }
+.popup.dark  .s-row { border-bottom:1px solid rgba(255,255,255,.05); }
+.s-row:last-child { border-bottom:none !important; }
+.s-label { font-size:13px; }
+.popup.light .s-label { color:#111; }
+.popup.dark  .s-label { color:rgba(255,255,255,.88); }
+.s-sub { font-size:11px; }
+.popup.light .s-sub { color:#777; }
+.popup.dark  .s-sub { color:rgba(255,255,255,.38); }
+
+/* Toggle */
+.tog { position:relative; width:34px; height:20px; flex-shrink:0; }
+.tog input { opacity:0; width:0; height:0; position:absolute; }
+.tog-track { position:absolute; inset:0; border-radius:10px; background:#ccc; cursor:pointer; transition:background .2s; }
+.tog input:checked + .tog-track { background:#333; }
+.popup.dark .tog input:checked + .tog-track { background:rgba(255,255,255,.65); }
+.tog-track::after { content:''; position:absolute; width:16px; height:16px; border-radius:50%; background:#fff; top:2px; left:2px; transition:transform .2s; box-shadow:0 1px 3px rgba(0,0,0,.25); }
+.tog input:checked + .tog-track::after { transform:translateX(14px); }
+
+/* Perm rows */
+.perm-row { display:flex; align-items:center; gap:12px; padding:10px 0; }
+.popup.light .perm-row { border-bottom:1px solid rgba(0,0,0,.05); }
+.popup.dark  .perm-row { border-bottom:1px solid rgba(255,255,255,.05); }
+.perm-row:last-child { border-bottom:none !important; }
+.perm-ico { width:30px; height:30px; border-radius:8px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.popup.light .perm-ico.ok   { background:rgba(0,0,0,.06); }
+.popup.light .perm-ico.warn { background:rgba(240,180,41,.15); }
+.popup.dark  .perm-ico.ok   { background:rgba(255,255,255,.09); }
+.popup.dark  .perm-ico.warn { background:rgba(240,180,41,.18); }
+.perm-status { font-size:11px; font-weight:500; }
+.perm-status.ok   { color:#28C840; }
+.perm-status.warn { color:var(--accent); }
+.popup.dark .perm-status.ok { color:#34d657; }
+
+/* Btn */
+.btn { display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border:none; cursor:pointer; font-family:inherit; font-size:12px; font-weight:500; border-radius:7px; transition:opacity .15s; }
+.btn:hover { opacity:.82; }
+.popup.light .btn-def { background:rgba(0,0,0,.08); color:#111; }
+.popup.dark  .btn-def { background:rgba(255,255,255,.1); color:rgba(255,255,255,.85); border:1px solid rgba(255,255,255,.1); }
+
+/* Menu preview simulation */
+.menu-prev { border-radius:10px; padding:5px 0; width:240px; font-size:13px; }
+.menu-prev.light { background:rgba(248,248,248,.97); box-shadow:0 4px 24px rgba(0,0,0,.15),0 0 0 .5px rgba(0,0,0,.09); }
+.menu-prev.dark  { background:rgba(36,36,40,.97); box-shadow:0 4px 24px rgba(0,0,0,.5),0 0 0 .5px rgba(255,255,255,.08); }
+.m-item { padding:5px 12px; display:flex; align-items:center; gap:9px; }
+.menu-prev.light .m-item { color:#111; }
+.menu-prev.dark  .m-item { color:rgba(255,255,255,.85); }
+.m-item.active.light { background:rgba(0,0,0,.07); border-radius:5px; margin:0 4px; }
+.m-item.active.dark  { background:rgba(255,255,255,.1); border-radius:5px; margin:0 4px; }
+.m-sep { height:1px; margin:3px 0; }
+.menu-prev.light .m-sep { background:rgba(0,0,0,.07); }
+.menu-prev.dark  .m-sep  { background:rgba(255,255,255,.07); }
+.m-chevron { margin-left:auto; font-size:10px; opacity:.35; }
+
+/* Spacing tokens */
+.sp-row { display:flex; align-items:center; gap:16px; margin-bottom:10px; }
+.sp-block { background:#111; border-radius:2px; height:4px; }
+.sp-lbl { font-size:11px; color:var(--text3); font-family:monospace; min-width:70px; }
+.sp-val { font-size:12px; color:var(--text2); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <div class="hdr">
+    <div class="hdr-logo">
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <rect x="10" y="3" width="8" height="14" rx="4" fill="white"/>
+        <path d="M6 15c0 4.4 3.6 8 8 8s8-3.6 8-8" stroke="white" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+        <line x1="14" y1="23" x2="14" y2="26" stroke="white" stroke-width="1.6" stroke-linecap="round"/>
+        <line x1="10.5" y1="26" x2="17.5" y2="26" stroke="white" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div>
+      <h1>Click-n-Speak</h1>
+      <p>Brand &amp; Design System — v1.0</p>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════
+       01 — MENU BAR ICON
+  ═══════════════════════════════════════════════ -->
+  <div class="sec">
+    <div class="sec-lbl">01 — Menu Bar Icon</div>
+    <div class="sec-title">Иконка в строке меню macOS</div>
+    <div class="sec-desc">Белый SVG на прозрачном фоне. <strong>Реальный размер — 18×18 pt.</strong> При таком масштабе иконка должна быть предельно простой: минимум элементов, крупные заливки, никаких тонких деталей.</div>
+
+    <!-- Size explanation -->
+    <div style="background:white;border:1px solid var(--border);border-radius:var(--r-sm);padding:14px 18px;margin-bottom:18px;display:flex;align-items:center;gap:24px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="background:#1c1c1e;border-radius:5px;padding:3px 8px;display:flex;align-items:center;gap:5px;">
+          <div style="width:4px;height:4px;border-radius:50%;background:rgba(255,255,255,.2);"></div>
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <rect x="6" y="1" width="6" height="11" rx="3" fill="white"/>
+            <path d="M3 9.5C3 13 5.7 16 9 16s6-3 6-6.5" stroke="white" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+            <line x1="9" y1="16" x2="9" y2="18" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <span style="font-size:12px;color:var(--text2);">← Реальный размер 18 pt</span>
+      </div>
+      <div style="width:1px;height:20px;background:var(--border);"></div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="background:#1c1c1e;border-radius:5px;padding:3px 8px;">
+          <svg width="54" height="54" viewBox="0 0 18 18" fill="none">
+            <rect x="6" y="1" width="6" height="11" rx="3" fill="white"/>
+            <path d="M3 9.5C3 13 5.7 16 9 16s6-3 6-6.5" stroke="white" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+            <line x1="9" y1="16" x2="9" y2="18" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <span style="font-size:12px;color:var(--text2);">← Та же иконка ×3 для просмотра деталей</span>
+      </div>
+      <div style="margin-left:auto;font-size:11px;color:var(--text3);line-height:1.6;">В карточках ниже: полоска вверху =<br>реальный размер, большой preview = ×3</div>
+    </div>
+
+    <div class="mb-states">
+
+      <!-- IDLE -->
+      <div class="mb-state">
+        <div class="mb-tag">idle</div>
+        <!-- Real-size menubar strip -->
+        <div class="mb-strip">
+          <div class="mb-strip-dot"></div><div class="mb-strip-dot"></div>
+          <div class="mb-icon-slot">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <rect x="6" y="1" width="6" height="11" rx="3" fill="white"/>
+              <path d="M3 9.5C3 13 5.7 16 9 16s6-3 6-6.5" stroke="white" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+              <line x1="9" y1="16" x2="9" y2="18" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+        <!-- ×3 preview -->
+        <svg width="54" height="54" viewBox="0 0 18 18" fill="none" style="margin:10px 0">
+          <rect x="6" y="1" width="6" height="11" rx="3" fill="white"/>
+          <path d="M3 9.5C3 13 5.7 16 9 16s6-3 6-6.5" stroke="white" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+          <line x1="9" y1="16" x2="9" y2="18" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <div class="mb-lbl">Idle</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.22);text-align:center;line-height:1.5;">filled mic body<br>+ arc stand</div>
+      </div>
+
+      <!-- RECORDING -->
+      <div class="mb-state">
+        <div class="mb-tag">recording</div>
+        <div class="mb-strip">
+          <div class="mb-strip-dot"></div><div class="mb-strip-dot"></div>
+          <div class="mb-icon-slot">
+            <!-- Amber dot is a SEPARATE element next to icon — not part of SVG -->
+            <div class="rec-dot"></div>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <rect x="6" y="1" width="6" height="11" rx="3" fill="white"/>
+              <path d="M3 9.5C3 13 5.7 16 9 16s6-3 6-6.5" stroke="white" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+              <line x1="9" y1="16" x2="9" y2="18" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+        <!-- ×3 preview with amber dot -->
+        <div style="position:relative;margin:10px 0;display:flex;align-items:center;gap:8px;">
+          <div style="position:relative;">
+            <div style="width:10px;height:10px;border-radius:50%;background:#F0B429;box-shadow:0 0 0 3px rgba(240,180,41,.25);flex-shrink:0;"></div>
+          </div>
+          <svg width="54" height="54" viewBox="0 0 18 18" fill="none">
+            <rect x="6" y="1" width="6" height="11" rx="3" fill="white"/>
+            <path d="M3 9.5C3 13 5.7 16 9 16s6-3 6-6.5" stroke="white" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+            <line x1="9" y1="16" x2="9" y2="18" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="mb-lbl">Recording</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.22);text-align:center;line-height:1.5;">● amber dot слева<br>иконка не меняется</div>
+      </div>
+
+      <!-- PROCESSING -->
+      <div class="mb-state">
+        <div class="mb-tag">processing</div>
+        <div class="mb-strip">
+          <div class="mb-strip-dot"></div><div class="mb-strip-dot"></div>
+          <div class="mb-icon-slot">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <circle cx="9" cy="9" r="6" stroke="rgba(255,255,255,.18)" stroke-width="1.8"/>
+              <path d="M9 3 A6 6 0 0 1 15 9" stroke="white" stroke-width="1.8" stroke-linecap="round" fill="none">
+                <animateTransform attributeName="transform" type="rotate" from="0 9 9" to="360 9 9" dur=".85s" repeatCount="indefinite"/>
+              </path>
+            </svg>
+          </div>
+        </div>
+        <!-- ×3 preview -->
+        <svg width="54" height="54" viewBox="0 0 18 18" fill="none" style="margin:10px 0">
+          <circle cx="9" cy="9" r="6" stroke="rgba(255,255,255,.18)" stroke-width="1.8"/>
+          <path d="M9 3 A6 6 0 0 1 15 9" stroke="white" stroke-width="1.8" stroke-linecap="round" fill="none">
+            <animateTransform attributeName="transform" type="rotate" from="0 9 9" to="360 9 9" dur=".85s" repeatCount="indefinite"/>
+          </path>
+        </svg>
+        <div class="mb-lbl">Processing</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.22);text-align:center;line-height:1.5;">спиннер заменяет<br>иконку полностью</div>
+      </div>
+
+    </div>
+
+    <div style="margin-top:14px;padding:14px 18px;background:white;border-radius:var(--r-sm);border:1px solid var(--border);font-size:12px;color:var(--text2);line-height:1.9;">
+      <strong style="color:var(--text)">Технические требования:</strong> PNG 22×22 pt @ 2x = 44×44 px (NSImage template) · Прозрачный фон · Только белый цвет · Filled rect для тела микрофона (не stroke) · Жёлтая точка — отдельный элемент rumps, не часть SVG
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════
+       02 — MENU ITEM ICONS
+  ═══════════════════════════════════════════════ -->
+  <div class="sec">
+    <div class="sec-lbl">02 — Menu Item Icons</div>
+    <div class="sec-title">Иконки пунктов меню</div>
+    <div class="sec-desc">Монохромные SVG 16×16 pt · Stroke 1.5 px · Outline-стиль · Адаптируются к light/dark</div>
+
+    <div class="icon-grid">
+      <!-- Accessibility OK -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><path d="M5.5 9l2.5 2.5 4.5-4.5" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">Accessibility</div><div class="icon-key">Granted</div></div>
+      </div>
+      <!-- Accessibility Warn -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><line x1="9" y1="6" x2="9" y2="10.5"/><circle cx="9" cy="12.8" r=".9" fill="#111" stroke="none"/></svg></div>
+        <div><div class="icon-name">Accessibility</div><div class="icon-key">Required</div></div>
+      </div>
+      <!-- Input Monitoring -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="5" width="14" height="9" rx="2"/><circle cx="5" cy="9" r=".9" fill="#111" stroke="none"/><circle cx="8" cy="9" r=".9" fill="#111" stroke="none"/><circle cx="11" cy="9" r=".9" fill="#111" stroke="none"/><line x1="5" y1="11.5" x2="9" y2="11.5" stroke-width="1.5"/></svg></div>
+        <div><div class="icon-name">Input Monitoring</div><div class="icon-key">keyboard</div></div>
+      </div>
+      <!-- Check Permissions -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M9 2L3 5v5c0 3.6 2.7 6.7 6 7.5 3.3-.8 6-3.9 6-7.5V5L9 2z" stroke-linejoin="round"/><path d="M6.5 9l2 2 3.5-3.5" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">Check Permissions</div><div class="icon-key">shield</div></div>
+      </div>
+      <!-- Whisper Model -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="3" width="12" height="12" rx="3"/><circle cx="9" cy="9" r="2.5"/><line x1="9" y1="3" x2="9" y2="6"/><line x1="9" y1="12" x2="9" y2="15"/><line x1="3" y1="9" x2="6" y2="9"/><line x1="12" y1="9" x2="15" y2="9"/></svg></div>
+        <div><div class="icon-name">Whisper Model</div><div class="icon-key">chip</div></div>
+      </div>
+      <!-- Languages -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><path d="M9 2c-2.5 3.5-2.5 10.5 0 14M9 2c2.5 3.5 2.5 10.5 0 14" fill="none"/><line x1="2.5" y1="7" x2="15.5" y2="7"/><line x1="2.5" y1="11" x2="15.5" y2="11"/></svg></div>
+        <div><div class="icon-name">Languages</div><div class="icon-key">globe</div></div>
+      </div>
+      <!-- AI Editor -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M9 1.5l2 5.5h5.5l-4.5 3.5 1.5 5.5L9 13l-4.5 3.5 1.5-5.5L1.5 7H7L9 1.5z" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">AI Editor</div><div class="icon-key">sparkle</div></div>
+      </div>
+      <!-- Download Model -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M13.5 7.5A4.5 4.5 0 0 0 5.1 6.5a3 3 0 0 0 .4 5.5H13a3 3 0 0 0 .5-5z" stroke-linejoin="round"/><line x1="9" y1="10" x2="9" y2="16"/><path d="M6.5 13.5L9 16l2.5-2.5"/></svg></div>
+        <div><div class="icon-name">Download Model</div><div class="icon-key">cloud-down</div></div>
+      </div>
+      <!-- Initial Prompt -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="2" width="12" height="14" rx="2"/><line x1="6" y1="6.5" x2="12" y2="6.5"/><line x1="6" y1="9.5" x2="12" y2="9.5"/><line x1="6" y1="12.5" x2="9" y2="12.5"/><path d="M10.5 11.5l1.5 1.5-1 1" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">Initial Prompt</div><div class="icon-key">doc-edit</div></div>
+      </div>
+      <!-- Last Phrases -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><polyline points="9,5 9,9 12,11" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">Last Phrases</div><div class="icon-key">clock</div></div>
+      </div>
+      <!-- Transcribe File -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><line x1="2" y1="5" x2="13" y2="5"/><line x1="2" y1="9" x2="11" y2="9"/><line x1="2" y1="13" x2="8" y2="13"/><path d="M12 10l3 3-3 3" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">Transcribe File</div><div class="icon-key">file-text</div></div>
+      </div>
+      <!-- Check Updates -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M14.5 9A5.5 5.5 0 1 1 9 3.5" stroke-linejoin="round"/><path d="M9 1.5v4h3.5" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">Check for Updates</div><div class="icon-key">refresh</div></div>
+      </div>
+      <!-- Launch at Login -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M9 2C6 2 3.5 5 3.5 8.5c0 4 2.5 6 5.5 7.5 3-1.5 5.5-3.5 5.5-7.5C14.5 5 12 2 9 2z" stroke-linejoin="round"/><line x1="9" y1="5.5" x2="9" y2="10"/><polyline points="7,7.5 9,5.5 11,7.5" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">Launch at Login</div><div class="icon-key">power-up</div></div>
+      </div>
+      <!-- Advanced / Sliders -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><line x1="2" y1="5" x2="16" y2="5"/><line x1="2" y1="9" x2="16" y2="9"/><line x1="2" y1="13" x2="16" y2="13"/><circle cx="6" cy="5" r="2" fill="white"/><circle cx="11" cy="9" r="2" fill="white"/><circle cx="7.5" cy="13" r="2" fill="white"/></svg></div>
+        <div><div class="icon-name">Advanced</div><div class="icon-key">sliders</div></div>
+      </div>
+      <!-- Restart -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M3.5 9A5.5 5.5 0 1 0 9 3.5H7.5"/><polyline points="7.5,1.5 7.5,4.5 10.5,4.5" stroke-linejoin="round"/></svg></div>
+        <div><div class="icon-name">Restart</div><div class="icon-key">restart</div></div>
+      </div>
+      <!-- Copy / Clipboard -->
+      <div class="icon-item">
+        <div class="icon-box"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><rect x="6" y="6" width="9" height="10" rx="2"/><path d="M3 12V4a2 2 0 0 1 2-2h7"/></svg></div>
+        <div><div class="icon-name">Copy Phrase</div><div class="icon-key">clipboard</div></div>
+      </div>
+    </div>
+
+    <!-- Menu preview -->
+    <div style="margin-top:22px;display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:500;letter-spacing:.04em;">LIGHT MENU PREVIEW</div>
+        <div class="menu-prev light">
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><path d="M5.5 9l2.5 2.5 4.5-4.5" stroke-linejoin="round"/></svg> Accessibility Granted</div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="5" width="14" height="9" rx="2"/><circle cx="5" cy="9" r=".9" fill="#111" stroke="none"/><circle cx="8" cy="9" r=".9" fill="#111" stroke="none"/></svg> Input Monitoring</div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M9 2L3 5v5c0 3.6 2.7 6.7 6 7.5 3.3-.8 6-3.9 6-7.5V5L9 2z" stroke-linejoin="round"/></svg> Check Permissions</div>
+          <div class="m-sep"></div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="3" width="12" height="12" rx="3"/><circle cx="9" cy="9" r="2.5"/></svg> Model <span class="m-chevron">▶</span></div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><path d="M9 2c-2.5 3.5-2.5 10.5 0 14" fill="none"/><line x1="2.5" y1="7" x2="15.5" y2="7"/></svg> Languages <span class="m-chevron">▶</span></div>
+          <div class="m-sep"></div>
+          <div class="m-item active light"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M9 1.5l2 5.5h5.5l-4.5 3.5 1.5 5.5L9 13l-4.5 3.5 1.5-5.5L1.5 7H7z" stroke-linejoin="round"/></svg> AI Editor</div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="2" width="12" height="14" rx="2"/><line x1="6" y1="6.5" x2="12" y2="6.5"/><line x1="6" y1="9.5" x2="12" y2="9.5"/></svg> Initial Prompt <span class="m-chevron">▶</span></div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><polyline points="9,5 9,9 12,11"/></svg> Last Phrases <span class="m-chevron">▶</span></div>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:500;letter-spacing:.04em;">DARK MENU PREVIEW</div>
+        <div class="menu-prev dark">
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><path d="M5.5 9l2.5 2.5 4.5-4.5" stroke-linejoin="round"/></svg> Accessibility Granted</div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="5" width="14" height="9" rx="2"/><circle cx="5" cy="9" r=".9" fill="rgba(255,255,255,.85)" stroke="none"/><circle cx="8" cy="9" r=".9" fill="rgba(255,255,255,.85)" stroke="none"/></svg> Input Monitoring</div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linecap="round"><path d="M9 2L3 5v5c0 3.6 2.7 6.7 6 7.5 3.3-.8 6-3.9 6-7.5V5L9 2z" stroke-linejoin="round"/></svg> Check Permissions</div>
+          <div class="m-sep"></div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="3" width="12" height="12" rx="3"/><circle cx="9" cy="9" r="2.5"/></svg> Model <span class="m-chevron">▶</span></div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><path d="M9 2c-2.5 3.5-2.5 10.5 0 14" fill="none"/><line x1="2.5" y1="7" x2="15.5" y2="7"/></svg> Languages <span class="m-chevron">▶</span></div>
+          <div class="m-sep"></div>
+          <div class="m-item active dark"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linecap="round"><path d="M9 1.5l2 5.5h5.5l-4.5 3.5 1.5 5.5L9 13l-4.5 3.5 1.5-5.5L1.5 7H7z" stroke-linejoin="round"/></svg> AI Editor</div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="2" width="12" height="14" rx="2"/><line x1="6" y1="6.5" x2="12" y2="6.5"/><line x1="6" y1="9.5" x2="12" y2="9.5"/></svg> Initial Prompt <span class="m-chevron">▶</span></div>
+          <div class="m-item"><svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="7"/><polyline points="9,5 9,9 12,11"/></svg> Last Phrases <span class="m-chevron">▶</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════
+       03 — COLORS
+  ═══════════════════════════════════════════════ -->
+  <div class="sec">
+    <div class="sec-lbl">03 — Color System</div>
+    <div class="sec-title">Цветовая система</div>
+    <div class="sec-desc">Монохромная основа + один акцент. Amber используется строго экономно: индикатор записи, предупреждения, редкие CTA.</div>
+    <div class="clr-grid">
+      <div class="clr-swatch"><div class="clr-block" style="background:#111;"></div><div class="clr-info"><div class="clr-name">Ink</div><div class="clr-hex">#111111</div></div></div>
+      <div class="clr-swatch"><div class="clr-block" style="background:#3a3a3c;"></div><div class="clr-info"><div class="clr-name">Dark Surface</div><div class="clr-hex">#3A3A3C</div></div></div>
+      <div class="clr-swatch"><div class="clr-block" style="background:#8e8e93;"></div><div class="clr-info"><div class="clr-name">Mid Gray</div><div class="clr-hex">#8E8E93</div></div></div>
+      <div class="clr-swatch"><div class="clr-block" style="background:#d1d1d6;border-bottom:1px solid #e0e0e0;"></div><div class="clr-info"><div class="clr-name">Light Gray</div><div class="clr-hex">#D1D1D6</div></div></div>
+      <div class="clr-swatch"><div class="clr-block" style="background:#f5f5f7;border-bottom:1px solid #e8e8e8;"></div><div class="clr-info"><div class="clr-name">Off-White</div><div class="clr-hex">#F5F5F7</div></div></div>
+      <div class="clr-swatch"><div class="clr-block" style="background:#F0B429;"></div><div class="clr-info"><div class="clr-name">Amber ⚡</div><div class="clr-hex">#F0B429</div></div></div>
+      <div class="clr-swatch"><div class="clr-block" style="background:rgba(240,180,41,.15);border:1px dashed #e0d0a0;"></div><div class="clr-info"><div class="clr-name">Amber Tint</div><div class="clr-hex">15% alpha</div></div></div>
+      <div class="clr-swatch"><div class="clr-block" style="position:relative;background:repeating-linear-gradient(45deg,#eee 0,#eee 4px,#fff 4px,#fff 8px);"><span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:9px;color:#aaa;white-space:nowrap;">vibrancy</span></div><div class="clr-info"><div class="clr-name">BG Base</div><div class="clr-hex">transparent</div></div></div>
+    </div>
+    <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+      <div style="padding:14px 16px;background:#fff;border-radius:var(--r-sm);border:1px solid var(--border);">
+        <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text3);letter-spacing:.05em;">AMBER — ТОЛЬКО ДЛЯ</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.7;">• Точка ● при записи<br>• Иконки ⚠ предупреждений<br>• Акцент кнопки (очень редко)</div>
+      </div>
+      <div style="padding:14px 16px;background:#fff;border-radius:var(--r-sm);border:1px solid var(--border);">
+        <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text3);letter-spacing:.05em;">МОНОХРОМ — ОСНОВА</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.7;">• Текст: #111 / white<br>• Иконки: stroke без заливки<br>• Фон: macOS vibrancy</div>
+      </div>
+      <div style="padding:14px 16px;background:#fff;border-radius:var(--r-sm);border:1px solid var(--border);">
+        <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text3);letter-spacing:.05em;">ЗАПРЕЩЕНО</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.7;">• Любые цвета кроме amber<br>• Градиентные заливки<br>• Цветные иконки</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════
+       04 — TYPOGRAPHY
+  ═══════════════════════════════════════════════ -->
+  <div class="sec">
+    <div class="sec-lbl">04 — Typography</div>
+    <div class="sec-title">Типографика</div>
+    <div class="sec-desc">Системный шрифт macOS — SF Pro / -apple-system. Никаких внешних шрифтов в приложении. Только размер и вес.</div>
+    <div class="card" style="display:flex;flex-direction:column;gap:18px;">
+      <div>
+        <div style="font-size:11px;color:var(--text3);font-weight:500;margin-bottom:5px;letter-spacing:.04em;">POPUP TITLE — 15px / 600</div>
+        <div style="font-size:15px;font-weight:600;">Распознавание речи</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);font-weight:500;margin-bottom:5px;letter-spacing:.04em;">BODY — 13px / 400</div>
+        <div style="font-size:13px;">Alt+Space для начала записи. Запись остановится автоматически при паузе в речи.</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);font-weight:500;margin-bottom:5px;letter-spacing:.04em;">SECONDARY — 13px / 400 / opacity 55%</div>
+        <div style="font-size:13px;color:#666;">Turbo · Large v3 · Medium · Small · Base</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);font-weight:500;margin-bottom:5px;letter-spacing:.04em;">SECTION LABEL — 11px / 600 / uppercase</div>
+        <div style="font-size:11px;font-weight:600;letter-spacing:.07em;color:#999;">PRIMARY LANGUAGE</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);font-weight:500;margin-bottom:5px;letter-spacing:.04em;">TRANSCRIBED TEXT — monospace 12px</div>
+        <div style="font-size:12px;font-family:monospace;color:#555;">"Привет мир, это результат распознавания голоса."</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════
+       05 — POPUP WINDOWS
+  ═══════════════════════════════════════════════ -->
+  <div class="sec">
+    <div class="sec-lbl">05 — Popup Windows</div>
+    <div class="sec-title">Компоненты всплывающих окон</div>
+    <div class="sec-desc">Автоматически следуют системной теме macOS. Фон — vibrancy blur. Два типа: статус-панель и панель настроек.</div>
+
+    <div class="popup-grid">
+
+      <!-- Recording status LIGHT -->
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:500;letter-spacing:.04em;">СТАТУС ЗАПИСИ — LIGHT</div>
+        <div class="popup-stage stage-light">
+          <div class="popup light">
+            <div class="popup-tbar">
+              <div class="p-dots"><div class="p-dot cl"></div><div class="p-dot mn"></div><div class="p-dot mx"></div></div>
+              <div class="p-title">Запись</div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;padding:28px 20px;gap:16px;">
+              <div class="wf">
+                <div class="wf-bar" style="height:16px;animation-delay:0s"></div>
+                <div class="wf-bar" style="height:26px;animation-delay:.1s"></div>
+                <div class="wf-bar" style="height:32px;animation-delay:.06s"></div>
+                <div class="wf-bar" style="height:24px;animation-delay:.18s"></div>
+                <div class="wf-bar" style="height:30px;animation-delay:.04s"></div>
+                <div class="wf-bar" style="height:20px;animation-delay:.14s"></div>
+                <div class="wf-bar" style="height:16px;animation-delay:.08s"></div>
+              </div>
+              <div style="font-size:13px;font-weight:500;color:#111;">Идёт запись...</div>
+              <div style="font-size:11px;color:#777;text-align:center;">Говорите. Остановится<br>автоматически при паузе.</div>
+              <button class="btn" style="background:rgba(0,0,0,.09);color:#111;margin-top:4px;">Остановить</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recording status DARK -->
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:500;letter-spacing:.04em;">СТАТУС ЗАПИСИ — DARK</div>
+        <div class="popup-stage stage-dark">
+          <div class="popup dark">
+            <div class="popup-tbar">
+              <div class="p-dots"><div class="p-dot cl"></div><div class="p-dot mn"></div><div class="p-dot mx"></div></div>
+              <div class="p-title">Запись</div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;padding:28px 20px;gap:16px;">
+              <div class="wf">
+                <div class="wf-bar" style="height:16px;animation-delay:0s"></div>
+                <div class="wf-bar" style="height:26px;animation-delay:.1s"></div>
+                <div class="wf-bar" style="height:32px;animation-delay:.06s"></div>
+                <div class="wf-bar" style="height:24px;animation-delay:.18s"></div>
+                <div class="wf-bar" style="height:30px;animation-delay:.04s"></div>
+                <div class="wf-bar" style="height:20px;animation-delay:.14s"></div>
+                <div class="wf-bar" style="height:16px;animation-delay:.08s"></div>
+              </div>
+              <div style="font-size:13px;font-weight:500;color:rgba(255,255,255,.9);">Идёт запись...</div>
+              <div style="font-size:11px;color:rgba(255,255,255,.42);text-align:center;">Говорите. Остановится<br>автоматически при паузе.</div>
+              <button class="btn btn-def dark" style="background:rgba(255,255,255,.1);color:rgba(255,255,255,.85);border:1px solid rgba(255,255,255,.1);margin-top:4px;">Остановить</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Permissions LIGHT -->
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:500;letter-spacing:.04em;">РАЗРЕШЕНИЯ — LIGHT</div>
+        <div class="popup-stage stage-light" style="min-height:240px;">
+          <div class="popup light">
+            <div class="popup-tbar">
+              <div class="p-dots"><div class="p-dot cl"></div><div class="p-dot mn"></div><div class="p-dot mx"></div></div>
+              <div class="p-title">Разрешения</div>
+            </div>
+            <div class="popup-body">
+              <div class="perm-row">
+                <div class="perm-ico ok">
+                  <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"><path d="M9 2L3 5v5c0 3.6 2.7 6.7 6 7.5 3.3-.8 6-3.9 6-7.5V5z" stroke-linejoin="round"/><path d="M6 9l2 2 4-4" stroke-linejoin="round"/></svg>
+                </div>
+                <div style="flex:1">
+                  <div class="s-label">Accessibility</div>
+                  <div class="perm-status ok">Разрешено</div>
+                </div>
+              </div>
+              <div class="perm-row">
+                <div class="perm-ico warn">
+                  <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="5" width="14" height="9" rx="2"/><circle cx="5" cy="9" r=".9" fill="var(--accent)" stroke="none"/><circle cx="8" cy="9" r=".9" fill="var(--accent)" stroke="none"/></svg>
+                </div>
+                <div style="flex:1">
+                  <div class="s-label">Input Monitoring</div>
+                  <div class="perm-status warn">Требуется</div>
+                </div>
+                <button class="btn" style="background:var(--accent);color:#111;font-size:11px;padding:5px 11px;">Открыть</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings DARK -->
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:500;letter-spacing:.04em;">НАСТРОЙКИ — DARK</div>
+        <div class="popup-stage stage-dark" style="min-height:240px;">
+          <div class="popup dark">
+            <div class="popup-tbar">
+              <div class="p-dots"><div class="p-dot cl"></div><div class="p-dot mn"></div><div class="p-dot mx"></div></div>
+              <div class="p-title">Настройки</div>
+            </div>
+            <div class="popup-body">
+              <div class="s-row">
+                <div><div class="s-label">AI Editor</div><div class="s-sub">Очистка и пунктуация</div></div>
+                <label class="tog"><input type="checkbox" checked/><div class="tog-track"></div></label>
+              </div>
+              <div class="s-row">
+                <div><div class="s-label">Запуск при входе</div><div class="s-sub">Launch at Login</div></div>
+                <label class="tog"><input type="checkbox"/><div class="tog-track"></div></label>
+              </div>
+              <div class="s-row">
+                <div><div class="s-label">Модель</div><div class="s-sub" style="color:rgba(255,255,255,.35);">Turbo (быстрая)</div></div>
+                <span style="font-size:12px;color:rgba(255,255,255,.3);">▶</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════
+       06 — SPACING & RADIUS
+  ═══════════════════════════════════════════════ -->
+  <div class="sec">
+    <div class="sec-lbl">06 — Spacing &amp; Radius</div>
+    <div class="sec-title">Отступы и скругления</div>
+    <div class="sec-desc">Базовая сетка 4 px. Радиусы следуют системным macOS-компонентам.</div>
+    <div class="card">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+        <div>
+          <div style="font-size:11px;font-weight:600;color:var(--text3);letter-spacing:.05em;margin-bottom:14px;">ОТСТУПЫ</div>
+          <div class="sp-row"><div class="sp-lbl">--sp-1</div><div class="sp-block" style="width:4px;"></div><div class="sp-val">4 px</div></div>
+          <div class="sp-row"><div class="sp-lbl">--sp-2</div><div class="sp-block" style="width:8px;"></div><div class="sp-val">8 px</div></div>
+          <div class="sp-row"><div class="sp-lbl">--sp-3</div><div class="sp-block" style="width:12px;"></div><div class="sp-val">12 px</div></div>
+          <div class="sp-row"><div class="sp-lbl">--sp-4</div><div class="sp-block" style="width:16px;"></div><div class="sp-val">16 px — body padding</div></div>
+          <div class="sp-row"><div class="sp-lbl">--sp-5</div><div class="sp-block" style="width:20px;"></div><div class="sp-val">20 px</div></div>
+          <div class="sp-row"><div class="sp-lbl">--sp-6</div><div class="sp-block" style="width:24px;"></div><div class="sp-val">24 px — section gap</div></div>
+          <div class="sp-row"><div class="sp-lbl">--sp-8</div><div class="sp-block" style="width:32px;"></div><div class="sp-val">32 px — popup padding</div></div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:600;color:var(--text3);letter-spacing:.05em;margin-bottom:14px;">СКРУГЛЕНИЯ</div>
+          <div style="display:flex;flex-direction:column;gap:14px;">
+            <div style="display:flex;align-items:center;gap:16px;">
+              <div style="width:36px;height:36px;background:#111;border-radius:7px;flex-shrink:0;"></div>
+              <div><div style="font-size:12px;font-weight:500;">7 px</div><div style="font-size:11px;color:var(--text3);">Кнопки, теги</div></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:16px;">
+              <div style="width:40px;height:40px;background:#111;border-radius:10px;flex-shrink:0;"></div>
+              <div><div style="font-size:12px;font-weight:500;">10 px</div><div style="font-size:11px;color:var(--text3);">Строки меню</div></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:16px;">
+              <div style="width:48px;height:40px;background:#111;border-radius:12px;flex-shrink:0;"></div>
+              <div><div style="font-size:12px;font-weight:500;">12 px</div><div style="font-size:11px;color:var(--text3);">Карточки, секции</div></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:16px;">
+              <div style="width:52px;height:40px;background:#111;border-radius:14px;flex-shrink:0;"></div>
+              <div><div style="font-size:12px;font-weight:500;">14 px</div><div style="font-size:11px;color:var(--text3);">Всплывающие окна</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════
+       07 — VOICE / TONE
+  ═══════════════════════════════════════════════ -->
+  <div class="sec">
+    <div class="sec-lbl">07 — Voice &amp; Copy</div>
+    <div class="sec-title">Голос бренда и копирайтинг</div>
+    <div class="sec-desc">Лаконично. Без восклицательных знаков. Технически точно, по-человечески.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div style="padding:16px 18px;background:#fff;border-radius:var(--r-sm);border:1px solid var(--border);">
+        <div style="font-size:11px;font-weight:600;color:#28C840;letter-spacing:.05em;margin-bottom:8px;">✓ ПРАВИЛЬНО</div>
+        <div style="font-size:13px;color:var(--text);line-height:1.9;">
+          "Модель загружена"<br>
+          "Запись начнётся после Alt+Space"<br>
+          "Не удалось распознать аудио"<br>
+          "Перезапустить, чтобы применить"
+        </div>
+      </div>
+      <div style="padding:16px 18px;background:#fff;border-radius:var(--r-sm);border:1px solid var(--border);">
+        <div style="font-size:11px;font-weight:600;color:#FF5F57;letter-spacing:.05em;margin-bottom:8px;">✗ НЕПРАВИЛЬНО</div>
+        <div style="font-size:13px;color:var(--text2);line-height:1.9;">
+          "Отличная новость — модель готова!"<br>
+          "Вы можете начать запись нажав…"<br>
+          "Произошла непредвиденная ошибка!"<br>
+          "Пожалуйста, перезапустите приложение"
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

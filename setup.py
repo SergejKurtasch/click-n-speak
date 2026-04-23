@@ -84,7 +84,12 @@ def find_native_dylibs():
 
 
 APP = ["main.py"]
-DATA_FILES = ["config.json", ("", ["assets/CnS.png"])]
+DATA_FILES = [
+    "config.json",
+    ("", ["assets/CnS.png"]),
+    ("icons/menubar", glob.glob("assets/icons/menubar/*.png")),
+    ("icons/menu", glob.glob("assets/icons/menu/*.png")),
+]
 
 # Build frameworks list dynamically
 frameworks_list = find_native_dylibs()

@@ -75,6 +75,45 @@ def get_menu_icon_path() -> Path:
     return ROOT / "assets" / "CnS.png"
 
 
+def get_menubar_icon_path(state: str = "idle") -> Path:
+    """Return path to a menubar PNG icon for the given state ('idle'|'recording'|'processing').
+
+    Prefers *Template.png (black icons that adapt to dark/light mode) over plain *.png.
+    """
+    app_bundle = _get_app_bundle()
+    if app_bundle:
+        base = Path(app_bundle) / "Contents" / "Resources" / "icons" / "menubar"
+        for suffix in (f"{state}Template.png", f"{state}.png"):
+            p = base / suffix
+            if p.exists():
+                return p
+    for suffix in (f"{state}Template.png", f"{state}.png"):
+        p = ROOT / "assets" / "icons" / "menubar" / suffix
+        if p.exists():
+            return p
+    return get_menu_icon_path()
+
+
+def get_menu_item_icon_path(name: str) -> Path | None:
+    """Return path to a menu-item PNG icon, or None if not found.
+
+    Prefers *Template.png (black icons that adapt to dark/light mode) over plain *.png.
+    """
+    app_bundle = _get_app_bundle()
+    if app_bundle:
+        base = Path(app_bundle) / "Contents" / "Resources" / "icons" / "menu"
+        for suffix in (f"{name}Template.png", f"{name}.png"):
+            p = base / suffix
+            if p.exists():
+                return p
+        return None
+    for suffix in (f"{name}Template.png", f"{name}.png"):
+        p = ROOT / "assets" / "icons" / "menu" / suffix
+        if p.exists():
+            return p
+    return None
+
+
 def get_config_path() -> Path:
     """Return the path to config.json (project root in dev, Application Support when run from .app)."""
     app_bundle = _get_app_bundle()
