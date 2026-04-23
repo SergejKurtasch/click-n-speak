@@ -222,8 +222,7 @@ try:
 
         @_objc.python_method
         def _do_rebuild(self) -> None:
-            from AppKit import NSMenu, NSMenuItem, NSButton, NSTextField, NSFont, \
-                NSButtonTypeMomentaryLight, NSTextAlignmentLeft, NSTextAlignmentCenter
+            from AppKit import NSMenuItem
 
             count = self._page_count
             candidates = get_last_phrases(count + 1)
@@ -326,6 +325,14 @@ try:
                 NSPanel, NSTextField, NSFont, NSColor, NSEvent,
                 NSBackingStoreBuffered, NSFloatingWindowLevel, NSTextAlignmentCenter,
             )
+            # Cancel any in-flight dismiss timer and close a previous tooltip that
+            # is still visible (fast double-click within the 0.75s window).
+            NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
+                self, "_dismissCopiedPanel:", None
+            )
+            if getattr(self, "_copied_panel", None) is not None:
+                self._copied_panel.close()
+                self._copied_panel = None
             mouse = NSEvent.mouseLocation()
             W, H = 84, 26
             panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
