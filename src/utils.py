@@ -32,17 +32,27 @@ def relaunch_app() -> bool:
 
     Returns False if not running from a bundle (dev mode) so caller can skip.
     """
-    import subprocess
+    import signal as _signal
     bundle = _get_app_bundle()
     if not bundle:
         return False
     # Fork a helper that waits for this process to exit then opens a new instance.
     # `open -n` forces a new instance even if bundle is still in the LaunchServices DB.
+    # start_new_session=True puts the helper in its own session so it survives our exit.
     subprocess.Popen(
         ["sh", "-c", f'sleep 1 && open -n "{bundle}"'],
         start_new_session=True,
     )
-    os._exit(0)
+    # Kill the entire process group (main process + all child processes such as the
+    # transcriber). os._exit(0) only kills the main process; os.killpg ensures orphaned
+    # child processes (daemon=True multiprocessing children whose atexit cleanup is
+    # bypassed by os._exit) are also killed immediately.
+    # The helper shell above is in its own session (start_new_session=True) and is
+    # unaffected by killpg on our process group.
+    try:
+        os.killpg(os.getpgrp(), _signal.SIGKILL)
+    except Exception:
+        os._exit(0)
 
 # Application Support dir when running from .app (set by launcher)
 APPLICATION_SUPPORT_DIR = Path(os.path.expanduser("~/Library/Application Support/Click-n-speak"))
