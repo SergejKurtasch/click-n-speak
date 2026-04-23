@@ -6,6 +6,7 @@ import traceback
 
 import numpy as np
 
+from .process_watchdog import install_parent_death_watchdog
 from .utils import log_error, log_exception, log_info
 
 # Maximum seconds to wait for transcriber process to respond before killing it
@@ -358,6 +359,18 @@ class TranscriberProcessWrapper:
         self._process.start()
 
     def _run_loop(self):
+        # Parent-death watchdog: macOS has no PR_SET_PDEATHSIG, and a daemon
+        # mp.Process only dies via atexit in the parent — which is skipped on
+        # SIGKILL, crash, Force Quit, or NSApp.terminate without cleanup. Without
+        # this watchdog each crashed session leaves behind a 2-4 GB orphan holding
+        # the MLX model in memory.
+        import os as _os
+        log_info(
+            f"Transcriber child process started: pid={_os.getpid()} "
+            f"ppid={_os.getppid()} pgid={_os.getpgrp()} model={self.model_name}"
+        )
+        install_parent_death_watchdog()
+
         try:
             transcriber = WhisperTranscriber(model_name=self.model_name)
         except Exception as e:

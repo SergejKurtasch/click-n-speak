@@ -9,6 +9,11 @@ from pathlib import Path
 from src.app import SVoiceRecApp
 from src.menu_bar import ClickNSpeakApp
 from src.permissions import all_permissions_granted, is_setup_done, mark_setup_done
+from src.process_watchdog import (
+    ensure_own_process_group,
+    install_nsapp_terminate_observer,
+    sweep_orphan_children,
+)
 from src.updater import check_for_update
 from src.utils import (
     get_config_path,
@@ -77,6 +82,21 @@ def main() -> None:
     # Ensure we are in the right directory
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
+    # Move into our own process group BEFORE spawning any children. Any child
+    # (including multiprocessing resource_tracker + spawn_main) inherits this
+    # PGID, which makes killpg(getpgrp(), SIGKILL) reach every descendant.
+    ensure_own_process_group()
+
+    # Reap orphaned transcriber helpers left behind by previous crashed sessions.
+    # Each orphan can hold 2-4 GB of MLX model weights. Must run before we start
+    # our own transcriber so we don't kill ourselves.
+    try:
+        reaped = sweep_orphan_children(self_pid=os.getpid())
+        if reaped:
+            log_info(f"Startup sweep: killed {reaped} orphaned helper process(es) from prior session(s).")
+    except Exception as e:
+        log_error(f"Startup orphan sweep failed: {e}")
+
     if not _acquire_instance_lock():
         log_error("Another Click-n-speak instance is already running. Exiting.")
         sys.exit(0)
@@ -118,7 +138,8 @@ def main() -> None:
 
         atexit.register(_cleanup_and_exit)
 
-        def _signal_exit(*_) -> None:
+        def _signal_exit(signum, _frame) -> None:
+            log_info(f"Received signal {signum}, cleaning up and killing process group.")
             _cleanup_and_exit()
             # Kill entire process group so child processes (transcriber) die with us.
             # os.killpg covers what os._exit(0) misses: atexit is bypassed by both,
@@ -128,8 +149,62 @@ def main() -> None:
             except Exception:
                 os._exit(0)
 
-        for _sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(_sig, _signal_exit)
+        # SIGHUP fires on terminal close / user logout; SIGQUIT on ctrl-\.
+        # SIGABRT is intentionally NOT handled — it signals a fatal runtime
+        # assertion (Python, ObjC, native lib) where trying to run cleanup
+        # typically deadlocks or re-enters the failing code path.
+        for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+            try:
+                signal.signal(_sig, _signal_exit)
+            except (OSError, ValueError) as e:
+                log_error(f"Could not install handler for signal {_sig}: {e}")
+
+        # Uncaught exceptions (main thread and background threads) must also run
+        # cleanup — otherwise a crash in pynput/AppKit/MLX orphans the child.
+        _default_excepthook = sys.excepthook
+
+        def _excepthook(exc_type, exc, tb):
+            log_error(f"Uncaught exception: {exc_type.__name__}: {exc}")
+            try:
+                _cleanup_and_exit()
+            finally:
+                try:
+                    os.killpg(os.getpgrp(), signal.SIGKILL)
+                except Exception:
+                    _default_excepthook(exc_type, exc, tb)
+                    os._exit(1)
+
+        sys.excepthook = _excepthook
+
+        def _thread_excepthook(args) -> None:
+            # SystemExit / KeyboardInterrupt are cooperative exits — don't treat
+            # subclasses (e.g. `class CleanExit(SystemExit)`) as crashes either.
+            if issubclass(args.exc_type, (SystemExit, KeyboardInterrupt)):
+                return
+            log_error(
+                f"Uncaught thread exception in {args.thread.name}: "
+                f"{args.exc_type.__name__}: {args.exc_value}"
+            )
+            try:
+                _cleanup_and_exit()
+            finally:
+                try:
+                    os.killpg(os.getpgrp(), signal.SIGKILL)
+                except Exception:
+                    os._exit(1)
+
+        threading.excepthook = _thread_excepthook
+
+        # rumps' built-in Cmd+Q triggers NSApp.terminate: which bypasses our
+        # menu-bar quit handler. Subscribe to NSApplicationWillTerminateNotification
+        # so the transcriber child is always stopped on that path too.
+        #
+        # NOTE: we pass `_full_cleanup`, NOT `_cleanup_and_exit`. AppKit releases
+        # the instance lock for us when the process exits; calling
+        # `_release_instance_lock` here would close the fd while AppKit is still
+        # mid-teardown and could race with atexit. Keep cleanup minimal on this
+        # path — stop the transcriber and let normal exit handle the rest.
+        install_nsapp_terminate_observer(_full_cleanup)
 
         # Start model warm-up early to reduce first-run transcription latency.
         logic_app.start_model_warmup()
