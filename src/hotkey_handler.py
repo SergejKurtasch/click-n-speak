@@ -81,8 +81,14 @@ class HotkeyHandler:
 
     def stop(self):
         if self.listener:
-            self.listener.stop()
+            listener = self.listener
             self.listener = None
+            listener.stop()
+            # pynput Listener is a non-daemon thread; join it so the main
+            # Python process can exit without hanging on thread cleanup.
+            listener.join(timeout=2.0)
+            if listener.is_alive():
+                log_error("Hotkey listener thread did not stop within 2s.")
 
     def restart(self) -> None:
         """Stop the current listener (if any) and start a fresh one."""

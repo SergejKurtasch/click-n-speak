@@ -909,15 +909,27 @@ class SVoiceRecApp:
 
     def stop(self):
         self.stop_worker.set()
-        # Stop the transcriber child process first so the worker thread can
-        # unblock from its blocking transcribe() call instead of waiting up to
-        # TRANSCRIBER_TIMEOUT_SECONDS (30s) for the child to respond.
+
+        # Stop the audio stream first — otherwise the recorder callback keeps
+        # firing and can re-enqueue work while we're trying to drain the worker.
+        if hasattr(self, "recorder") and self.recorder.recording:
+            try:
+                self.recorder.stop()
+            except Exception as e:
+                log_error(f"Recorder stop error: {e}")
+
+        # Stop the transcriber child process before joining the worker thread so
+        # the worker's blocking transcribe() call unblocks immediately instead of
+        # waiting up to TRANSCRIBER_TIMEOUT_SECONDS (30s) for a response.
         if hasattr(self, "transcriber"):
             self.transcriber.stop()
+
         if self.worker_thread is not None and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=5.0)
+
         if self.hotkey_handler:
             self.hotkey_handler.stop()
+
         self._stop_keep_alive_timer()
 
     # ── Keep-alive & Wake-from-sleep ───────────────────────────────────────
