@@ -310,10 +310,54 @@ try:
             if 0 <= idx < len(self._phrases):
                 _ts, text = self._phrases[idx]
                 copy_to_clipboard(text)
+                self._show_copied_tooltip()
+                # Close the menu after showing the tooltip; cancelTracking() is
+                # safe to call from within a menu-tracking action callback.
+                if self._ns_menu is not None:
+                    self._ns_menu.cancelTracking()
 
         def loadMoreClicked_(self, sender) -> None:
             self._page_count += 5
             self._do_rebuild()
+
+        @_objc.python_method
+        def _show_copied_tooltip(self) -> None:
+            from AppKit import (
+                NSPanel, NSTextField, NSFont, NSColor, NSEvent,
+                NSBackingStoreBuffered, NSFloatingWindowLevel, NSTextAlignmentCenter,
+            )
+            mouse = NSEvent.mouseLocation()
+            W, H = 84, 26
+            panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(mouse.x - W / 2, mouse.y + 14, W, H),
+                0,  # NSWindowStyleMaskBorderless
+                NSBackingStoreBuffered,
+                False,
+            )
+            panel.setLevel_(NSFloatingWindowLevel)
+            panel.setOpaque_(False)
+            panel.setBackgroundColor_(
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.12, 0.12, 0.86)
+            )
+            panel.setHasShadow_(True)
+            lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 3, W, H - 4))
+            lbl.setStringValue_("Copied")
+            lbl.setBezeled_(False)
+            lbl.setDrawsBackground_(False)
+            lbl.setEditable_(False)
+            lbl.setSelectable_(False)
+            lbl.setAlignment_(NSTextAlignmentCenter)
+            lbl.setTextColor_(NSColor.whiteColor())
+            lbl.setFont_(NSFont.boldSystemFontOfSize_(12))
+            panel.contentView().addSubview_(lbl)
+            panel.orderFront_(None)
+            self._copied_panel = panel
+            self.performSelector_withObject_afterDelay_("_dismissCopiedPanel:", None, 0.75)
+
+        def _dismissCopiedPanel_(self, _) -> None:
+            if getattr(self, "_copied_panel", None) is not None:
+                self._copied_panel.close()
+                self._copied_panel = None
 
     _HAVE_PHRASE_MENU = True
 
