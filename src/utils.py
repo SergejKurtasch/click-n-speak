@@ -39,8 +39,9 @@ def relaunch_app() -> bool:
     # Fork a helper that waits for this process to exit then opens a new instance.
     # `open -n` forces a new instance even if bundle is still in the LaunchServices DB.
     # start_new_session=True puts the helper in its own session so it survives our exit.
+    import shlex as _shlex
     subprocess.Popen(
-        ["sh", "-c", f'sleep 1 && open -n "{bundle}"'],
+        ["sh", "-c", f"sleep 1 && open -n {_shlex.quote(bundle)}"],
         start_new_session=True,
     )
     # Kill the entire process group (main process + all child processes such as the

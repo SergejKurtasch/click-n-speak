@@ -117,10 +117,19 @@ def main() -> None:
             _release_instance_lock()
 
         atexit.register(_cleanup_and_exit)
+
+        def _signal_exit(*_) -> None:
+            _cleanup_and_exit()
+            # Kill entire process group so child processes (transcriber) die with us.
+            # os.killpg covers what os._exit(0) misses: atexit is bypassed by both,
+            # but killpg propagates the kill to daemon multiprocessing children.
+            try:
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+            except Exception:
+                os._exit(0)
+
         for _sig in (signal.SIGTERM, signal.SIGINT):
-            # os._exit(0) after cleanup: skips thread wait so the process exits
-            # immediately, killing daemon child processes (transcriber) instantly.
-            signal.signal(_sig, lambda *_: (_cleanup_and_exit(), os._exit(0)))
+            signal.signal(_sig, _signal_exit)
 
         # Start model warm-up early to reduce first-run transcription latency.
         logic_app.start_model_warmup()
