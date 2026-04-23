@@ -21,7 +21,7 @@ _ICON_CACHED   = "\U0001f7e2"   # 🟢  — model is on disk, instant switch
 _ICON_DOWNLOAD = "\u2b07\ufe0f"  # ⬇️  — model needs to download
 
 from .log_analyzer import generate_terms_hint_from_history
-from .phrase_history import count_phrases, get_last_phrases
+from .phrase_history import get_last_phrases
 from .updater import check_for_update
 from .permissions import check_input_monitoring, open_input_monitoring_settings
 from .autostart import is_launch_at_login_enabled, set_launch_at_login
@@ -188,11 +188,142 @@ try:
             self._on_additional(lang, sender.state() == NSControlStateValueOn)
 
     _HAVE_LANG_MENU = True
+
+    class _PhraseMenuController(NSObject):
+        """Phrase history NSMenu with NSMenuItem.setView_() items so the menu
+        stays open when the user copies a phrase or taps '↓ Показать ещё'."""
+
+        _VIEW_W = 280
+        _ROW_H = 22
+        _HEADER_H = 18
+        _MARGIN = 14
+        _MAX_TITLE = 46
+
+        @_objc.python_method
+        def configure(self) -> None:
+            self._page_count: int = 5
+            self._phrases: list = []
+            self._ns_menu = None
+
+        @_objc.python_method
+        def build_ns_menu(self):
+            from AppKit import NSMenu
+            self._ns_menu = NSMenu.alloc().init()
+            self._ns_menu.setAutoenablesItems_(False)
+            self._do_rebuild()
+            return self._ns_menu
+
+        @_objc.python_method
+        def rebuild(self) -> None:
+            """Reset to page 1 and rebuild (called after a new phrase is saved)."""
+            self._page_count = 5
+            if self._ns_menu is not None:
+                self._do_rebuild()
+
+        @_objc.python_method
+        def _do_rebuild(self) -> None:
+            from AppKit import NSMenu, NSMenuItem, NSButton, NSTextField, NSFont, \
+                NSButtonTypeMomentaryLight, NSTextAlignmentLeft, NSTextAlignmentCenter
+
+            count = self._page_count
+            candidates = get_last_phrases(count + 1)
+            has_more = len(candidates) > count
+            phrases_oldest = candidates[-count:] if has_more else candidates
+            self._phrases = list(reversed(phrases_oldest))
+
+            self._ns_menu.removeAllItems()
+
+            self._ns_menu.addItem_(self._header_item("Нажмите на фразу, чтобы скопировать"))
+            self._ns_menu.addItem_(NSMenuItem.separatorItem())
+
+            if not self._phrases:
+                self._ns_menu.addItem_(self._header_item("Нет сохранённых фраз"))
+                return
+
+            for i, (_ts, text) in enumerate(self._phrases):
+                title = (text[:self._MAX_TITLE - 1] + "…") if len(text) > self._MAX_TITLE else text
+                self._ns_menu.addItem_(self._phrase_item(i, f"📋  {title}"))
+
+            if has_more:
+                self._ns_menu.addItem_(NSMenuItem.separatorItem())
+                self._ns_menu.addItem_(self._load_more_item())
+
+        @_objc.python_method
+        def _header_item(self, text: str):
+            from AppKit import NSMenuItem, NSTextField, NSFont
+            view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self._VIEW_W, self._HEADER_H))
+            lbl = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(self._MARGIN, 2, self._VIEW_W - 2 * self._MARGIN, self._HEADER_H - 4)
+            )
+            lbl.setStringValue_(text)
+            lbl.setBezeled_(False)
+            lbl.setDrawsBackground_(False)
+            lbl.setEditable_(False)
+            lbl.setSelectable_(False)
+            lbl.setFont_(NSFont.systemFontOfSize_(10))
+            view.addSubview_(lbl)
+            mi = NSMenuItem.alloc().init()
+            mi.setView_(view)
+            mi.setEnabled_(False)
+            return mi
+
+        @_objc.python_method
+        def _phrase_item(self, index: int, display_title: str):
+            from AppKit import NSMenuItem, NSButton, NSButtonTypeMomentaryLight, NSTextAlignmentLeft
+            view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self._VIEW_W, self._ROW_H))
+            btn = NSButton.alloc().initWithFrame_(
+                NSMakeRect(self._MARGIN, 1, self._VIEW_W - 2 * self._MARGIN, self._ROW_H - 2)
+            )
+            btn.setButtonType_(NSButtonTypeMomentaryLight)
+            btn.setTitle_(display_title)
+            btn.setBordered_(False)
+            btn.setAlignment_(NSTextAlignmentLeft)
+            btn.setTag_(index)
+            btn.setTarget_(self)
+            btn.setAction_("copyClicked:")
+            view.addSubview_(btn)
+            mi = NSMenuItem.alloc().init()
+            mi.setView_(view)
+            return mi
+
+        @_objc.python_method
+        def _load_more_item(self):
+            from AppKit import NSMenuItem, NSButton, NSButtonTypeMomentaryLight, NSTextAlignmentCenter
+            row_h = self._ROW_H + 6
+            view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self._VIEW_W, row_h))
+            btn = NSButton.alloc().initWithFrame_(
+                NSMakeRect(self._MARGIN, 3, self._VIEW_W - 2 * self._MARGIN, self._ROW_H)
+            )
+            btn.setButtonType_(NSButtonTypeMomentaryLight)
+            btn.setTitle_("↓   Показать ещё")
+            btn.setBordered_(True)
+            btn.setAlignment_(NSTextAlignmentCenter)
+            btn.setTarget_(self)
+            btn.setAction_("loadMoreClicked:")
+            view.addSubview_(btn)
+            mi = NSMenuItem.alloc().init()
+            mi.setView_(view)
+            return mi
+
+        def copyClicked_(self, sender) -> None:
+            idx = int(sender.tag())
+            if 0 <= idx < len(self._phrases):
+                _ts, text = self._phrases[idx]
+                copy_to_clipboard(text)
+
+        def loadMoreClicked_(self, sender) -> None:
+            self._page_count += 5
+            self._do_rebuild()
+
+    _HAVE_PHRASE_MENU = True
+
 except Exception as _lang_menu_exc:
     import logging as _logging
     _logging.getLogger(__name__).error("Language submenu unavailable: %s", _lang_menu_exc)
     _LangMenuController = None  # type: ignore
     _HAVE_LANG_MENU = False
+    _PhraseMenuController = None  # type: ignore
+    _HAVE_PHRASE_MENU = False
 
 
 def _prompt_restart(reason: str) -> None:
@@ -229,7 +360,8 @@ class ClickNSpeakApp(rumps.App):
         self._input_monitoring_item = None  # set in setup_menu
         self._wizard_pending = False
         self._lang_menu_controller: "_LangMenuController | None" = None
-        self._phrases_page_count: int = 5
+        self._phrase_menu_controller: "_PhraseMenuController | None" = None
+        self._phrases_page_count: int = 5  # used only in the rumps fallback path
 
         # Build Menu
         self.setup_menu()
@@ -510,7 +642,18 @@ class ClickNSpeakApp(rumps.App):
         # Phrase history
         self._last_phrases_parent = rumps.MenuItem("Last Phrases")
         self.menu.add(self._last_phrases_parent)
-        self._refresh_last_phrases_submenu()
+        if _HAVE_PHRASE_MENU:
+            try:
+                self._phrase_menu_controller = _PhraseMenuController.alloc().init()
+                self._phrase_menu_controller.configure()
+                ns_submenu = self._phrase_menu_controller.build_ns_menu()
+                self._last_phrases_parent._menuitem.setSubmenu_(ns_submenu)
+            except Exception as exc:
+                log_error(f"Phrase history submenu build failed: {exc}")
+                self._phrase_menu_controller = None
+                self._refresh_last_phrases_submenu()
+        else:
+            self._refresh_last_phrases_submenu()
 
         self.menu.add(rumps.MenuItem("🎵 Transcribe Audio File...", callback=self.transcribe_audio_file))
 
@@ -658,7 +801,9 @@ class ClickNSpeakApp(rumps.App):
         self.config["initial_prompt"] = final_prompt
 
     def _refresh_last_phrases_submenu(self) -> None:
-        """Rebuild the phrase history submenu showing newest first with pagination."""
+        """Rebuild the phrase history submenu (rumps fallback only — native path uses _PhraseMenuController)."""
+        if getattr(self, "_phrase_menu_controller", None) is not None:
+            return
         parent = self._last_phrases_parent
         for key in list(parent.keys()):
             del parent[key]
@@ -700,6 +845,9 @@ class ClickNSpeakApp(rumps.App):
 
     def refresh_last_phrases_submenu(self) -> None:
         """Public method — resets to the first page and rebuilds (called after a new phrase is saved)."""
+        if getattr(self, "_phrase_menu_controller", None) is not None:
+            self._phrase_menu_controller.rebuild()
+            return
         self._phrases_page_count = 5
         self._refresh_last_phrases_submenu()
 
