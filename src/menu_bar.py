@@ -664,7 +664,10 @@ class ClickNSpeakApp(rumps.App):
             del parent[key]
 
         count = self._phrases_page_count
-        phrases = get_last_phrases(count)
+        # Request one extra to detect if more exist — avoids a second file read.
+        candidates = get_last_phrases(count + 1)
+        has_more = len(candidates) > count
+        phrases = candidates[-count:] if has_more else candidates
 
         # Hint header (non-clickable, shown grayed out by macOS)
         parent.add(rumps.MenuItem("Нажмите на фразу, чтобы скопировать", callback=None))
@@ -675,15 +678,18 @@ class ClickNSpeakApp(rumps.App):
             return
 
         max_title_len = 56
-        for _ts, text in reversed(phrases):
+        for i, (_ts, text) in enumerate(reversed(phrases)):
             title = (text[: max_title_len - 1] + "…") if len(text) > max_title_len else text
             if not title:
                 title = "(empty)"
+            # Append zero-width spaces so identical display titles remain unique rumps keys,
+            # preventing NSMenuItem leaks when the same phrase appears multiple times.
+            unique_title = f"📋  {title}" + "​" * i
             parent.add(
-                rumps.MenuItem(f"📋  {title}", callback=lambda s, t=text: copy_to_clipboard(t))
+                rumps.MenuItem(unique_title, callback=lambda s, t=text: copy_to_clipboard(t))
             )
 
-        if count_phrases() > count:
+        if has_more:
             parent.add(None)
             parent.add(rumps.MenuItem("↓  Показать ещё", callback=self._show_more_phrases))
 
