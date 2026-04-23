@@ -23,6 +23,18 @@ def append_phrase(text: str) -> None:
         log_error(f"Failed to append phrase to {path}: {e}")
 
 
+def count_phrases() -> int:
+    """Return total number of phrases stored in the history file."""
+    path = get_phrases_file_path()
+    if not path.exists():
+        return 0
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
 def get_last_phrases(n: int) -> List[Tuple[str, str]]:
     """Return up to n last phrases as (timestamp_str, text), oldest first."""
     path = get_phrases_file_path()

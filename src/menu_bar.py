@@ -21,7 +21,7 @@ _ICON_CACHED   = "\U0001f7e2"   # 🟢  — model is on disk, instant switch
 _ICON_DOWNLOAD = "\u2b07\ufe0f"  # ⬇️  — model needs to download
 
 from .log_analyzer import generate_terms_hint_from_history
-from .phrase_history import get_last_phrases
+from .phrase_history import count_phrases, get_last_phrases
 from .updater import check_for_update
 from .permissions import check_input_monitoring, open_input_monitoring_settings
 from .autostart import is_launch_at_login_enabled, set_launch_at_login
@@ -229,6 +229,7 @@ class ClickNSpeakApp(rumps.App):
         self._input_monitoring_item = None  # set in setup_menu
         self._wizard_pending = False
         self._lang_menu_controller: "_LangMenuController | None" = None
+        self._phrases_page_count: int = 5
 
         # Build Menu
         self.setup_menu()
@@ -506,8 +507,8 @@ class ClickNSpeakApp(rumps.App):
         prompt_menu.add(rumps.MenuItem("Revert to Previous", callback=self.revert_initial_prompt))
         self.menu.add(prompt_menu)
 
-        # Last 5 phrases
-        self._last_phrases_parent = rumps.MenuItem("Last 5 Phrases")
+        # Phrase history
+        self._last_phrases_parent = rumps.MenuItem("Last Phrases")
         self.menu.add(self._last_phrases_parent)
         self._refresh_last_phrases_submenu()
 
@@ -657,25 +658,43 @@ class ClickNSpeakApp(rumps.App):
         self.config["initial_prompt"] = final_prompt
 
     def _refresh_last_phrases_submenu(self) -> None:
-        """Rebuild the 'Last 5 phrases' submenu from the phrase history file."""
+        """Rebuild the phrase history submenu showing newest first with pagination."""
         parent = self._last_phrases_parent
         for key in list(parent.keys()):
             del parent[key]
-        phrases = get_last_phrases(5)
+
+        count = self._phrases_page_count
+        phrases = get_last_phrases(count)
+
+        # Hint header (non-clickable, shown grayed out by macOS)
+        parent.add(rumps.MenuItem("Нажмите на фразу, чтобы скопировать", callback=None))
+        parent.add(None)
+
         if not phrases:
-            parent.add(rumps.MenuItem("No phrases yet", callback=None))
+            parent.add(rumps.MenuItem("Нет сохранённых фраз", callback=None))
             return
+
         max_title_len = 56
-        for _ts, text in phrases:
+        for _ts, text in reversed(phrases):
             title = (text[: max_title_len - 1] + "…") if len(text) > max_title_len else text
             if not title:
                 title = "(empty)"
             parent.add(
-                rumps.MenuItem(f"📋 {title}", callback=lambda s, t=text: copy_to_clipboard(t))
+                rumps.MenuItem(f"📋  {title}", callback=lambda s, t=text: copy_to_clipboard(t))
             )
 
+        if count_phrases() > count:
+            parent.add(None)
+            parent.add(rumps.MenuItem("↓  Показать ещё", callback=self._show_more_phrases))
+
+    def _show_more_phrases(self, _) -> None:
+        """Load the next 5 phrases and rebuild the submenu."""
+        self._phrases_page_count += 5
+        self._refresh_last_phrases_submenu()
+
     def refresh_last_phrases_submenu(self) -> None:
-        """Public method for app to refresh the Last 5 phrases submenu after a new phrase is saved."""
+        """Public method — resets to the first page and rebuilds (called after a new phrase is saved)."""
+        self._phrases_page_count = 5
         self._refresh_last_phrases_submenu()
 
     def open_config(self, _: rumps.MenuItem) -> None:
