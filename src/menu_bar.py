@@ -24,10 +24,10 @@ from .log_analyzer import generate_terms_hint_from_history
 from .phrase_history import get_last_phrases
 from .updater import check_for_update
 from .permissions import check_input_monitoring, open_input_monitoring_settings
+from .autostart import is_launch_at_login_enabled, set_launch_at_login
 from .utils import (
     build_initial_prompt,
     copy_to_clipboard,
-    escape_applescript_string,
     get_config_path,
     get_log_file_path,
     get_menu_icon_path,
@@ -519,7 +519,7 @@ class ClickNSpeakApp(rumps.App):
 
         # Autostart
         autostart_item = rumps.MenuItem("🚀 Launch at Login", callback=self.toggle_autostart)
-        autostart_item.state = 1 if self.config.get("autostart", False) else 0
+        autostart_item.state = 1 if is_launch_at_login_enabled() else 0
         self.menu.add(autostart_item)
 
         # Advanced submenu
@@ -851,36 +851,16 @@ class ClickNSpeakApp(rumps.App):
     def toggle_autostart(self, sender):
         current_state = sender.state == 1
         new_state = not current_state
-
-        # Get the path to the .app bundle: launcher sets CLICK_N_SPEAK_APP; py2app sets sys.frozen
-        app_path = os.environ.get("CLICK_N_SPEAK_APP")
-        if not app_path:
-            if getattr(sys, "frozen", False) == "macosx_app":
-                app_path = os.path.abspath(os.path.join(sys.executable, "../../.."))
-            else:
-                app_path = os.path.abspath(sys.argv[0])
-
-        app_name = "Click-n-speak"
-        safe_path = escape_applescript_string(app_path)
-        safe_name = escape_applescript_string(app_name)
-
         try:
+            set_launch_at_login(new_state)
+            sender.state = 1 if new_state else 0
             if new_state:
-                cmd = f'tell application "System Events" to make login item at end with properties {{path:"{safe_path}", name:"{safe_name}", hidden:false}}'
-                subprocess.run(["osascript", "-e", cmd], check=True)
                 self.main_app.notify("Автозапуск", "Приложение будет запускаться при входе в систему.")
             else:
-                cmd = f'tell application "System Events" to delete login item "{safe_name}"'
-                subprocess.run(["osascript", "-e", cmd], check=True)
-                self.main_app.notify("Автозапуск", "Автозапуск отключен.")
-
-            sender.state = 1 if new_state else 0
-            self.config["autostart"] = new_state
-            self.save_config()
-
+                self.main_app.notify("Автозапуск", "Автозапуск отключён.")
         except Exception as e:
             log_error(f"Error toggling autostart: {e}")
-            self.main_app.notify("Ошибка", "Не удалось обновить объекты входа.")
+            self.main_app.notify("Ошибка", "Не удалось изменить настройку автозапуска.")
 
     def restart_application(self, sender=None):
         log_info("Restart requested — cleaning up before relaunch.")
