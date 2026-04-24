@@ -386,17 +386,135 @@ def save_config_to_disk(config: dict) -> None:
         log_error(f"Error saving config: {e}")
 
 
+# Language hints passed to Whisper as initial_prompt prefix.
+# Defined here (not menu_bar.py) so build_initial_prompt can use them without circular imports.
+LANG_PROMPTS: dict[str, str] = {
+    "ru": "Русский язык.",
+    "en": "English language.",
+    "de": "Deutscher Text.",
+    "es": "Texto en español.",
+    "fr": "Texte en français.",
+}
+
+# Normalised set for filtering language-hint phrases during term parsing.
+_LANG_HINT_LOWER: set[str] = {v.lower().rstrip(". ") for v in LANG_PROMPTS.values()}
+
+# Whisper's prompt window is ~224 tokens (~900 chars). We leave ~64 chars for the
+# per-chunk instruction prefix added in app.py, so cap terms at 500 chars.
+_MAX_PROMPT_CHARS = 500
+
+
+def parse_prompt_terms(text: str) -> list[str]:
+    """Split a comma- or newline-separated string into individual terms.
+
+    Strips whitespace and trailing punctuation from each item; skips blank tokens
+    and raw language-hint phrases (e.g. 'Русский язык.').
+    """
+    import re
+    result: list[str] = []
+    seen_lower: set[str] = set()
+    for part in re.split(r"[,\n]+", text):
+        t = part.strip(" .")
+        if not t:
+            continue
+        key = t.lower()
+        if key in _LANG_HINT_LOWER:
+            continue
+        if key not in seen_lower:
+            seen_lower.add(key)
+            result.append(t)
+    return result
+
+
+def deduplicate_prompt_terms(terms: list[str]) -> list[str]:
+    """Deduplicate a list of terms case-insensitively, preserving first occurrence."""
+    seen_lower: set[str] = set()
+    result: list[str] = []
+    for term in terms:
+        key = term.lower().strip()
+        if key and key not in seen_lower:
+            seen_lower.add(key)
+            result.append(term)
+    return result
+
+
 def build_initial_prompt(config: dict) -> str:
-    """Builds the effective initial_prompt string from config."""
-    language_hint = str(config.get("language_hint", "")).strip()
-    terms_hint = str(config.get("terms_hint", "")).strip()
-    if language_hint and terms_hint:
-        return f"{language_hint} {terms_hint}".strip()
-    if language_hint:
-        return language_hint
-    if terms_hint:
-        return terms_hint
-    return str(config.get("initial_prompt", "")).strip()
+    """Build the effective Whisper initial_prompt from v2 schema config.
+
+    Priority: language hints for all active languages → user_terms → auto_terms.
+    Hard-capped at _MAX_PROMPT_CHARS to keep within Whisper's 224-token prompt window.
+    Falls back to legacy 'initial_prompt' string if v2 keys are absent (pre-migration).
+    """
+    primary = get_primary_language(config)
+    additional = list(config.get("additional_languages") or [])
+
+    # Language hints for every active language.
+    all_langs = [primary] + [l for l in additional if l != primary]
+    lang_hint = " ".join(LANG_PROMPTS[l] for l in all_langs if l in LANG_PROMPTS)
+
+    # v2: per-language term lists.
+    user_terms: dict = config.get("user_terms") or {}
+    auto_terms: dict = config.get("auto_terms") or {}
+
+    if user_terms or auto_terms:
+        terms: list[str] = list(user_terms.get(primary, []))
+        terms.extend(auto_terms.get(primary, []))
+        terms_str = ", ".join(t for t in terms if str(t).strip())
+        result = f"{lang_hint} {terms_str}".strip() if terms_str else lang_hint
+    else:
+        # Pre-migration fallback: use stored initial_prompt directly.
+        legacy = str(config.get("initial_prompt", "")).strip()
+        result = f"{lang_hint} {legacy}".strip() if legacy else lang_hint
+
+    if len(result) > _MAX_PROMPT_CHARS:
+        truncated = result[:_MAX_PROMPT_CHARS]
+        cut = truncated.rfind(",")
+        # Only cut at a comma that is well past the language-hint prefix.
+        result = truncated[:cut] if cut > len(lang_hint) + 10 else truncated
+
+    return result.strip()
+
+
+def migrate_config_to_v2(config: dict) -> dict:
+    """One-time migration from v1 schema to v2 (user_terms / auto_terms).
+
+    Idempotent: returns unchanged dict when schema_version >= 2.
+    Parses comma-separated terms from custom_prompts[lang] or the legacy
+    initial_prompt field and stores them in user_terms[lang], removing all
+    legacy keys (custom_prompts, previous_prompts, previous_initial_prompt,
+    language_hint, terms_hint).
+    """
+    if config.get("schema_version", 1) >= 2:
+        return config
+
+    primary = get_primary_language(config)
+    custom_prompts: dict = config.get("custom_prompts") or {}
+    candidate_langs: set[str] = set(custom_prompts.keys())
+    if config.get("initial_prompt"):
+        candidate_langs.add(primary)
+
+    user_terms: dict[str, list[str]] = {}
+    for lang in candidate_langs:
+        source = custom_prompts.get(lang) or (config.get("initial_prompt", "") if lang == primary else "")
+        if source:
+            terms = deduplicate_prompt_terms(parse_prompt_terms(source))
+            if terms:
+                user_terms[lang] = terms
+
+    config["schema_version"] = 2
+    config["user_terms"] = user_terms
+    config.setdefault("auto_terms", {})
+    config.setdefault("prompt_snapshots", {})
+
+    # Remove all v1 keys.
+    for key in ("custom_prompts", "previous_prompts", "previous_initial_prompt",
+                "language_hint", "terms_hint"):
+        config.pop(key, None)
+
+    # Refresh the cached initial_prompt field.
+    config["initial_prompt"] = build_initial_prompt(config)
+
+    return config
 
 
 def _run_notification(script: str) -> None:

@@ -19,12 +19,14 @@ from .dataset_logger import append_to_dataset
 from .ai_editor import AiEditor, DEFAULT_MODEL_NAME
 from .transcriber import TranscriberProcessWrapper
 from .utils import (
+    build_initial_prompt,
     get_allowed_languages,
     get_primary_language,
     get_ui_strings,
     log_error,
     log_exception,
     log_info,
+    migrate_config_to_v2,
     save_config_to_disk,
     send_notification,
 )
@@ -218,6 +220,7 @@ class SVoiceRecApp:
             self.load_config_data({})
 
     def load_config_data(self, data):
+        data = migrate_config_to_v2(data)
         self.config = data
         if hasattr(self, "recorder"):
             self.update_recorder_settings()
@@ -554,7 +557,7 @@ class SVoiceRecApp:
                     "Текст содержит русские и английские слова. "
                     "Mixed Russian and English terminology: API, bug, feature, survival."
                 )
-                user_prompt = str(self.config.get("initial_prompt", ""))
+                user_prompt = build_initial_prompt(self.config)
                 context = instruction + (user_prompt or default_prompt)
 
             allowed_languages = get_allowed_languages(self.config)
@@ -847,7 +850,7 @@ class SVoiceRecApp:
         _cycle_id = self._file_cycle_id
         try:
             allowed_languages = get_allowed_languages(self.config)
-            context = str(self.config.get("initial_prompt", ""))
+            context = build_initial_prompt(self.config)
 
             # Notify the user if the file is taking longer than 12 seconds.
             def _file_still_working():

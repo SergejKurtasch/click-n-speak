@@ -19,7 +19,6 @@ WHISPER_MODELS = [
 
 _ICON_CACHED = "🟢"  # 🟢  — model is on disk, instant switch
 
-from .log_analyzer import generate_terms_hint_from_history
 from .phrase_history import get_last_phrases
 from .updater import check_for_update
 from .permissions import check_input_monitoring, open_input_monitoring_settings
@@ -27,6 +26,7 @@ from .autostart import is_launch_at_login_enabled, set_launch_at_login
 from .utils import (
     build_initial_prompt,
     copy_to_clipboard,
+    deduplicate_prompt_terms,
     get_config_path,
     get_log_file_path,
     get_menu_icon_path,
@@ -35,9 +35,11 @@ from .utils import (
     get_primary_language,
     get_ui_strings,
     is_accessibility_trusted,
+    LANG_PROMPTS,
     log_error,
     log_info,
     open_accessibility_settings,
+    parse_prompt_terms,
     relaunch_app,
     save_config_to_disk,
     send_notification,
@@ -56,14 +58,7 @@ LANG_LABELS = {
     "es": "ES — Spanish",
     "fr": "FR — French",
 }
-# Whisper initial-prompt hints — shared by LanguageSelectionPanel and _update_language_hint_and_prompt
-LANG_PROMPTS = {
-    "ru": "Русский язык.",
-    "en": "English language.",
-    "de": "Deutscher Text.",
-    "es": "Texto en español.",
-    "fr": "Texte en français.",
-}
+# LANG_PROMPTS is now defined in utils.py and imported above.
 
 try:
     from Foundation import NSObject
@@ -437,24 +432,8 @@ class ClickNSpeakApp(rumps.App):
         self._start_model_cache_check()
 
     def _migrate_old_prompt(self):
-        """Migrates a single initial_prompt.txt into custom_prompts mapping on first launch."""
-        custom_dict = self.config.get("custom_prompts")
-        if custom_dict is None:
-            old_path = get_config_path().parent / "initial_prompt.txt"
-            lang = get_primary_language(self.config)
-            
-            custom_dict = {}
-            if old_path.exists():
-                try:
-                    with open(old_path, "r", encoding="utf-8") as f:
-                        old_txt = f.read().strip()
-                    if old_txt:
-                        custom_dict[lang] = old_txt
-                        self.config["initial_prompt"] = old_txt
-                except Exception:
-                    pass
-            self.config["custom_prompts"] = custom_dict
-            self.save_config()
+        # v1→v2 migration is handled by migrate_config_to_v2 in app.load_config_data.
+        pass
 
     def _get_prompt_path(self, lang: str = None):
         """Returns the absolute path to initial_prompt_{lang}.txt."""
@@ -481,37 +460,38 @@ class ClickNSpeakApp(rumps.App):
 
     @rumps.timer(1.0)
     def _watch_prompt_file(self, _):
-        """Watches initial_prompt_{lang}.txt for manual edits by the user."""
+        """Watches initial_prompt_{lang}.txt for manual edits; updates user_terms on change."""
         lang = get_primary_language(self.config)
         prompt_path = self._get_prompt_path(lang)
         if not prompt_path.exists():
             return
-            
+
         try:
             mtime = prompt_path.stat().st_mtime
             if getattr(self, "_last_prompt_mtime", 0.0) == 0.0 or getattr(self, "_last_prompt_path", None) != prompt_path:
                 self._last_prompt_mtime = mtime
                 self._last_prompt_path = prompt_path
                 return
-                
+
             if mtime > self._last_prompt_mtime:
                 self._last_prompt_mtime = mtime
                 with open(prompt_path, "r", encoding="utf-8") as f:
-                    new_prompt = f.read().strip()
-                
-                custom_dict = self.config.get("custom_prompts", {})
-                previous = custom_dict.get(lang, "")
-                
-                if previous != new_prompt:
-                    if previous:
-                        prev_dict = self.config.get("previous_prompts", {})
-                        prev_dict[lang] = previous
-                        self.config["previous_prompts"] = prev_dict
-                        
-                    custom_dict[lang] = new_prompt
-                    self.config["custom_prompts"] = custom_dict
-                    self.config["initial_prompt"] = new_prompt
-                    
+                    new_text = f.read().strip()
+
+                user_terms = dict(self.config.get("user_terms") or {})
+                previous_terms = list(user_terms.get(lang, []))
+                new_terms = deduplicate_prompt_terms(parse_prompt_terms(new_text))
+
+                if previous_terms != new_terms:
+                    if previous_terms:
+                        snapshots = dict(self.config.get("prompt_snapshots", {}))
+                        snapshots[lang] = previous_terms
+                        self.config["prompt_snapshots"] = snapshots
+
+                    user_terms[lang] = new_terms
+                    self.config["user_terms"] = user_terms
+                    self.config["initial_prompt"] = build_initial_prompt(self.config)
+
                     self.save_config()
                     self.main_app.load_config_data(self.config)
                     log_info(f"Initial prompt updated manually for {lang.upper()}.")
@@ -855,33 +835,27 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.update_config(self.config)
 
     def _update_language_hint_and_prompt(self):
-        """Setup initial_prompt: use user's custom text if exists, else generate a fresh auto-hint."""
-        primary = get_primary_language(self.config)
-        additional = self.config.get("additional_languages") or []
+        """Rebuild initial_prompt after a language change.
 
-        custom_dict = self.config.get("custom_prompts", {})
-        if primary in custom_dict and custom_dict[primary].strip():
-            # Apply user's custom prompt for this language
-            final_prompt = custom_dict[primary].strip()
-        else:
-            # Build and write a new base auto-hint for this language
-            main_prompt = LANG_PROMPTS.get(primary, "")
-            extra_prompts_list = [LANG_PROMPTS.get(str(l), "") for l in additional if LANG_PROMPTS.get(str(l))]
-            extra_prompts = " ".join(extra_prompts_list)
-            final_prompt = f"{main_prompt} {extra_prompts}".strip()
-            
-            # Save it so it appears correctly if the user clicks "Edit Initial Prompt"
-            custom_dict[primary] = final_prompt
-            self.config["custom_prompts"] = custom_dict
-            
-            try:
-                prompt_path = self._get_prompt_path(primary)
-                with open(prompt_path, "w", encoding="utf-8") as f:
-                    f.write(final_prompt)
-            except Exception as e:
-                log_error(f"Failed to auto-write warmup prompt for {primary}: {e}")
-            
-        self.config["initial_prompt"] = final_prompt
+        Ensures user_terms[primary] exists (creates empty list if needed) so the
+        prompt file and menu always have a valid entry for the active language.
+        Language hints are embedded by build_initial_prompt automatically.
+        """
+        primary = get_primary_language(self.config)
+        user_terms = dict(self.config.get("user_terms") or {})
+        user_terms.setdefault(primary, [])
+        self.config["user_terms"] = user_terms
+
+        self.config["initial_prompt"] = build_initial_prompt(self.config)
+
+        # Sync the .txt file so "Edit..." shows the current state.
+        try:
+            terms_list = user_terms.get(primary, [])
+            prompt_path = self._get_prompt_path(primary)
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(", ".join(terms_list))
+        except Exception as e:
+            log_error(f"Failed to write prompt file for {primary}: {e}")
 
     def _refresh_last_phrases_submenu(self) -> None:
         """Rebuild the phrase history submenu (rumps fallback only — native path uses _PhraseMenuController)."""
@@ -960,14 +934,20 @@ class ClickNSpeakApp(rumps.App):
         self.setup_menu()
 
     def edit_initial_prompt(self, _: rumps.MenuItem) -> None:
-        """Opens the language-specific initial prompt in a text editor."""
+        """Opens the language-specific term list in a text editor.
+
+        The file contains only user_terms (comma-separated), not the language-hint
+        prefix that Whisper sees — those are added automatically by build_initial_prompt.
+        """
         lang = get_primary_language(self.config)
-        current_prompt = str(self.config.get("initial_prompt", ""))
-            
+        user_terms = self.config.get("user_terms") or {}
+        terms_list = list(user_terms.get(lang, []))
+        file_content = ", ".join(terms_list)
+
         prompt_path = self._get_prompt_path(lang)
         try:
             with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(current_prompt)
+                f.write(file_content)
             self._last_prompt_mtime = prompt_path.stat().st_mtime
             self._last_prompt_path = prompt_path
             subprocess.run(["open", "-t", str(prompt_path)], check=False)
@@ -975,63 +955,75 @@ class ClickNSpeakApp(rumps.App):
             log_error(f"Failed to open initial prompt for editing: {e}")
 
     def update_initial_prompt_from_history(self, _: rumps.MenuItem) -> None:
-        """Builds a new initial prompt from recent phrase history and applies it."""
-        terms_hint = generate_terms_hint_from_history()
-        if not terms_hint:
-            self.main_app.notify("Настройки", "Не удалось сгенерировать подсказки из истории.")
+        """Extract frequent terms from phrase history and merge into user_terms[lang]."""
+        from .log_analyzer import get_frequent_terms
+        en_terms, ru_phrases = get_frequent_terms()
+        candidates = en_terms + ru_phrases
+        if not candidates:
+            self.main_app.notify("Настройки", "Не удалось извлечь термины из истории.")
             return
 
         lang = get_primary_language(self.config)
-        custom_dict = self.config.get("custom_prompts", {})
-        previous = custom_dict.get(lang, "")
-        
-        current_prompt = str(self.config.get("initial_prompt", "")).strip()
-        new_prompt = f"{current_prompt}\n{terms_hint}".strip()
-        
-        if previous:
-            prev_dict = self.config.get("previous_prompts", {})
-            prev_dict[lang] = previous
-            self.config["previous_prompts"] = prev_dict
+        user_terms = dict(self.config.get("user_terms") or {})
+        current: list[str] = list(user_terms.get(lang, []))
+        current_lower: set[str] = {t.lower() for t in current}
 
-        custom_dict[lang] = new_prompt
-        self.config["custom_prompts"] = custom_dict
-        self.config["initial_prompt"] = new_prompt
-        
+        added: list[str] = []
+        for term in candidates:
+            if term.lower() not in current_lower:
+                current.append(term)
+                current_lower.add(term.lower())
+                added.append(term)
+
+        if not added:
+            self.main_app.notify("Настройки", "Новых терминов не найдено.")
+            return
+
+        # Snapshot current state for Revert.
+        snapshots = dict(self.config.get("prompt_snapshots", {}))
+        snapshots[lang] = list(user_terms.get(lang, []))
+        self.config["prompt_snapshots"] = snapshots
+
+        user_terms[lang] = current
+        self.config["user_terms"] = user_terms
+        self.config["initial_prompt"] = build_initial_prompt(self.config)
+
         prompt_path = self._get_prompt_path(lang)
         try:
             with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(new_prompt)
+                f.write(", ".join(current))
         except Exception:
             pass
 
         self.save_config()
         self.main_app.load_config_data(self.config)
-        self.main_app.notify("Настройки", f"Термины добавлены для {lang.upper()}.")
+        label = ", ".join(added[:5]) + ("…" if len(added) > 5 else "")
+        self.main_app.notify("Настройки", f"Добавлено для {lang.upper()}: {label}")
 
     def revert_initial_prompt(self, _: rumps.MenuItem) -> None:
-        """Reverts initial_prompt to the previous version if available."""
+        """Swap user_terms[lang] with prompt_snapshots[lang] (one-step undo)."""
         lang = get_primary_language(self.config)
-        previous_prompts = self.config.get("previous_prompts", {})
-        prev = previous_prompts.get(lang, "")
-        
-        if not prev:
+        snapshots = dict(self.config.get("prompt_snapshots", {}))
+        prev_terms = snapshots.get(lang)
+
+        if not prev_terms:
             self.main_app.notify("Настройки", f"Нет предыдущей версии подсказки для {lang.upper()}.")
             return
 
-        custom_dict = self.config.get("custom_prompts", {})
-        current = custom_dict.get(lang, "")
-        
-        custom_dict[lang] = prev
-        previous_prompts[lang] = current
-        
-        self.config["custom_prompts"] = custom_dict
-        self.config["previous_prompts"] = previous_prompts
-        self.config["initial_prompt"] = prev
-        
+        user_terms = dict(self.config.get("user_terms") or {})
+        current_terms = list(user_terms.get(lang, []))
+
+        user_terms[lang] = list(prev_terms)
+        snapshots[lang] = current_terms
+
+        self.config["user_terms"] = user_terms
+        self.config["prompt_snapshots"] = snapshots
+        self.config["initial_prompt"] = build_initial_prompt(self.config)
+
         prompt_path = self._get_prompt_path(lang)
         try:
             with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(prev)
+                f.write(", ".join(prev_terms))
         except Exception:
             pass
 
