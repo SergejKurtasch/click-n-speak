@@ -215,12 +215,26 @@ class TestShortFinalChunkDiscarded(unittest.TestCase):
         mock_call.assert_not_called()
 
     @patch("src.transcriber._call_mlx_transcribe")
-    def test_final_chunk_at_min_samples_is_transcribed(self, mock_call):
+    def test_final_chunk_at_min_samples_is_skipped(self, mock_call):
+        """Final chunk at exactly MIN_FINAL_CHUNK_SAMPLES must be skipped (boundary fix: <= not <)."""
+        from src.transcriber import WhisperTranscriber, MIN_FINAL_CHUNK_SAMPLES
+
+        transcriber = WhisperTranscriber(model_name="fake/model")
+        audio = np.zeros(MIN_FINAL_CHUNK_SAMPLES, dtype=np.float32)
+
+        result = transcriber.transcribe(audio, is_final_chunk=True)
+
+        self.assertEqual(result, "")
+        mock_call.assert_not_called()
+
+    @patch("src.transcriber._call_mlx_transcribe")
+    def test_final_chunk_one_above_min_is_transcribed(self, mock_call):
+        """Final chunk one sample above MIN must reach Whisper."""
         from src.transcriber import WhisperTranscriber, MIN_FINAL_CHUNK_SAMPLES
 
         mock_call.return_value = {"text": "нормальная речь", "language": "ru"}
         transcriber = WhisperTranscriber(model_name="fake/model")
-        audio = np.zeros(MIN_FINAL_CHUNK_SAMPLES, dtype=np.float32)
+        audio = np.zeros(MIN_FINAL_CHUNK_SAMPLES + 1, dtype=np.float32)
 
         result = transcriber.transcribe(audio, is_final_chunk=True)
 

@@ -29,14 +29,24 @@ def _has_consecutive_word_repetition(text: str, min_count: int) -> bool:
 
 @patch("src.transcriber._call_mlx_transcribe")
 def test_skip_tiny_final_chunk(mock_call):
-    """Final chunks shorter than MIN_FINAL_CHUNK_SAMPLES should be skipped."""
+    """Final chunks at or below MIN_FINAL_CHUNK_SAMPLES should be skipped."""
     with patch("src.transcriber.log_info"):
         transcriber = WhisperTranscriber(model_name="dummy")
-        # 0.2s at 16kHz = 3200 samples — below the threshold
+        # 0.2s at 16kHz = 3200 samples — well below the 0.5s threshold
         tiny_audio = np.zeros(3200, dtype=np.float32)
         result = transcriber.transcribe(tiny_audio, is_final_chunk=True)
         assert result == ""
-        # mlx_whisper should NOT have been called
+        mock_call.assert_not_called()
+
+
+@patch("src.transcriber._call_mlx_transcribe")
+def test_skip_final_chunk_at_exact_boundary(mock_call):
+    """Final chunk exactly at MIN_FINAL_CHUNK_SAMPLES (<=) must also be skipped."""
+    with patch("src.transcriber.log_info"):
+        transcriber = WhisperTranscriber(model_name="dummy")
+        boundary_audio = np.zeros(MIN_FINAL_CHUNK_SAMPLES, dtype=np.float32)
+        result = transcriber.transcribe(boundary_audio, is_final_chunk=True)
+        assert result == ""
         mock_call.assert_not_called()
 
 
@@ -46,8 +56,8 @@ def test_normal_final_chunk_not_skipped(mock_call):
     mock_call.return_value = {"text": "Hello world", "language": "en"}
     with patch("src.transcriber.log_info"):
         transcriber = WhisperTranscriber(model_name="dummy")
-        # 1s at 16kHz = 16000 samples — above the threshold
-        normal_audio = np.zeros(16000, dtype=np.float32)
+        # MIN + 1 sample — just above the threshold
+        normal_audio = np.zeros(MIN_FINAL_CHUNK_SAMPLES + 1, dtype=np.float32)
         result = transcriber.transcribe(
             normal_audio, allowed_languages=["en"], is_final_chunk=True
         )
@@ -57,17 +67,85 @@ def test_normal_final_chunk_not_skipped(mock_call):
 
 @patch("src.transcriber._call_mlx_transcribe")
 def test_non_final_tiny_chunk_not_skipped(mock_call):
-    """Non-final tiny chunks should still be processed (the skip only applies to final chunks)."""
+    """Non-final tiny chunks with speech go through Whisper (MIN check is final-only)."""
     mock_call.return_value = {"text": "word", "language": "en"}
     with patch("src.transcriber.log_info"):
         transcriber = WhisperTranscriber(model_name="dummy")
-        tiny_audio = np.zeros(3200, dtype=np.float32)
+        # 0.2s with speech-level amplitude so RMS pre-filter doesn't trigger
+        speech_audio = np.full(3200, 0.1, dtype=np.float32)
         result = transcriber.transcribe(
-            tiny_audio, allowed_languages=["en"], is_final_chunk=False
+            speech_audio, allowed_languages=["en"], is_final_chunk=False
         )
-        # Not skipped because is_final_chunk=False
         assert result == "word"
         mock_call.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Fix 6: RMS pre-filter for silent short non-final chunks
+# ---------------------------------------------------------------------------
+
+
+@patch("src.transcriber._call_mlx_transcribe")
+def test_silent_short_chunk_skipped(mock_call):
+    """A short (<3s) non-final chunk with near-zero RMS must be skipped before Whisper."""
+    with patch("src.transcriber.log_info"):
+        transcriber = WhisperTranscriber(model_name="dummy")
+        silent_audio = np.zeros(16000, dtype=np.float32)  # 1s of silence
+        result = transcriber.transcribe(silent_audio, is_final_chunk=False)
+        assert result == ""
+        mock_call.assert_not_called()
+
+
+@patch("src.transcriber._call_mlx_transcribe")
+def test_speech_short_chunk_not_skipped_by_rms(mock_call):
+    """A short chunk with speech-level amplitude must pass the RMS filter."""
+    mock_call.return_value = {"text": "Привет", "language": "ru"}
+    with patch("src.transcriber.log_info"):
+        transcriber = WhisperTranscriber(model_name="dummy")
+        # RMS ≈ 0.1 — clearly above _SILENCE_RMS_THRESHOLD
+        speech_audio = np.full(16000, 0.1, dtype=np.float32)
+        result = transcriber.transcribe(speech_audio, allowed_languages=["ru"], is_final_chunk=False)
+        assert result == "Привет"
+        mock_call.assert_called_once()
+
+
+@patch("src.transcriber._call_mlx_transcribe")
+def test_long_silent_chunk_not_filtered_by_rms(mock_call):
+    """Silent chunks ≥3s are NOT pre-filtered by RMS — Whisper's own thresholds handle them."""
+    mock_call.return_value = {"text": "", "language": "ru"}
+    with patch("src.transcriber.log_info"):
+        transcriber = WhisperTranscriber(model_name="dummy")
+        long_silence = np.zeros(48001, dtype=np.float32)  # just over 3s
+        result = transcriber.transcribe(long_silence, is_final_chunk=False)
+        # Whisper gets called (RMS filter doesn't trigger for long chunks)
+        mock_call.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 (subword repetition): Subword repeat hallucination strip
+# ---------------------------------------------------------------------------
+
+
+def test_subword_repeat_stripped():
+    """oiseoise... and ftafta... patterns must be collapsed to a single occurrence."""
+    from src.transcriber import _SUBWORD_REPEAT_RE
+    text = "Посмотри метрики oiseoiseoiseoiseoiseoise мир"
+    result = _SUBWORD_REPEAT_RE.sub(r"\1", text)
+    assert "oise" in result
+    assert result.count("oise") == 1
+
+    text2 = "ftaftaftaftaftafta"
+    result2 = _SUBWORD_REPEAT_RE.sub(r"\1", text2)
+    assert len(result2) < len(text2)
+
+
+def test_subword_repeat_leaves_normal_text():
+    """Normal speech with short repeats (< 6 times) must not be changed."""
+    from src.transcriber import _SUBWORD_REPEAT_RE
+    # "ха-ха-ха" = 3 repetitions of "ха-" — below the 6x threshold
+    assert _SUBWORD_REPEAT_RE.sub(r"\1", "ха-ха-ха") == "ха-ха-ха"
+    # "да-да" = 2 repetitions — unchanged
+    assert _SUBWORD_REPEAT_RE.sub(r"\1", "да-да") == "да-да"
 
 
 # ---------------------------------------------------------------------------

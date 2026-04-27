@@ -705,14 +705,6 @@ class SVoiceRecApp:
                     f"is_final={is_final_chunk}, chunks_remaining_in_queue={remaining}{drain_note}"
                 )
 
-                # Early cancel: skip ALL non-final chunks when stop was requested.
-                # The final chunk (is_final=True) is always processed; it was put into
-                # the queue before stop_worker.set() so it is never skipped here.
-                if self.stop_worker.is_set() and not is_final_chunk:
-                    log_info("Skipping non-final chunk (stop requested).")
-                    self.chunk_queue.task_done()
-                    continue
-
                 self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk, session_id=my_session_id)
                 self.chunk_queue.task_done()
             except queue.Empty:
@@ -724,11 +716,6 @@ class SVoiceRecApp:
     def process_chunk(self, audio_chunk, is_final_chunk: bool = False, session_id: int = 0):
         """Transcribe a single audio chunk, accumulate result, and show popup on final chunk."""
         try:
-            # Check if stop was requested before starting expensive transcription
-            if self.stop_worker.is_set() and not is_final_chunk:
-                log_info("Skipping non-final chunk transcription (stop requested).")
-                return
-
             # Build context: always keep the full vocab prompt, then fill the
             # remaining token budget with whole recent chunks (newest first) so
             # vocabulary terms stay in context for every chunk, not just the first.

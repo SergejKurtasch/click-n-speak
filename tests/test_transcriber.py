@@ -28,13 +28,14 @@ def test_transcribe_hallucination_filtered(mock_call):
 
 @patch("src.transcriber._call_mlx_transcribe")
 def test_transcribe_normal_word_not_filtered(mock_call):
-    # 'insert' was removed from hallucination phrases, so it should NOT be filtered
+    # 'insert' was removed from hallucination phrases, so it should NOT be filtered.
+    # Use speech-level amplitude so the RMS pre-filter doesn't reject the chunk.
     mock_call.return_value = {"text": "I need to insert a coin", "language": "en"}
-    
+
     with patch("src.transcriber.log_info"):
         transcriber = WhisperTranscriber(model_name="dummy")
-        audio = np.zeros(16000, dtype=np.float32)
-        
+        audio = np.full(16000, 0.1, dtype=np.float32)  # RMS=0.1, well above silence threshold
+
         result = transcriber.transcribe(audio, allowed_languages=["en"], is_final_chunk=False)
         assert result == "I need to insert a coin"
 
@@ -46,16 +47,17 @@ def test_transcribe_language_retry_padding(mock_call):
         {"text": "Dobrý den", "language": "cs"},
         {"text": "Добрый день", "language": "ru"}
     ]
-    
+
     with patch("src.transcriber.log_info"):
         transcriber = WhisperTranscriber(model_name="dummy")
-        audio = np.zeros(16000, dtype=np.float32)
-        
+        # Use speech-level amplitude so the RMS pre-filter doesn't reject the chunk.
+        audio = np.full(16000, 0.1, dtype=np.float32)
+
         result = transcriber.transcribe(audio, allowed_languages=["ru"], is_final_chunk=False)
-        
+
         assert result == "Добрый день"
         assert mock_call.call_count == 2
-        
+
         # Verify the second call had padded audio (length 16000 + 1600 + 1600 = 19200)
         args, kwargs = mock_call.call_args_list[1]
         assert len(args[0]) == 19200

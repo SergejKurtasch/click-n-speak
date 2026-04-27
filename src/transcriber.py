@@ -31,12 +31,35 @@ def _supports_strict_thresholds() -> bool:
         _STRICT_THRESHOLDS_SUPPORTED = False
     return _STRICT_THRESHOLDS_SUPPORTED
 
-# Final chunks shorter than this (in samples at 16kHz) are skipped — they are
-# almost always silence/noise that cause Whisper to hallucinate for 10-43 seconds.
-MIN_FINAL_CHUNK_SAMPLES = 4800  # 0.3 seconds at 16 kHz
+# Final chunks shorter than or equal to this (in samples at 16kHz) are skipped —
+# they are almost always trailing silence that cause Whisper to hallucinate for 10-43s.
+# 0.5s threshold: real speech endings are longer; exact-boundary 4800-sample chunks
+# were reaching Whisper and producing YouTube-subtitle hallucinations (off-by-one fix).
+MIN_FINAL_CHUNK_SAMPLES = 8000  # 0.5 seconds at 16 kHz
+
+# Short chunks (< 3s) below this RMS level are pure silence — skip Whisper entirely
+# to avoid the 14-22s tail-decode hallucination caused by decoding silence.
+_SILENCE_RMS_THRESHOLD = 0.005  # calibrated against MacBook Air mic noise floor
 
 # Strip leading/trailing punctuation so "hundred", "hundred!", "hundred." count as same word
 _WORD_NORMALIZE = re.compile(r"^[\W_]+|[\W_]+$")
+
+# Subword repetition: any 2-8 char unit that repeats 6+ times in a row.
+# Catches Whisper tail-hallucinations like "oiseoiseoiseoise..." or "ftaftafta..."
+# which _collapse_consecutive_word_repetition misses because they form a single token.
+# 6 repetitions required to avoid false positives on normal stutters/emphasis ("ха-ха-ха").
+_SUBWORD_REPEAT_RE = re.compile(r"(.{2,8}?)\1{5,}", re.UNICODE)
+
+
+def _is_audio_silent(audio_data) -> bool:
+    """Return True if the RMS energy of the audio is below the silence threshold.
+
+    Used as a cheap pre-filter before calling Whisper on short chunks: when the
+    chunk is pure microphone noise, Whisper spends 14-22s on tail-decode hallucinations
+    instead of immediately returning an empty result.
+    """
+    rms = float(np.sqrt(np.mean(audio_data.astype(np.float32) ** 2)))
+    return rms < _SILENCE_RMS_THRESHOLD
 
 
 def _normalize_word(w: str) -> str:
@@ -193,10 +216,23 @@ class WhisperTranscriber:
 
         # Skip very short final chunks — they are almost always post-speech silence
         # that Whisper decodes into hallucinations (10-43 seconds of wasted time).
-        if is_final_chunk and len(audio_data) < MIN_FINAL_CHUNK_SAMPLES:
+        # Uses <= so the exact 4800-sample boundary (0.30s) is also rejected.
+        if is_final_chunk and len(audio_data) <= MIN_FINAL_CHUNK_SAMPLES:
             log_info(
                 f"Skipping tiny final chunk ({len(audio_data)} samples, "
                 f"{len(audio_data) / 16000:.2f}s) to avoid hallucination."
+            )
+            return ""
+
+        # Cheap RMS pre-filter for short non-final chunks: if audio is under 3s and
+        # nearly silent, skip Whisper entirely — silence decoding takes 14-22s and
+        # always produces hallucinations. Not applied to final chunks (MIN check above
+        # covers them; real speech can sometimes be quiet).
+        _SHORT_CHUNK_SAMPLES = 48000  # 3 seconds at 16 kHz
+        if not is_final_chunk and len(audio_data) < _SHORT_CHUNK_SAMPLES and _is_audio_silent(audio_data):
+            log_info(
+                f"Skipping silent short chunk ({len(audio_data)} samples, "
+                f"{len(audio_data) / 16000:.2f}s, rms<{_SILENCE_RMS_THRESHOLD}) to avoid tail-decode."
             )
             return ""
 
@@ -332,6 +368,13 @@ class WhisperTranscriber:
                     f"Collapsed consecutive word repetition: '{text}' → '{collapsed}'"
                 )
                 text = collapsed
+
+            stripped = _SUBWORD_REPEAT_RE.sub(r"\1", text)
+            if stripped != text:
+                log_info(
+                    f"Stripped subword repetition: '{text[:80]}' → '{stripped[:80]}'"
+                )
+                text = stripped
 
             if is_final_chunk:
                 log_info(f"Final chunk: keeping after light filter: '{text}'")
