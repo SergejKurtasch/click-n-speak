@@ -419,6 +419,13 @@ class TranscriberProcessWrapper:
                     })
                 elif action == "update_model":
                     transcriber = WhisperTranscriber(model_name=cmd["model_name"])
+                elif action == "clear_cache":
+                    try:
+                        import mlx.core
+                        mlx.core.metal.clear_cache()
+                        log_info("MLX Metal cache cleared.")
+                    except Exception as e:
+                        log_info(f"clear_cache skipped: {e}")
             except KeyboardInterrupt:
                 break
             except Exception as e:
@@ -448,6 +455,10 @@ class TranscriberProcessWrapper:
         The prewarm_done response will be silently consumed by the next transcribe() call."""
         self.input_queue.put({"action": "prewarm"})
         
+    def clear_cache(self) -> None:
+        """Free MLX Metal buffer pool in the child process after a session ends."""
+        self.input_queue.put({"action": "clear_cache"})
+
     def update_model(self, model_name: str) -> None:
         """Tell the child process to load a new model."""
         self.model_name = model_name

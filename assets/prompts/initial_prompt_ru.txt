@@ -1,1 +1,0 @@
-PCA, survival, prompt, Hugging Face, Readmission, train, test, Edge, production, main, Github, git, bootstrap, ковариты, seed

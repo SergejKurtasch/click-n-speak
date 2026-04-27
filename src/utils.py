@@ -166,6 +166,7 @@ def get_phrases_file_path() -> Path:
 # Fallback: en if key or lang missing.
 UI_STRINGS: dict[str, dict[str, str]] = {
     "ru": {
+        "transcription_instruction": "Расставляй знаки препинания. Пиши с заглавной буквы. ",
         "preparing_title": "Подготовка модели...",
         "preparing_body": "Загружаю/скачиваю Whisper-модель. Первый запуск может занять время.",
         "model_ready_title": "Модель готова",
@@ -189,6 +190,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "edit_confirm_title": "Редактируй и нажми Enter",
     },
     "en": {
+        "transcription_instruction": "Add punctuation. Capitalize sentences. ",
         "preparing_title": "Preparing model...",
         "preparing_body": "Loading/downloading Whisper model. First run may take a while.",
         "model_ready_title": "Model ready",
@@ -212,6 +214,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "edit_confirm_title": "Edit and press Enter",
     },
     "de": {
+        "transcription_instruction": "Satzzeichen setzen. Sätze groß schreiben. ",
         "preparing_title": "Modell wird vorbereitet...",
         "preparing_body": "Whisper-Modell wird geladen/heruntergeladen. Der erste Start kann dauern.",
         "model_ready_title": "Modell bereit",
@@ -235,6 +238,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "edit_confirm_title": "Bearbeiten und Enter drücken",
     },
     "es": {
+        "transcription_instruction": "Añade puntuación. Escribe con mayúsculas. ",
         "preparing_title": "Preparando modelo...",
         "preparing_body": "Cargando/descargando modelo Whisper. La primera vez puede tardar.",
         "model_ready_title": "Modelo listo",
@@ -258,6 +262,7 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "edit_confirm_title": "Editar y pulsar Enter",
     },
     "fr": {
+        "transcription_instruction": "Ajoutez la ponctuation. Mettez une majuscule en début de phrase. ",
         "preparing_title": "Préparation du modèle...",
         "preparing_body": "Chargement/téléchargement du modèle Whisper. Le premier lancement peut prendre du temps.",
         "model_ready_title": "Modèle prêt",
@@ -396,6 +401,18 @@ LANG_PROMPTS: dict[str, str] = {
     "fr": "Texte en français.",
 }
 
+# One natural sentence per language used as a style-and-register hint for Whisper
+# when the user has not yet added any terms. A natural sentence in-domain is more
+# effective than a bare language name because it shows Whisper the expected
+# punctuation, register, and vocabulary class.
+LANG_DEFAULT_CONTEXT: dict[str, str] = {
+    "ru": "Это разговорная речь. Используются профессиональные термины и аббревиатуры.",
+    "en": "This is spoken language with professional and technical vocabulary.",
+    "de": "Dies ist gesprochene Sprache mit Fachbegriffen.",
+    "es": "Este es lenguaje hablado con vocabulario técnico y profesional.",
+    "fr": "Ceci est du langage parlé avec du vocabulaire professionnel et technique.",
+}
+
 # Normalised set for filtering language-hint phrases during term parsing.
 _LANG_HINT_LOWER: set[str] = {v.lower().rstrip(". ") for v in LANG_PROMPTS.values()}
 
@@ -439,11 +456,9 @@ def deduplicate_prompt_terms(terms: list[str]) -> list[str]:
 
 
 def build_initial_prompt(config: dict) -> str:
-    """Build the effective Whisper initial_prompt from v2 schema config.
+    """Build the effective Whisper initial_prompt from user_terms for all active languages.
 
-    Priority: language hints for all active languages → user_terms → auto_terms.
     Hard-capped at _MAX_PROMPT_CHARS to keep within Whisper's 224-token prompt window.
-    Falls back to legacy 'initial_prompt' string if v2 keys are absent (pre-migration).
     """
     primary = get_primary_language(config)
     additional = list(config.get("additional_languages") or [])
@@ -452,19 +467,26 @@ def build_initial_prompt(config: dict) -> str:
     all_langs = [primary] + [l for l in additional if l != primary]
     lang_hint = " ".join(LANG_PROMPTS[l] for l in all_langs if l in LANG_PROMPTS)
 
-    # v2: per-language term lists.
     user_terms: dict = config.get("user_terms") or {}
-    auto_terms: dict = config.get("auto_terms") or {}
 
-    if user_terms or auto_terms:
-        terms: list[str] = list(user_terms.get(primary, []))
-        terms.extend(auto_terms.get(primary, []))
-        terms_str = ", ".join(t for t in terms if str(t).strip())
-        result = f"{lang_hint} {terms_str}".strip() if terms_str else lang_hint
+    terms: list[str] = list(user_terms.get(primary, []))
+    for lang in additional:
+        if lang != primary:
+            terms.extend(user_terms.get(lang, []))
+    terms = deduplicate_prompt_terms(terms)
+    terms_str = ", ".join(t for t in terms if str(t).strip())
+    primary_has_terms = bool(user_terms.get(primary))
+    if terms_str:
+        if not primary_has_terms and primary in LANG_DEFAULT_CONTEXT:
+            # Primary language has no terms: prepend its style hint so Whisper
+            # knows the register even when only additional-language terms are set.
+            result = f"{lang_hint} {LANG_DEFAULT_CONTEXT[primary]} {terms_str}".strip()
+        else:
+            result = f"{lang_hint} {terms_str}".strip()
+    elif primary in LANG_DEFAULT_CONTEXT:
+        result = f"{lang_hint} {LANG_DEFAULT_CONTEXT[primary]}".strip()
     else:
-        # Pre-migration fallback: use stored initial_prompt directly.
-        legacy = str(config.get("initial_prompt", "")).strip()
-        result = f"{lang_hint} {legacy}".strip() if legacy else lang_hint
+        result = lang_hint
 
     if len(result) > _MAX_PROMPT_CHARS:
         truncated = result[:_MAX_PROMPT_CHARS]
@@ -505,6 +527,11 @@ def migrate_config_to_v2(config: dict) -> dict:
     config["user_terms"] = user_terms
     config.setdefault("auto_terms", {})
     config.setdefault("prompt_snapshots", {})
+    config.setdefault("pending_suggestions", {})
+    config.setdefault("skipped_terms", {})
+    config.setdefault("prompt_update_mode", "suggest")
+    config.setdefault("auto_prompt_check_interval", 50)
+    config.setdefault("last_analysis_phrase_count", 0)
 
     # Remove all v1 keys.
     for key in ("custom_prompts", "previous_prompts", "previous_initial_prompt",
@@ -514,6 +541,67 @@ def migrate_config_to_v2(config: dict) -> dict:
     # Refresh the cached initial_prompt field.
     config["initial_prompt"] = build_initial_prompt(config)
 
+    return config
+
+
+def migrate_config_to_v3(config: dict) -> dict:
+    """Merge auto_terms into user_terms and remove the auto_terms bucket.
+
+    Idempotent: returns unchanged dict when schema_version >= 3.
+    Auto-detected terms are appended after existing user_terms so the
+    user-curated order is preserved.
+    """
+    if config.get("schema_version", 1) >= 3:
+        return config
+
+    auto_terms: dict = config.get("auto_terms") or {}
+    if auto_terms:
+        user_terms = dict(config.get("user_terms") or {})
+        for lang, terms in auto_terms.items():
+            if terms:
+                current = list(user_terms.get(lang, []))
+                user_terms[lang] = deduplicate_prompt_terms(current + list(terms))
+        config["user_terms"] = user_terms
+
+    config["schema_version"] = 3
+    config.pop("auto_terms", None)
+    config["initial_prompt"] = build_initial_prompt(config)
+    return config
+
+
+def migrate_config_to_v4(config: dict) -> dict:
+    """Strip language-hint prefixes embedded in user_terms by the v2 migration.
+
+    Idempotent: returns unchanged dict when schema_version >= 4.
+    The v2 migration parsed the raw initial_prompt by splitting on commas, but
+    the language hint ('Русский язык.', 'English language.', etc.) was glued to
+    the first term (no comma separator), producing entries like
+    'Русский язык. Чаще всего я пишу...' or 'English language. readmission'.
+    """
+    if config.get("schema_version", 1) >= 4:
+        return config
+
+    # Build prefix strings: "Русский язык. ", "English language. ", etc.
+    hint_prefixes = [h.rstrip(". ") + ". " for h in LANG_PROMPTS.values()]
+
+    user_terms: dict = config.get("user_terms") or {}
+    cleaned: dict[str, list[str]] = {}
+    for lang, terms in user_terms.items():
+        clean: list[str] = []
+        for term in terms:
+            t = term
+            for prefix in hint_prefixes:
+                if t.startswith(prefix):
+                    t = t[len(prefix):].lstrip()
+                    break
+            t = t.strip()
+            if t:
+                clean.append(t)
+        cleaned[lang] = deduplicate_prompt_terms(clean)
+
+    config["user_terms"] = cleaned
+    config["schema_version"] = 4
+    config["initial_prompt"] = build_initial_prompt(config)
     return config
 
 

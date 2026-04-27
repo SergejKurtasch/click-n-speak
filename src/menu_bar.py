@@ -412,28 +412,32 @@ class ClickNSpeakApp(rumps.App):
         self.template = True  # render menubar icon as template (adapts to dark/light mode)
         self.main_app = main_app
         self.config = main_app.config
-        self._last_prompt_mtime = 0.0
+        self._prompt_mtimes: dict = {}  # {lang: last_observed_mtime}
         self._accessibility_granted = is_accessibility_trusted()
         self._accessibility_item = None  # set in setup_menu
         self._input_monitoring_ok: bool | None = None  # None = unknown until health check
         self._input_monitoring_item = None  # set in setup_menu
         self._wizard_pending = False
+        self._suggestion_check_done: bool = False
         self._lang_menu_controller: "_LangMenuController | None" = None
         self._phrase_menu_controller: "_PhraseMenuController | None" = None
         self._phrases_page_count: int = 5  # used only in the rumps fallback path
+        self._mode_items: dict = {}
+
+        try:
+            from .suggestions_panel import SuggestionsPanel
+            self._suggestions_panel: "SuggestionsPanel | None" = SuggestionsPanel()
+        except Exception as exc:
+            log_error(f"SuggestionsPanel unavailable: {exc}")
+            self._suggestions_panel = None
 
         # Build Menu
         self.setup_menu()
 
         # Hook tap-failure callback after menu is built so _input_monitoring_item exists
         self.main_app.hotkey_handler.on_tap_failed = self._on_tap_failed
-        self._migrate_old_prompt()
         # Asynchronously check which Whisper models are already cached
         self._start_model_cache_check()
-
-    def _migrate_old_prompt(self):
-        # v1→v2 migration is handled by migrate_config_to_v2 in app.load_config_data.
-        pass
 
     def _get_prompt_path(self, lang: str = None):
         """Returns the absolute path to initial_prompt_{lang}.txt."""
@@ -460,44 +464,46 @@ class ClickNSpeakApp(rumps.App):
 
     @rumps.timer(1.0)
     def _watch_prompt_file(self, _):
-        """Watches initial_prompt_{lang}.txt for manual edits; updates user_terms on change."""
-        lang = get_primary_language(self.config)
-        prompt_path = self._get_prompt_path(lang)
-        if not prompt_path.exists():
-            return
+        """Watches initial_prompt_{lang}.txt for all active languages; updates user_terms on change."""
+        primary = get_primary_language(self.config)
+        additional = list(self.config.get("additional_languages") or [])
+        all_langs = [primary] + [l for l in additional if l != primary]
 
-        try:
-            mtime = prompt_path.stat().st_mtime
-            if getattr(self, "_last_prompt_mtime", 0.0) == 0.0 or getattr(self, "_last_prompt_path", None) != prompt_path:
-                self._last_prompt_mtime = mtime
-                self._last_prompt_path = prompt_path
-                return
+        for lang in all_langs:
+            prompt_path = self._get_prompt_path(lang)
+            if not prompt_path.exists():
+                continue
+            try:
+                mtime = prompt_path.stat().st_mtime
+                if self._prompt_mtimes.get(lang, 0.0) == 0.0:
+                    self._prompt_mtimes[lang] = mtime
+                    continue
 
-            if mtime > self._last_prompt_mtime:
-                self._last_prompt_mtime = mtime
-                with open(prompt_path, "r", encoding="utf-8") as f:
-                    new_text = f.read().strip()
+                if mtime > self._prompt_mtimes[lang]:
+                    self._prompt_mtimes[lang] = mtime
+                    with prompt_path.open("r", encoding="utf-8") as f:
+                        new_text = f.read().strip()
 
-                user_terms = dict(self.config.get("user_terms") or {})
-                previous_terms = list(user_terms.get(lang, []))
-                new_terms = deduplicate_prompt_terms(parse_prompt_terms(new_text))
+                    user_terms = dict(self.config.get("user_terms") or {})
+                    previous_terms = list(user_terms.get(lang, []))
+                    new_terms = deduplicate_prompt_terms(parse_prompt_terms(new_text))
 
-                if previous_terms != new_terms:
-                    if previous_terms:
-                        snapshots = dict(self.config.get("prompt_snapshots", {}))
-                        snapshots[lang] = previous_terms
-                        self.config["prompt_snapshots"] = snapshots
+                    if previous_terms != new_terms:
+                        if previous_terms:
+                            snapshots = dict(self.config.get("prompt_snapshots", {}))
+                            snapshots[lang] = previous_terms
+                            self.config["prompt_snapshots"] = snapshots
 
-                    user_terms[lang] = new_terms
-                    self.config["user_terms"] = user_terms
-                    self.config["initial_prompt"] = build_initial_prompt(self.config)
+                        user_terms[lang] = new_terms
+                        self.config["user_terms"] = user_terms
+                        self.config["initial_prompt"] = build_initial_prompt(self.config)
 
-                    self.save_config()
-                    self.main_app.load_config_data(self.config)
-                    log_info(f"Initial prompt updated manually for {lang.upper()}.")
-                    self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} обновлена!")
-        except Exception as e:
-            log_error(f"Error checking prompt file: {e}")
+                        self.save_config()
+                        self.main_app.load_config_data(self.config)
+                        log_info(f"Initial prompt updated manually for {lang.upper()}.")
+                        self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} обновлена!")
+            except Exception as e:
+                log_error(f"Error checking prompt file for {lang}: {e}")
 
     # ------------------------------------------------------------------
     # Setup wizard
@@ -521,17 +527,22 @@ class ClickNSpeakApp(rumps.App):
                     "Add Click-n-speak to Privacy & Security → Input Monitoring."
                 )
 
-        if not self._wizard_pending:
-            return
-        self._wizard_pending = False
-        try:
-            from .setup_wizard import run_setup_wizard
-            run_setup_wizard()
-            # Refresh accessibility status indicator after wizard
-            self._accessibility_granted = is_accessibility_trusted()
-            self._update_accessibility_menu_item()
-        except Exception as exc:
-            log_error(f"Setup wizard error: {exc}")
+        if self._wizard_pending:
+            self._wizard_pending = False
+            try:
+                from .setup_wizard import run_setup_wizard
+                run_setup_wizard()
+                self._accessibility_granted = is_accessibility_trusted()
+                self._update_accessibility_menu_item()
+            except Exception as exc:
+                log_error(f"Setup wizard error: {exc}")
+
+        if not self._suggestion_check_done:
+            self._suggestion_check_done = True
+            try:
+                self._check_pending_suggestions_on_startup()
+            except Exception as exc:
+                log_error(f"Suggestions startup check failed: {exc}")
 
     def _on_check_permissions(self, _) -> None:
         """Menu item: re-run the permission wizard on demand."""
@@ -690,11 +701,34 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(rumps.MenuItem("Download AI Editor Model", **_icon("download-model"), callback=self._download_ai_model))
 
         # Initial Prompt submenu
-        prompt_menu = rumps.MenuItem("Initial Prompt", **_icon("initial-prompt"))
-        prompt_menu.add(rumps.MenuItem("Edit...", callback=self.edit_initial_prompt))
-        prompt_menu.add(rumps.MenuItem("Update from History", callback=self.update_initial_prompt_from_history))
-        prompt_menu.add(rumps.MenuItem("Revert to Previous", callback=self.revert_initial_prompt))
-        self.menu.add(prompt_menu)
+        self._prompt_menu_item = rumps.MenuItem("Initial Prompt", **_icon("initial-prompt"))
+        self._prompt_menu_item.add(rumps.MenuItem("Edit Initial Prompt", callback=self.edit_initial_prompt))
+        self._prompt_menu_item.add(rumps.MenuItem("Revert Initial Prompt", callback=self.revert_initial_prompt))
+        self._prompt_menu_item.add(None)
+
+        # Auto-update Mode submenu (Suggest / Auto / Disabled)
+        self._mode_items = {}
+        mode_menu = rumps.MenuItem("Auto-update Mode")
+        for _mode_key, _mode_label in [
+            ("suggest", "Suggest (по умолчанию)"),
+            ("auto", "Auto"),
+            ("disabled", "Disabled"),
+        ]:
+            _item = rumps.MenuItem(
+                _mode_label,
+                callback=lambda _, m=_mode_key: self._on_set_update_mode(m),
+            )
+            self._mode_items[_mode_key] = _item
+            mode_menu.add(_item)
+        self._prompt_menu_item.add(mode_menu)
+        self._update_mode_submenu_state()
+
+        self._prompt_menu_item.add(None)
+
+        self._suggest_item = rumps.MenuItem("Review Suggestions", callback=self._on_review_suggestions)
+        self._prompt_menu_item.add(self._suggest_item)
+        self.menu.add(self._prompt_menu_item)
+        self.update_suggest_menu_badge()
 
         # Phrase history
         self._last_phrases_parent = rumps.MenuItem("Last Phrases", **_icon("last-phrases"))
@@ -817,8 +851,7 @@ class ClickNSpeakApp(rumps.App):
         # update_config saves to disk and calls load_config_data internally —
         # pass the full config so custom_prompts/initial_prompt are persisted too.
         self.main_app.update_config(self.config)
-        self._last_prompt_path = None
-        self._last_prompt_mtime = 0.0
+        self._prompt_mtimes.clear()
 
     def _apply_additional_language(self, lang: str, is_on: bool) -> None:
         """Toggle an additional language (called from the language panel)."""
@@ -852,7 +885,7 @@ class ClickNSpeakApp(rumps.App):
         try:
             terms_list = user_terms.get(primary, [])
             prompt_path = self._get_prompt_path(primary)
-            with open(prompt_path, "w", encoding="utf-8") as f:
+            with prompt_path.open("w", encoding="utf-8") as f:
                 f.write(", ".join(terms_list))
         except Exception as e:
             log_error(f"Failed to write prompt file for {primary}: {e}")
@@ -934,75 +967,50 @@ class ClickNSpeakApp(rumps.App):
         self.setup_menu()
 
     def edit_initial_prompt(self, _: rumps.MenuItem) -> None:
-        """Opens the language-specific term list in a text editor.
+        """Open primary-language user_terms in a text editor."""
+        self._edit_prompt_for_lang(get_primary_language(self.config))
 
-        The file contains only user_terms (comma-separated), not the language-hint
-        prefix that Whisper sees — those are added automatically by build_initial_prompt.
-        """
-        lang = get_primary_language(self.config)
+    def _edit_prompt_for_lang(self, lang: str) -> None:
+        """Write user_terms[lang] to its .txt file and open it in the default editor."""
+        self._sync_prompt_file(lang)
+        prompt_path = str(self._get_prompt_path(lang))
+        try:
+            subprocess.run(["open", "-t", prompt_path], check=False)
+            # Raise the editor's window to front. Needed when the editor was already
+            # running: the new document window can open behind existing ones.
+            # AXRaise is called after a short delay to let the editor finish loading.
+            applescript = (
+                "delay 0.8\n"
+                "tell application \"System Events\"\n"
+                "    set theProc to first process where frontmost is true\n"
+                "    set frontmost of theProc to true\n"
+                "    if (count of windows of theProc) > 0 then\n"
+                "        perform action \"AXRaise\" of window 1 of theProc\n"
+                "    end if\n"
+                "end tell"
+            )
+            subprocess.Popen(["osascript", "-e", applescript])
+        except OSError as e:
+            log_error(f"Failed to open initial prompt for {lang}: {e}")
+
+    def _sync_prompt_file(self, lang: str) -> None:
+        """Write current user_terms[lang] to its .txt file and update the mtime tracker."""
         user_terms = self.config.get("user_terms") or {}
         terms_list = list(user_terms.get(lang, []))
-        file_content = ", ".join(terms_list)
-
         prompt_path = self._get_prompt_path(lang)
         try:
-            with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(file_content)
-            self._last_prompt_mtime = prompt_path.stat().st_mtime
-            self._last_prompt_path = prompt_path
-            subprocess.run(["open", "-t", str(prompt_path)], check=False)
-        except OSError as e:
-            log_error(f"Failed to open initial prompt for editing: {e}")
-
-    def update_initial_prompt_from_history(self, _: rumps.MenuItem) -> None:
-        """Extract frequent terms from phrase history and merge into user_terms[lang]."""
-        from .log_analyzer import get_frequent_terms
-        en_terms, ru_phrases = get_frequent_terms()
-        candidates = en_terms + ru_phrases
-        if not candidates:
-            self.main_app.notify("Настройки", "Не удалось извлечь термины из истории.")
-            return
-
-        lang = get_primary_language(self.config)
-        user_terms = dict(self.config.get("user_terms") or {})
-        current: list[str] = list(user_terms.get(lang, []))
-        current_lower: set[str] = {t.lower() for t in current}
-
-        added: list[str] = []
-        for term in candidates:
-            if term.lower() not in current_lower:
-                current.append(term)
-                current_lower.add(term.lower())
-                added.append(term)
-
-        if not added:
-            self.main_app.notify("Настройки", "Новых терминов не найдено.")
-            return
-
-        # Snapshot current state for Revert.
-        snapshots = dict(self.config.get("prompt_snapshots", {}))
-        snapshots[lang] = list(user_terms.get(lang, []))
-        self.config["prompt_snapshots"] = snapshots
-
-        user_terms[lang] = current
-        self.config["user_terms"] = user_terms
-        self.config["initial_prompt"] = build_initial_prompt(self.config)
-
-        prompt_path = self._get_prompt_path(lang)
-        try:
-            with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(", ".join(current))
-        except Exception:
-            pass
-
-        self.save_config()
-        self.main_app.load_config_data(self.config)
-        label = ", ".join(added[:5]) + ("…" if len(added) > 5 else "")
-        self.main_app.notify("Настройки", f"Добавлено для {lang.upper()}: {label}")
+            with prompt_path.open("w", encoding="utf-8") as f:
+                f.write(", ".join(terms_list))
+            self._prompt_mtimes[lang] = prompt_path.stat().st_mtime
+        except OSError as exc:
+            log_error(f"Failed to sync prompt file for {lang}: {exc}")
 
     def revert_initial_prompt(self, _: rumps.MenuItem) -> None:
+        """Swap primary-language user_terms with prompt_snapshots (one-step undo)."""
+        self._revert_for_lang(get_primary_language(self.config))
+
+    def _revert_for_lang(self, lang: str) -> None:
         """Swap user_terms[lang] with prompt_snapshots[lang] (one-step undo)."""
-        lang = get_primary_language(self.config)
         snapshots = dict(self.config.get("prompt_snapshots", {}))
         prev_terms = snapshots.get(lang)
 
@@ -1022,14 +1030,30 @@ class ClickNSpeakApp(rumps.App):
 
         prompt_path = self._get_prompt_path(lang)
         try:
-            with open(prompt_path, "w", encoding="utf-8") as f:
+            with prompt_path.open("w", encoding="utf-8") as f:
                 f.write(", ".join(prev_terms))
+            self._prompt_mtimes[lang] = prompt_path.stat().st_mtime
         except Exception:
             pass
 
         self.save_config()
         self.main_app.load_config_data(self.config)
         self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} восстановлена.")
+
+    def _update_mode_submenu_state(self) -> None:
+        """Sync Auto-update Mode checkmarks with current prompt_update_mode."""
+        current = self.config.get("prompt_update_mode", "suggest")
+        for mode_key, item in self._mode_items.items():
+            item.state = 1 if mode_key == current else 0
+
+    def _on_set_update_mode(self, mode: str) -> None:
+        """Change prompt_update_mode and reflect in menu checkmarks."""
+        self.config["prompt_update_mode"] = mode
+        self._update_mode_submenu_state()
+        self.save_config()
+        self.main_app.load_config_data(self.config)
+        labels = {"suggest": "Suggest", "auto": "Auto", "disabled": "Disabled"}
+        self.main_app.notify("Настройки", f"Режим авто-обновления: {labels.get(mode, mode)}")
 
     def transcribe_audio_file(self, _: rumps.MenuItem) -> None:
         """Opens a file selection dialog and starts file transcription."""
@@ -1052,6 +1076,176 @@ class ClickNSpeakApp(rumps.App):
         except Exception as e:
             log_error(f"Error selecting audio file: {e}")
             self.main_app.notify("Ошибка", "Не удалось открыть выбор файла.")
+
+    # ------------------------------------------------------------------
+    # Vocabulary suggestions
+    # ------------------------------------------------------------------
+
+    def update_suggest_menu_badge(self) -> None:
+        """Update 'Review Suggestions' item title based on pending count."""
+        try:
+            pending = self.config.get("pending_suggestions") or {}
+            total = sum(len(v) for v in pending.values())
+            if total > 0:
+                self._suggest_item.title = f"● Review Suggestions ({total})"
+            else:
+                self._suggest_item.title = "Review Suggestions"
+        except Exception as exc:
+            log_error(f"update_suggest_menu_badge failed: {exc}")
+
+    def _check_pending_suggestions_on_startup(self) -> None:
+        """Show startup alert if there are pending suggestions and mode is 'suggest'."""
+        pending = self.config.get("pending_suggestions") or {}
+        total = sum(len(v) for v in pending.values())
+        if total == 0:
+            return
+        if self.config.get("prompt_update_mode", "suggest") != "suggest":
+            return
+        self._show_suggestions_alert(total, pending)
+
+    def _show_suggestions_alert(self, total: int, pending: dict) -> None:
+        """Show blocking NSAlert with 3 choices for handling pending suggestions."""
+        try:
+            from AppKit import NSAlert
+
+            all_items: list[dict] = []
+            for items in pending.values():
+                all_items.extend(items)
+            all_items.sort(key=lambda x: -x["count"])
+            preview_parts = [f"{i['term']} ({i['count']}×)" for i in all_items[:3]]
+            preview = ", ".join(preview_parts)
+            if total > 3:
+                preview += f"  и ещё {total - 3}"
+
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Новые термины для словаря")
+            alert.setInformativeText_(
+                f"Найдено {total} терминов, часто встречающихся в ваших диктовках.\n"
+                f"{preview}\n\n"
+                "Добавление их повысит точность распознавания Whisper."
+            )
+            alert.addButtonWithTitle_("Посмотреть список")
+            alert.addButtonWithTitle_("Напомнить позже")
+            alert.addButtonWithTitle_("Добавлять автоматически")
+
+            result = alert.runModal()  # 1000=first, 1001=second, 1002=third
+            if result == 1000:
+                self._open_suggestions_panel()
+            elif result == 1002:
+                self._apply_all_pending_suggestions()
+                self.config["prompt_update_mode"] = "auto"
+                self._update_mode_submenu_state()
+                self.save_config()
+                self.main_app.load_config_data(self.config)
+                self.update_suggest_menu_badge()
+            # 1001 = "Напомнить позже" — pending stays, shown again next startup.
+        except Exception as exc:
+            log_error(f"Suggestions alert failed: {exc}")
+
+    def _on_review_suggestions(self, _) -> None:
+        """Menu item callback: open the review panel, running on-demand analysis if needed."""
+        pending = self.config.get("pending_suggestions") or {}
+        total = sum(len(v) for v in pending.values())
+        if total > 0:
+            self._open_suggestions_panel()
+            return
+
+        try:
+            from .phrase_history import count_phrases
+            phrase_count = count_phrases()
+        except Exception:
+            phrase_count = 0
+
+        if phrase_count < 5:
+            self.main_app.notify(
+                "Настройки",
+                "История диктовок пока слишком мала. Запишите несколько диктовок и попробуйте снова.",
+            )
+            return
+
+        self.main_app.notify("Настройки", "Анализирую историю диктовок…")
+        self.main_app.request_prompt_analysis(on_complete=self._on_demand_analysis_done)
+
+    def _on_demand_analysis_done(self) -> None:
+        """Called on main thread after an on-demand analysis completes."""
+        self.update_suggest_menu_badge()
+        pending = self.config.get("pending_suggestions") or {}
+        total = sum(len(v) for v in pending.values())
+        if total > 0:
+            self._open_suggestions_panel()
+        else:
+            self.main_app.notify(
+                "Настройки",
+                "В истории не найдено терминов, достаточно часто повторяющихся для добавления в словарь.",
+            )
+
+    def _open_suggestions_panel(self) -> None:
+        """Open the SuggestionsPanel for reviewing candidates."""
+        if self._suggestions_panel is None:
+            return
+        pending = self.config.get("pending_suggestions") or {}
+        if not pending:
+            return
+
+        def on_accept(accepted: list[dict], rejected: list[dict]) -> None:
+            from .app import _apply_candidates_to_user_terms
+            if accepted:
+                by_lang: dict[str, list[dict]] = {}
+                for item in accepted:
+                    by_lang.setdefault(item["lang"], []).append(item)
+                _apply_candidates_to_user_terms(self.config, by_lang)
+                for lang in by_lang:
+                    self._sync_prompt_file(lang)
+
+            # Rejected → skipped_terms with current phrase count
+            if rejected:
+                from .phrase_history import count_phrases
+                current_count = count_phrases()
+                skipped_terms = dict(self.config.get("skipped_terms") or {})
+                for item in rejected:
+                    lang = item["lang"]
+                    lang_skipped = dict(skipped_terms.get(lang, {}))
+                    lang_skipped[item["term"].lower()] = current_count
+                    skipped_terms[lang] = lang_skipped
+                self.config["skipped_terms"] = skipped_terms
+
+            # Remove shown items from pending (items not yet shown remain pending).
+            shown_lower = {i["term"].lower() for i in accepted + rejected}
+            new_pending: dict[str, list[dict]] = {}
+            for lang, items in pending.items():
+                remaining = [i for i in items if i["term"].lower() not in shown_lower]
+                if remaining:
+                    new_pending[lang] = remaining
+            self.config["pending_suggestions"] = new_pending
+            self.config["initial_prompt"] = build_initial_prompt(self.config)
+            self.save_config()
+            self.main_app.load_config_data(self.config)
+            self.update_suggest_menu_badge()
+
+        def on_skip() -> None:
+            pass  # pending remains, shown again at next startup
+
+        def on_auto() -> None:
+            self._apply_all_pending_suggestions()
+            self.config["prompt_update_mode"] = "auto"
+            self._update_mode_submenu_state()
+            self.save_config()
+            self.main_app.load_config_data(self.config)
+            self.update_suggest_menu_badge()
+
+        self._suggestions_panel.show(pending, on_accept, on_skip, on_auto)
+
+    def _apply_all_pending_suggestions(self) -> None:
+        """Add all pending candidates to user_terms and clear pending_suggestions."""
+        from .app import _apply_candidates_to_user_terms
+        pending = self.config.get("pending_suggestions") or {}
+        if not pending:
+            return
+        _apply_candidates_to_user_terms(self.config, pending)
+        for lang in pending:
+            self._sync_prompt_file(lang)
+        self.config["pending_suggestions"] = {}
+        self.config["initial_prompt"] = build_initial_prompt(self.config)
 
     def save_config(self) -> None:
         """Persists current config to config.json."""

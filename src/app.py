@@ -3,7 +3,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
@@ -20,6 +20,7 @@ from .ai_editor import AiEditor, DEFAULT_MODEL_NAME
 from .transcriber import TranscriberProcessWrapper
 from .utils import (
     build_initial_prompt,
+    deduplicate_prompt_terms,
     get_allowed_languages,
     get_primary_language,
     get_ui_strings,
@@ -27,12 +28,28 @@ from .utils import (
     log_exception,
     log_info,
     migrate_config_to_v2,
+    migrate_config_to_v3,
+    migrate_config_to_v4,
     save_config_to_disk,
     send_notification,
 )
 
 # Keep-alive interval in seconds (15 minutes)
 KEEP_ALIVE_INTERVAL_SECONDS = 15 * 60
+
+
+def _apply_candidates_to_user_terms(config: dict, candidates: dict) -> None:
+    """Merge candidates into user_terms[lang], dedup.
+
+    Existing user-curated terms come first; new auto-detected terms are appended.
+    build_initial_prompt enforces the final length via _MAX_PROMPT_CHARS.
+    """
+    user_terms = dict(config.get("user_terms") or {})
+    for lang, items in candidates.items():
+        new_terms = [item["term"] for item in items]
+        current = list(user_terms.get(lang, []))
+        user_terms[lang] = deduplicate_prompt_terms(current + new_terms)
+    config["user_terms"] = user_terms
 # Memory pressure threshold (%) above which keep-alive is disabled
 MEMORY_PRESSURE_THRESHOLD_PERCENT = 75
 
@@ -98,6 +115,7 @@ class SVoiceRecApp:
         self._last_transcription_time = time.time()  # Initialized to now (warmup counts)
         self._keep_alive_timer: Optional[threading.Timer] = None
         self._keep_alive_lock = threading.Lock()  # atomic guard for keep-alive warmup
+        self._analysis_lock = threading.Lock()  # prevents concurrent prompt-analysis threads
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
         self._previous_app_pid = None
@@ -221,6 +239,8 @@ class SVoiceRecApp:
 
     def load_config_data(self, data):
         data = migrate_config_to_v2(data)
+        data = migrate_config_to_v3(data)
+        data = migrate_config_to_v4(data)
         self.config = data
         if hasattr(self, "recorder"):
             self.update_recorder_settings()
@@ -363,6 +383,7 @@ class SVoiceRecApp:
                     if user_text:
                         append_phrase(user_text)
                         log_info("_run_injection: phrase appended")
+                        self._maybe_trigger_prompt_analysis()
                         mb = self.menu_bar
                         if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
                             self._submit_for_main_thread(mb.refresh_last_phrases_submenu)
@@ -402,6 +423,151 @@ class SVoiceRecApp:
             log_info("User cancelled edit popup (Escape). Nothing injected.")
 
         return _on_confirm, _on_cancel
+
+    # ------------------------------------------------------------------
+    # Automatic prompt analysis
+    # ------------------------------------------------------------------
+
+    def _maybe_trigger_prompt_analysis(self) -> None:
+        """Start background analysis if enough new phrases have accumulated."""
+        mode = self.config.get("prompt_update_mode", "suggest")
+        if mode == "disabled":
+            return
+        interval = int(self.config.get("auto_prompt_check_interval", 50))
+        last_check = int(self.config.get("last_analysis_phrase_count", 0))
+        try:
+            from .phrase_history import count_phrases
+            current = count_phrases()
+        except Exception:
+            return
+        if current - last_check < interval:
+            return
+        if not self._analysis_lock.acquire(blocking=False):
+            return  # previous analysis still running
+        threading.Thread(target=self._run_prompt_analysis, daemon=True).start()
+
+    def request_prompt_analysis(self, on_complete: Callable[[], None] | None = None) -> None:
+        """Start an on-demand analysis immediately, bypassing the interval check.
+
+        Uses softer thresholds (lookback=500, min_count=5) so the user sees
+        results even from sparse history. Does not update last_analysis_phrase_count
+        so the regular auto-analysis schedule is unaffected.
+        on_complete, if given, is posted to the main-thread queue after analysis.
+        """
+        if not self._analysis_lock.acquire(blocking=False):
+            log_info("Prompt analysis already running, skipping on-demand request.")
+            if on_complete is not None:
+                self._submit_for_main_thread(on_complete)
+            return
+        threading.Thread(
+            target=self._run_prompt_analysis,
+            kwargs={"on_demand": True, "on_complete": on_complete},
+            daemon=True,
+        ).start()
+
+    def _run_prompt_analysis(self, on_demand: bool = False, on_complete: Callable[[], None] | None = None) -> None:
+        """Background thread: analyse phrase history, update user_terms or pending_suggestions.
+
+        on_demand=True uses softer parameters and skips the interval counter update.
+        on_complete is called on the main thread after analysis finishes (success or empty).
+        """
+        try:
+            from .log_analyzer import get_prompt_candidates
+            from .phrase_history import count_phrases
+
+            current_count = count_phrases()
+
+            existing: dict[str, set[str]] = {}
+            for lang, terms in (self.config.get("user_terms") or {}).items():
+                existing.setdefault(lang, set()).update(t.lower() for t in terms)
+
+            skipped_raw = self.config.get("skipped_terms") or {}
+            skipped: dict[str, dict[str, int]] = {
+                lang: {t.lower(): cnt for t, cnt in terms.items()}
+                for lang, terms in skipped_raw.items()
+            }
+
+            if on_demand:
+                lookback = 500
+                min_count = 10
+            else:
+                lookback = 100
+                min_count = int(self.config.get("auto_prompt_check_min_count", 10))
+
+            candidates = get_prompt_candidates(
+                lookback=lookback,
+                min_count=min_count,
+                existing_lower_by_lang=existing,
+                skipped_lower_by_lang=skipped,
+                current_phrase_count=current_count,
+                cooldown_phrases=100,
+            )
+
+            # Remap candidate buckets that don't match any active language to primary.
+            # get_prompt_candidates uses script-based detection ("en" for Latin, "ru" for
+            # Cyrillic), which may not align with the user's configured languages.
+            primary_lang = get_primary_language(self.config)
+            active_langs = {primary_lang} | set(self.config.get("additional_languages") or [])
+            remapped: dict[str, list[dict]] = {}
+            for lang, items in candidates.items():
+                target = lang if lang in active_langs else primary_lang
+                existing_items = remapped.get(target, [])
+                seen_lower = {item["term"].lower() for item in existing_items}
+                for item in items:
+                    if item["term"].lower() not in seen_lower:
+                        existing_items.append(item)
+                        seen_lower.add(item["term"].lower())
+                remapped[target] = sorted(existing_items, key=lambda x: -x["count"])
+            candidates = remapped
+
+            if not on_demand:
+                self.config["last_analysis_phrase_count"] = current_count
+            mode = self.config.get("prompt_update_mode", "suggest")
+
+            if mode == "auto" and candidates:
+                _apply_candidates_to_user_terms(self.config, candidates)
+                self.config["initial_prompt"] = build_initial_prompt(self.config)
+                save_config_to_disk(self.config)
+                # load_config_data and prompt-file sync must run on the main thread.
+                self._submit_for_main_thread(self.load_config_data, self.config)
+                mb = self.menu_bar
+                if mb is not None and hasattr(mb, "_sync_prompt_file"):
+                    for lang in candidates:
+                        self._submit_for_main_thread(mb._sync_prompt_file, lang)
+                total = sum(len(v) for v in candidates.values())
+                log_info(f"Auto-applied {total} prompt candidates to user_terms.")
+            elif mode == "suggest" and candidates:
+                # Merge with existing pending: update count for known terms, add new ones.
+                existing_pending = dict(self.config.get("pending_suggestions") or {})
+                merged: dict[str, list[dict]] = {}
+                for lang in set(existing_pending) | set(candidates):
+                    by_lower: dict[str, dict] = {}
+                    for item in existing_pending.get(lang, []):
+                        by_lower[item["term"].lower()] = dict(item)
+                    for item in candidates.get(lang, []):
+                        lower = item["term"].lower()
+                        if lower in by_lower:
+                            by_lower[lower]["count"] = max(by_lower[lower]["count"], item["count"])
+                        else:
+                            by_lower[lower] = dict(item)
+                    merged[lang] = sorted(by_lower.values(), key=lambda x: -x["count"])
+                self.config["pending_suggestions"] = merged
+                save_config_to_disk(self.config)
+                mb = self.menu_bar
+                if mb is not None and hasattr(mb, "update_suggest_menu_badge"):
+                    self._submit_for_main_thread(mb.update_suggest_menu_badge)
+            else:
+                save_config_to_disk(self.config)
+
+            if on_complete is not None:
+                self._submit_for_main_thread(on_complete)
+
+        except Exception as exc:
+            log_exception(f"Prompt analysis failed: {exc}")
+            if on_complete is not None:
+                self._submit_for_main_thread(on_complete)
+        finally:
+            self._analysis_lock.release()
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
@@ -544,21 +710,30 @@ class SVoiceRecApp:
                 log_info("Skipping non-final chunk transcription (stop requested).")
                 return
 
-            # Prepend punctuation instructions to ensure Whisper adds dots/commas
-            instruction = "Расставляй знаки препинания. Пиши с заглавной буквы. "
+            # Build context: always keep the full vocab prompt, then fill the
+            # remaining token budget with whole recent chunks (newest first) so
+            # vocabulary terms stay in context for every chunk, not just the first.
+            s = get_ui_strings(get_primary_language(self.config))
+            instruction = s["transcription_instruction"]
+            vocab_prompt = build_initial_prompt(self.config)
             if self.transcribed_parts:
-                full_context = " ".join(self.transcribed_parts)
-                if len(full_context) > 200:
-                    context = instruction + full_context[-200:]
-                else:
-                    context = instruction + full_context
+                # Whisper's prompt window is ~224 tokens (~700 chars for mixed text).
+                # Subtract fixed parts to get chars available for recent speech context.
+                _WHISPER_PROMPT_BUDGET = 700
+                available = max(0, _WHISPER_PROMPT_BUDGET - len(instruction) - len(vocab_prompt) - 1)
+                recent: list[str] = []
+                used = 0
+                for chunk in reversed(self.transcribed_parts):
+                    needed = len(chunk) + (1 if recent else 0)
+                    if used + needed > available:
+                        break
+                    recent.append(chunk)
+                    used += needed
+                recent.reverse()
+                recent_text = " ".join(recent)
+                context = instruction + vocab_prompt + (" " + recent_text if recent_text else "")
             else:
-                default_prompt = (
-                    "Текст содержит русские и английские слова. "
-                    "Mixed Russian and English terminology: API, bug, feature, survival."
-                )
-                user_prompt = build_initial_prompt(self.config)
-                context = instruction + (user_prompt or default_prompt)
+                context = instruction + vocab_prompt
 
             allowed_languages = get_allowed_languages(self.config)
             condition_on_previous_text = self.config.get(
@@ -996,8 +1171,9 @@ class SVoiceRecApp:
             log_info("Keep-alive: previous warmup still running — skipping.")
             return
         try:
+            self.transcriber.clear_cache()
             self.transcriber.pre_warm()
-            log_info("Keep-alive: pre_warm() sent to transcriber process.")
+            log_info("Keep-alive: cache cleared and pre_warm() sent to transcriber process.")
             self._last_transcription_time = time.time()
         except Exception as e:
             log_error(f"Keep-alive warmup failed: {e}")

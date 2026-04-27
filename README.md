@@ -13,6 +13,7 @@ All processing runs on-device using Apple Silicon — no data leaves your machin
 - **Multilingual** — primary + additional languages in one session, no layout switching
 - **Setup wizard** — first-launch wizard guides through all required permissions automatically
 - **Menu bar UI** — model selection, language config, prompt editing, phrase history
+- **Clean shutdown** — no orphan MLX helper processes left behind, even after Force Quit or crash (kqueue-driven parent-death watchdog + startup sweep)
 
 ## Requirements
 

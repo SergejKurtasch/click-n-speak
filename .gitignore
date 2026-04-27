@@ -37,6 +37,7 @@ phrase_history.txt
 
 # Dev notes / AI assistant instructions — internal only
 CLAUDE.md
+.claude/
 
 # Untracked dev files
 scripts/launcher.c
