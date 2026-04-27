@@ -426,7 +426,10 @@ class TranscriberProcessWrapper:
         self.input_queue = mp.Queue()
         self.output_queue = mp.Queue()
         self.model_name = model_name
-        
+        # Epoch time of the last completed transcription in this wrapper.
+        # Used to skip prewarm when the model is already warm (recent transcription).
+        self._last_transcribe_returned_at: float = 0.0
+
         # Start child process
         self._process = mp.Process(target=self._run_loop, daemon=True)
         self._process.start()
@@ -461,11 +464,22 @@ class TranscriberProcessWrapper:
                     transcriber.warmup(language=cmd.get("language"))
                     self.output_queue.put({"type": "warmup_done"})
                 elif action == "prewarm":
-                    # Run a real short transcription on silence to bring GPU/MLX weights
-                    # back into active memory. Fire-and-forget: result is discarded.
-                    silence = np.zeros(16000, dtype=np.float32)  # 1s at 16kHz
-                    transcriber.transcribe(silence, is_final_chunk=False)
-                    self.output_queue.put({"type": "prewarm_done"})
+                    # Skip prewarm if a real transcribe request is already waiting —
+                    # the queue became non-empty between pre_warm() being sent and the
+                    # child getting here, meaning the user started speaking immediately.
+                    # Running prewarm in that case would block the real chunk for 15-22s.
+                    if not self.input_queue.empty():
+                        log_info(
+                            "Prewarm skipped: real transcribe pending in queue "
+                            "— model will warm on first real chunk."
+                        )
+                        self.output_queue.put({"type": "prewarm_done"})
+                    else:
+                        # Run a real short transcription on silence to bring GPU/MLX weights
+                        # back into active memory. Fire-and-forget: result is discarded.
+                        silence = np.zeros(16000, dtype=np.float32)  # 1s at 16kHz
+                        transcriber.transcribe(silence, is_final_chunk=False)
+                        self.output_queue.put({"type": "prewarm_done"})
                 elif action == "transcribe":
                     text = transcriber.transcribe(
                         cmd.get("audio_data"),
@@ -522,10 +536,20 @@ class TranscriberProcessWrapper:
     def warmup(self, language=None):
         self.input_queue.put({"action": "warmup", "language": language})
 
+    # Seconds since last transcription below which prewarm is skipped (model still warm).
+    _PREWARM_IDLE_THRESHOLD = 45.0
+
     def pre_warm(self) -> None:
         """Fire-and-forget: push a tiny silent transcription to the child process so
         GPU/MLX model weights are in active memory before the first real chunk arrives.
-        The prewarm_done response will be silently consumed by the next transcribe() call."""
+        Skipped when the model is already warm (recent transcription within threshold)."""
+        idle = time.time() - self._last_transcribe_returned_at
+        if idle < self._PREWARM_IDLE_THRESHOLD:
+            log_info(
+                f"Pre-warm skipped: last transcription {idle:.1f}s ago "
+                f"(threshold {self._PREWARM_IDLE_THRESHOLD}s) — model is warm."
+            )
+            return
         self.input_queue.put({"action": "prewarm"})
         
     def clear_cache(self) -> None:
@@ -582,6 +606,7 @@ class TranscriberProcessWrapper:
                 poll_timeout = min(0.1, remaining)
                 res = self.output_queue.get(timeout=poll_timeout)
                 if res["type"] == "transcription":
+                    self._last_transcribe_returned_at = time.time()
                     return res["text"]
                 elif res["type"] == "error":
                     log_error(f"Transcriber process error: {res['message']}\n{res.get('trace')}")

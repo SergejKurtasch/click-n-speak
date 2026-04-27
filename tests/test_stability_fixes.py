@@ -337,11 +337,78 @@ def test_recorder_stop_thread_timeout():
             pass
             
     recorder.stream = HangingStream()
-    
+
     start_time = time.time()
     # Should timeout in ~3 seconds, not 10
     recorder.stop()
     elapsed = time.time() - start_time
-    
+
     # The stop itself should be nearly instantaneous because it spawns a daemon thread
     assert elapsed < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Fix #2: pre_warm parent-side idle guard
+# ---------------------------------------------------------------------------
+
+
+def test_prewarm_skipped_when_model_is_warm():
+    """pre_warm() must not enqueue when last transcription was recent."""
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper.model_name = "dummy"
+    wrapper._process = MagicMock()
+
+    # Simulate a recent transcription (1 second ago — well within 45s threshold)
+    wrapper._last_transcribe_returned_at = time.time() - 1.0
+
+    with patch("src.transcriber.log_info"):
+        wrapper.pre_warm()
+
+    assert wrapper.input_queue.empty(), (
+        "pre_warm() must NOT enqueue when model is warm (recent transcription)"
+    )
+
+
+def test_prewarm_sent_when_model_is_cold():
+    """pre_warm() must enqueue when last transcription was long ago (cold model)."""
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper.model_name = "dummy"
+    wrapper._process = MagicMock()
+
+    # Simulate no prior transcription (epoch 0 = effectively never)
+    wrapper._last_transcribe_returned_at = 0.0
+
+    with patch("src.transcriber.log_info"):
+        wrapper.pre_warm()
+
+    assert not wrapper.input_queue.empty(), (
+        "pre_warm() must enqueue when model is cold (no recent transcription)"
+    )
+    cmd = wrapper.input_queue.get_nowait()
+    assert cmd["action"] == "prewarm"
+
+
+def test_last_transcribe_returned_at_updated_after_transcribe():
+    """_last_transcribe_returned_at must be set after a successful transcription."""
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper.model_name = "dummy"
+    wrapper._process = MagicMock()
+    wrapper._last_transcribe_returned_at = 0.0
+
+    # Pre-load a transcription result in the output queue
+    wrapper.output_queue.put({"type": "transcription", "text": "привет"})
+
+    before = time.time()
+    with patch("src.transcriber.log_info"), patch("src.transcriber.log_error"):
+        result = wrapper.transcribe(np.zeros(1600, dtype=np.float32))
+
+    assert result == "привет"
+    assert wrapper._last_transcribe_returned_at >= before, (
+        "_last_transcribe_returned_at not updated after transcription"
+    )

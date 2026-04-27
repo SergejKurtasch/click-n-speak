@@ -122,6 +122,7 @@ class SVoiceRecApp:
         self._raw_whisper_text = ""
         self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
         self._ai_edited_text = None
+        self._ai_editor_status: Optional[str] = None
 
         # Cached result of build_initial_prompt(). Invalidated by load_config_data()
         # so process_chunk() avoids rebuilding (dedup+join+truncate) on every chunk.
@@ -385,7 +386,12 @@ class SVoiceRecApp:
                     log_info("_run_injection: start")
 
                     # Log to dataset (background thread, file I/O — safe)
-                    append_to_dataset(self._raw_whisper_text, self._ai_edited_text, user_text)
+                    append_to_dataset(
+                        self._raw_whisper_text,
+                        self._ai_edited_text,
+                        user_text,
+                        ai_status=self._ai_editor_status,
+                    )
                     log_info("_run_injection: dataset saved")
 
                     if user_text:
@@ -622,6 +628,7 @@ class SVoiceRecApp:
         self._raw_whisper_text = ""
         self._raw_whisper_chunks = []
         self._ai_edited_text = None
+        self._ai_editor_status = None
         self.stop_worker.clear()
         self._session_id += 1  # Invalidate any lingering worker from previous session
 
@@ -813,10 +820,14 @@ class SVoiceRecApp:
                             log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
                         else:
                             refined = self.ai_editor.refine(full_text)
+                            # Always capture what the AI produced and its status so the
+                            # dataset record distinguishes "AI ran but unchanged" from
+                            # "AI was disabled / skipped / timed out".
+                            self._ai_edited_text = refined
+                            self._ai_editor_status = self.ai_editor.last_refine_status
                             if refined and refined != full_text:
                                 log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
                                 is_ai_edited = True
-                                self._ai_edited_text = refined
                                 full_text = refined
                     # -------------------------------------------
 
