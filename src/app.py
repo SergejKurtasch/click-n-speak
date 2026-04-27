@@ -123,6 +123,11 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
         self._ai_edited_text = None
 
+        # Cached result of build_initial_prompt(). Invalidated by load_config_data()
+        # so process_chunk() avoids rebuilding (dedup+join+truncate) on every chunk.
+        self._cached_initial_prompt: str = ""
+        self._initial_prompt_dirty: bool = True
+
     def _ensure_preview_panel(self):
         if self._preview_panel is None:
             from .preview_panel import TranscriptionPreviewPanel
@@ -242,6 +247,9 @@ class SVoiceRecApp:
         data = migrate_config_to_v3(data)
         data = migrate_config_to_v4(data)
         self.config = data
+        # Invalidate the cached prompt so process_chunk() rebuilds it on the next chunk.
+        if hasattr(self, "_initial_prompt_dirty"):
+            self._initial_prompt_dirty = True
         if hasattr(self, "recorder"):
             self.update_recorder_settings()
         if hasattr(self, "transcriber"):
@@ -444,7 +452,12 @@ class SVoiceRecApp:
             return
         if not self._analysis_lock.acquire(blocking=False):
             return  # previous analysis still running
-        threading.Thread(target=self._run_prompt_analysis, daemon=True).start()
+        # Pass the already-read count so _run_prompt_analysis skips a second file scan.
+        threading.Thread(
+            target=self._run_prompt_analysis,
+            kwargs={"current_phrase_count": current},
+            daemon=True,
+        ).start()
 
     def request_prompt_analysis(self, on_complete: Callable[[], None] | None = None) -> None:
         """Start an on-demand analysis immediately, bypassing the interval check.
@@ -465,17 +478,23 @@ class SVoiceRecApp:
             daemon=True,
         ).start()
 
-    def _run_prompt_analysis(self, on_demand: bool = False, on_complete: Callable[[], None] | None = None) -> None:
+    def _run_prompt_analysis(
+        self,
+        on_demand: bool = False,
+        on_complete: Callable[[], None] | None = None,
+        current_phrase_count: int | None = None,
+    ) -> None:
         """Background thread: analyse phrase history, update user_terms or pending_suggestions.
 
         on_demand=True uses softer parameters and skips the interval counter update.
         on_complete is called on the main thread after analysis finishes (success or empty).
+        current_phrase_count, if provided, avoids a redundant file scan (already done by caller).
         """
         try:
             from .log_analyzer import get_prompt_candidates
             from .phrase_history import count_phrases
 
-            current_count = count_phrases()
+            current_count = current_phrase_count if current_phrase_count is not None else count_phrases()
 
             existing: dict[str, set[str]] = {}
             for lang, terms in (self.config.get("user_terms") or {}).items():
@@ -715,7 +734,11 @@ class SVoiceRecApp:
             # vocabulary terms stay in context for every chunk, not just the first.
             s = get_ui_strings(get_primary_language(self.config))
             instruction = s["transcription_instruction"]
-            vocab_prompt = build_initial_prompt(self.config)
+            # Use cached prompt — rebuild only when config changed (load_config_data sets dirty flag).
+            if self._initial_prompt_dirty:
+                self._cached_initial_prompt = build_initial_prompt(self.config)
+                self._initial_prompt_dirty = False
+            vocab_prompt = self._cached_initial_prompt
             if self.transcribed_parts:
                 # Whisper's prompt window is ~224 tokens (~700 chars for mixed text).
                 # Subtract fixed parts to get chars available for recent speech context.
@@ -764,6 +787,17 @@ class SVoiceRecApp:
                 log_info(f"Partial Transcription (raw): {text}")
                 is_ai_edited = False
 
+                # Session guard: check BEFORE mutating shared state so a stale worker
+                # from a previous session never pollutes transcribed_parts of the new one.
+                if self._session_id != session_id:
+                    if self._preview_panel:
+                        self._preview_panel.hide(self._main_thread_queue, delay=0.0)
+                    log_info(
+                        f"Chunk dropped: session invalidated "
+                        f"(worker={session_id}, current={self._session_id}), text='{text[:60]}'"
+                    )
+                    return
+
                 # Track raw Whisper output before any AI editing (for dataset accuracy)
                 self._raw_whisper_chunks.append(text)
 
@@ -773,77 +807,69 @@ class SVoiceRecApp:
 
                 self.transcribed_parts.append(text)
 
-                if self._session_id == session_id:
-                    if is_final_chunk:
-                        full_text = " ".join(self.transcribed_parts).strip()
+                if is_final_chunk:
+                    full_text = " ".join(self.transcribed_parts).strip()
 
-                        # --- AI Editor post-processing (optional) ---
-                        # Refine the FULL accumulated text, not just the final chunk,
-                        # so partial chunks (which make up most of the content) are also
-                        # punctuated and capitalized.
-                        if (
-                            self.ai_editor is not None
-                            and self.ai_editor.is_ready()
-                            and self.config.get("ai_editor_enabled", False)
-                        ):
-                            word_count = len(full_text.split())
-                            if word_count <= 3:
-                                log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
-                            elif self.ai_editor.is_hallucination(full_text):
-                                log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
-                            else:
-                                refined = self.ai_editor.refine(full_text)
-                                if refined and refined != full_text:
-                                    log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
-                                    is_ai_edited = True
-                                    self._ai_edited_text = refined
-                                    full_text = refined
-                        # -------------------------------------------
+                    # --- AI Editor post-processing (optional) ---
+                    # Refine the FULL accumulated text, not just the final chunk,
+                    # so partial chunks (which make up most of the content) are also
+                    # punctuated and capitalized.
+                    if (
+                        self.ai_editor is not None
+                        and self.ai_editor.is_ready()
+                        and self.config.get("ai_editor_enabled", False)
+                    ):
+                        word_count = len(full_text.split())
+                        if word_count <= 3:
+                            log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
+                        elif self.ai_editor.is_hallucination(full_text):
+                            log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
+                        else:
+                            refined = self.ai_editor.refine(full_text)
+                            if refined and refined != full_text:
+                                log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
+                                is_ai_edited = True
+                                self._ai_edited_text = refined
+                                full_text = refined
+                    # -------------------------------------------
 
-                        # Cancel the delayed "still working" timer under the lock.
-                        def _cancel_delayed_timer():
-                            with self._timer_lock:
-                                if self._delayed_transcribing_timer is not None:
-                                    try:
-                                        self._delayed_transcribing_timer.cancel()
-                                    except Exception:
-                                        pass
-                                    self._delayed_transcribing_timer = None
-                        self._submit_for_main_thread(_cancel_delayed_timer)
+                    # Cancel the delayed "still working" timer under the lock.
+                    def _cancel_delayed_timer():
+                        with self._timer_lock:
+                            if self._delayed_transcribing_timer is not None:
+                                try:
+                                    self._delayed_transcribing_timer.cancel()
+                                except Exception:
+                                    pass
+                                self._delayed_transcribing_timer = None
+                    self._submit_for_main_thread(_cancel_delayed_timer)
 
-                        _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                    _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
 
-                        s_ui = get_ui_strings(get_primary_language(self.config))
-                        log_info(
-                            f"process_chunk: ready to show interactive popup. "
-                            f"full_text_len={len(full_text)}, "
-                            f"preview_panel={self._preview_panel is not None}, "
-                            f"session_id={session_id}"
-                        )
-                        if full_text and self._preview_panel:
-                            self._preview_panel.show_interactive(
-                                full_text,
-                                self._main_thread_queue,
-                                on_confirm=_on_confirm,
-                                on_cancel=_on_cancel,
-                                title=s_ui["edit_confirm_title"],
-                            )
-                            log_info("process_chunk: show_interactive queued on main thread")
-                        elif self._preview_panel:
-                            self._preview_panel.hide(self._main_thread_queue, delay=0.8)
-                    else:
-                        accumulated = " ".join(self.transcribed_parts).strip()
-                        if self._preview_panel:
-                            self._preview_panel.update_text(accumulated, self._main_thread_queue)
-                        log_info(
-                            f"Partial chunk buffered ({len(self.transcribed_parts)} chunk(s))"
-                        )
-                else:
-                    if self._preview_panel:
-                        self._preview_panel.hide(self._main_thread_queue, delay=0.0)
+                    s_ui = get_ui_strings(get_primary_language(self.config))
                     log_info(
-                        f"Chunk dropped: session invalidated "
-                        f"(worker={session_id}, current={self._session_id}), text='{text[:60]}'"
+                        f"process_chunk: ready to show interactive popup. "
+                        f"full_text_len={len(full_text)}, "
+                        f"preview_panel={self._preview_panel is not None}, "
+                        f"session_id={session_id}"
+                    )
+                    if full_text and self._preview_panel:
+                        self._preview_panel.show_interactive(
+                            full_text,
+                            self._main_thread_queue,
+                            on_confirm=_on_confirm,
+                            on_cancel=_on_cancel,
+                            title=s_ui["edit_confirm_title"],
+                        )
+                        log_info("process_chunk: show_interactive queued on main thread")
+                    elif self._preview_panel:
+                        self._preview_panel.hide(self._main_thread_queue, delay=0.8)
+                else:
+                    accumulated = " ".join(self.transcribed_parts).strip()
+                    if self._preview_panel:
+                        self._preview_panel.update_text(accumulated, self._main_thread_queue)
+                    log_info(
+                        f"Partial chunk buffered ({len(self.transcribed_parts)} chunk(s))"
                     )
             else:
                 log_info("Transcriber returned empty text for this chunk.")

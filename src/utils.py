@@ -381,14 +381,37 @@ def log_exception(message: str) -> None:
 
 
 def save_config_to_disk(config: dict) -> None:
-    """Writes config dict to config.json in project root. Logs errors."""
-    import json
+    """Atomically write config dict to config.json.
 
+    Writes to a sibling temp file then calls os.replace() so a crash or SIGKILL
+    mid-write never leaves a partial/empty JSON file that would wipe user_terms on
+    the next launch.
+    """
+    import json
+    import tempfile
+
+    config_path = get_config_path()
+    tmp_path = None
     try:
-        with open(get_config_path(), "w") as f:
-            json.dump(config, f, indent=4)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            os.close(fd)
+            raise
+        os.replace(tmp_path, config_path)
     except OSError as e:
         log_error(f"Error saving config: {e}")
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 # Language hints passed to Whisper as initial_prompt prefix.
@@ -416,9 +439,39 @@ LANG_DEFAULT_CONTEXT: dict[str, str] = {
 # Normalised set for filtering language-hint phrases during term parsing.
 _LANG_HINT_LOWER: set[str] = {v.lower().rstrip(". ") for v in LANG_PROMPTS.values()}
 
-# Whisper's prompt window is ~224 tokens (~900 chars). We leave ~64 chars for the
-# per-chunk instruction prefix added in app.py, so cap terms at 500 chars.
-_MAX_PROMPT_CHARS = 500
+# Whisper's hard prompt limit is 224 BPE tokens. We budget 200 tokens for the
+# vocab/hint portion (app.py reserves the rest for the per-chunk instruction).
+# Cyrillic characters encode as 2-3 tokens each, so a char-based cap of 500
+# can silently overflow the budget with Russian text. We therefore estimate
+# tokens via the Whisper tokenizer when available, and fall back to a very
+# conservative 3 chars/token heuristic (240 chars ≈ 80 tokens — safe worst case).
+_MAX_PROMPT_TOKENS = 200
+_MAX_PROMPT_CHARS_FALLBACK = 400  # used only when tokenizer is unavailable
+
+# Lazy-loaded Whisper BPE encoder for token-accurate prompt truncation.
+_prompt_tokenizer = None
+_prompt_tokenizer_tried: bool = False
+
+
+def _count_prompt_tokens(text: str) -> int:
+    """Estimate BPE token count for *text* using the Whisper multilingual tokenizer.
+
+    Falls back to len(text) // 3 (conservative for Cyrillic) if unavailable.
+    """
+    global _prompt_tokenizer, _prompt_tokenizer_tried
+    if not _prompt_tokenizer_tried:
+        _prompt_tokenizer_tried = True
+        try:
+            from mlx_whisper.tokenizer import get_tokenizer  # type: ignore
+            _prompt_tokenizer = get_tokenizer(multilingual=True, language="en").encoding
+        except Exception:
+            pass
+    if _prompt_tokenizer is not None:
+        raw = len(_prompt_tokenizer.encode(text))
+        if raw > 0:
+            return raw
+        # raw == 0 means the tokenizer is a mock/stub (tests) — fall through to heuristic
+    return max(1, len(text) // 3)
 
 
 def parse_prompt_terms(text: str) -> list[str]:
@@ -458,7 +511,9 @@ def deduplicate_prompt_terms(terms: list[str]) -> list[str]:
 def build_initial_prompt(config: dict) -> str:
     """Build the effective Whisper initial_prompt from user_terms for all active languages.
 
-    Hard-capped at _MAX_PROMPT_CHARS to keep within Whisper's 224-token prompt window.
+    Token-accurate truncation: adds terms one-by-one until the BPE token budget
+    (_MAX_PROMPT_TOKENS) is reached, so Cyrillic-heavy prompts don't silently
+    overflow Whisper's 224-token limit.
     """
     primary = get_primary_language(config)
     additional = list(config.get("additional_languages") or [])
@@ -474,25 +529,43 @@ def build_initial_prompt(config: dict) -> str:
         if lang != primary:
             terms.extend(user_terms.get(lang, []))
     terms = deduplicate_prompt_terms(terms)
-    terms_str = ", ".join(t for t in terms if str(t).strip())
+
     primary_has_terms = bool(user_terms.get(primary))
-    if terms_str:
-        if not primary_has_terms and primary in LANG_DEFAULT_CONTEXT:
-            # Primary language has no terms: prepend its style hint so Whisper
-            # knows the register even when only additional-language terms are set.
-            result = f"{lang_hint} {LANG_DEFAULT_CONTEXT[primary]} {terms_str}".strip()
+
+    # Build the fixed prefix (lang hint + optional style sentence)
+    if not terms:
+        if primary in LANG_DEFAULT_CONTEXT:
+            result = f"{lang_hint} {LANG_DEFAULT_CONTEXT[primary]}".strip()
         else:
-            result = f"{lang_hint} {terms_str}".strip()
+            result = lang_hint
+        return result.strip()
+
+    if not primary_has_terms and primary in LANG_DEFAULT_CONTEXT:
+        prefix = f"{lang_hint} {LANG_DEFAULT_CONTEXT[primary]} "
+    else:
+        prefix = f"{lang_hint} "
+
+    # Add terms one-by-one until the token budget is exhausted.
+    prefix_tokens = _count_prompt_tokens(prefix)
+    budget = _MAX_PROMPT_TOKENS - prefix_tokens
+    accepted: list[str] = []
+    used_tokens = 0
+    for term in terms:
+        if not str(term).strip():
+            continue
+        fragment = (", " if accepted else "") + term
+        cost = _count_prompt_tokens(fragment)
+        if used_tokens + cost > budget:
+            break
+        accepted.append(term)
+        used_tokens += cost
+
+    if accepted:
+        result = (prefix + ", ".join(accepted)).strip()
     elif primary in LANG_DEFAULT_CONTEXT:
         result = f"{lang_hint} {LANG_DEFAULT_CONTEXT[primary]}".strip()
     else:
         result = lang_hint
-
-    if len(result) > _MAX_PROMPT_CHARS:
-        truncated = result[:_MAX_PROMPT_CHARS]
-        cut = truncated.rfind(",")
-        # Only cut at a comma that is well past the language-hint prefix.
-        result = truncated[:cut] if cut > len(lang_hint) + 10 else truncated
 
     return result.strip()
 

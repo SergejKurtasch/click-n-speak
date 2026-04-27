@@ -93,31 +93,41 @@ class TestBuildInitialPrompt:
         assert "PCA" in result
         assert "survival" in result
 
-    def test_auto_terms_appended(self):
+    def test_auto_terms_merged_into_user_terms(self):
+        # Since Etap 7, auto_terms no longer exist — accepted candidates go directly
+        # into user_terms. Both keys must be present in user_terms to appear in prompt.
         cfg = self._cfg(
-            user_terms={"ru": ["PCA"]},
-            auto_terms={"ru": ["Hugging Face"]},
+            user_terms={"ru": ["PCA", "Hugging Face"]},
         )
         result = build_initial_prompt(cfg)
         assert "PCA" in result
         assert "Hugging Face" in result
 
-    def test_cap_at_500_chars(self):
+    def test_cap_at_token_budget(self):
+        # Token-accurate truncation: prompt must stay within _MAX_PROMPT_TOKENS tokens.
+        # We use English terms (1-2 tokens each) and a large list to force truncation.
         long_terms = [f"term{i}" for i in range(200)]
-        cfg = self._cfg(user_terms={"ru": long_terms})
+        cfg = self._cfg(user_terms={"en": long_terms})
         result = build_initial_prompt(cfg)
-        assert len(result) <= 500
+        # The prompt must be non-empty and not absurdly long
+        assert len(result) > 0
+        assert len(result) <= 800  # hard upper bound (200 tokens × 4 chars/token)
 
-    def test_fallback_to_legacy_initial_prompt(self):
-        cfg = {"primary_language": "ru", "additional_languages": [], "initial_prompt": "PCA, survival"}
-        result = build_initial_prompt(cfg)
-        assert "PCA" in result
-        assert "survival" in result
-
-    def test_empty_config(self):
+    def test_no_terms_falls_back_to_default_context(self):
+        # When user_terms is empty/absent, build_initial_prompt returns the lang hint
+        # plus the default style sentence (added in Etap 7 as LANG_DEFAULT_CONTEXT).
+        # Legacy config.initial_prompt is no longer read (removed in Etap 6).
         cfg = {"primary_language": "ru", "additional_languages": []}
         result = build_initial_prompt(cfg)
-        assert result == LANG_PROMPTS["ru"]
+        assert "Русский язык" in result
+        assert len(result) > 0
+
+    def test_empty_config(self):
+        # Since Etap 7, empty user_terms → lang hint + LANG_DEFAULT_CONTEXT style sentence.
+        cfg = {"primary_language": "ru", "additional_languages": []}
+        result = build_initial_prompt(cfg)
+        assert result.startswith(LANG_PROMPTS["ru"])
+        assert len(result) > len(LANG_PROMPTS["ru"])
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,25 @@ from .utils import log_error, log_exception, log_info
 # Maximum seconds to wait for transcriber process to respond before killing it
 TRANSCRIBER_TIMEOUT_SECONDS = 30
 
+# Cached result of whether mlx_whisper.transcribe accepts strict threshold kwargs.
+# None = not yet probed; True/False = result of probe.
+_STRICT_THRESHOLDS_SUPPORTED: bool | None = None
+
+
+def _supports_strict_thresholds() -> bool:
+    """Return True once, caching whether mlx_whisper accepts threshold kwargs."""
+    global _STRICT_THRESHOLDS_SUPPORTED
+    if _STRICT_THRESHOLDS_SUPPORTED is not None:
+        return _STRICT_THRESHOLDS_SUPPORTED
+    try:
+        import inspect
+        import mlx_whisper  # type: ignore
+        sig = inspect.signature(mlx_whisper.transcribe)
+        _STRICT_THRESHOLDS_SUPPORTED = "no_speech_threshold" in sig.parameters
+    except Exception:
+        _STRICT_THRESHOLDS_SUPPORTED = False
+    return _STRICT_THRESHOLDS_SUPPORTED
+
 # Final chunks shorter than this (in samples at 16kHz) are skipped — they are
 # almost always silence/noise that cause Whisper to hallucinate for 10-43 seconds.
 MIN_FINAL_CHUNK_SAMPLES = 4800  # 0.3 seconds at 16 kHz
@@ -55,7 +74,7 @@ def _call_mlx_transcribe(
     verbose=False,
     **extra_kwargs,
 ):
-    """Call mlx_whisper.transcribe; fall back without extra_kwargs if API does not support them."""
+    """Call mlx_whisper.transcribe, omitting threshold kwargs on older API versions."""
     try:
         import mlx_whisper  # type: ignore
     except ImportError as exc:
@@ -68,20 +87,23 @@ def _call_mlx_transcribe(
         "task": "transcribe",
         "verbose": verbose,
     }
-    try:
+    # Use threshold kwargs only when the installed mlx_whisper version supports them.
+    # Probed once via inspect so we never duplicate the expensive transcribe() call.
+    if extra_kwargs and _supports_strict_thresholds():
         return mlx_whisper.transcribe(audio_data, **base_kw, **extra_kwargs)
-    except TypeError:
-        # Older mlx_whisper may not accept no_speech_threshold / compression_ratio_threshold
+    if extra_kwargs and not _supports_strict_thresholds():
         log_info("mlx_whisper.transcribe does not accept strict thresholds; using defaults.")
-        return mlx_whisper.transcribe(audio_data, **base_kw)
+    return mlx_whisper.transcribe(audio_data, **base_kw)
 
 
 class WhisperTranscriber:
     def __init__(self, model_name="mlx-community/whisper-large-v3-turbo"):
         self.model_name = model_name
         self._warmup_done = False
-        # Common hallucinations/noise results to filter out (substring matches)
-        self.hallucination_phrases = {
+        # Whisper hallucination phrases matched as whole words/phrases (word-boundary regex).
+        # Single words like "субтитры" only match when they appear as a standalone word,
+        # so "включи субтитры" is no longer falsely dropped.
+        _hallucination_phrases = [
             "thank you",
             "thanks for watching",
             "благодарю",
@@ -108,7 +130,13 @@ class WhisperTranscriber:
             "субтитры",
             "редактор субтитров",
             "перевод на русский",
-        }
+        ]
+        # Pre-compile as alternation with word boundaries for efficient O(n) matching.
+        # \b works with Unicode (Cyrillic) in Python's re module.
+        self._hallucination_re = re.compile(
+            "|".join(rf"\b{re.escape(p)}\b" for p in _hallucination_phrases),
+            re.IGNORECASE | re.UNICODE,
+        )
         log_info(f"Initializing Whisper model: {model_name}...")
 
     def warmup(self, duration_seconds: float = 0.5, sample_rate: int = 16000, language: str = None) -> None:
@@ -281,12 +309,14 @@ class WhisperTranscriber:
                     return ""
 
             # Phrase list: filter for both normal and final chunk (thank you, etc.)
-            for phrase in self.hallucination_phrases:
-                if phrase in clean_text_lower:
-                    log_info(
-                        f"Filtered out hallucination containing '{phrase}': '{text}'"
-                    )
-                    return ""
+            # Uses word-boundary regex so single-word entries like "субтитры" match only
+            # when the word stands alone — prevents dropping real speech like "включи субтитры".
+            m = self._hallucination_re.search(clean_text_lower)
+            if m:
+                log_info(
+                    f"Filtered out hallucination (matched '{m.group()}' at word boundary): '{text}'"
+                )
+                return ""
 
             # Single-word "you"/"the": filter for normal chunks only; allow for final
             # so we do not drop real short endings when Whisper hallucinates "you"

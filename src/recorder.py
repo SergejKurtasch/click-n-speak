@@ -102,9 +102,9 @@ class AudioRecorder:
             
             frame_length = int(self.sample_rate * 0.03) * 2 # 30ms 16-bit
             while len(self.vad_buffer) >= frame_length:
-                frame = self.vad_buffer[:frame_length]
-                self.vad_buffer = self.vad_buffer[frame_length:]
-                if self.vad.is_speech(bytes(frame), self.sample_rate):
+                frame = bytes(self.vad_buffer[:frame_length])
+                del self.vad_buffer[:frame_length]  # O(1) in-place vs O(n) slice assignment
+                if self.vad.is_speech(frame, self.sample_rate):
                     self.silence_counter = 0
                     self.has_speech_in_chunk = True
                 else:

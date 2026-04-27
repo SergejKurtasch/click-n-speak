@@ -371,11 +371,11 @@ class TranscriptionPreviewPanel:
                 self.panel.orderFrontRegardless()
                 self.panel.setAlphaValue_(0.9)
 
-                # Try to make the panel key so the local monitor (which CAN consume
-                # events) gets Enter/Escape instead of the global one (which cannot).
-                # makeKeyWindow() works here because KeyablePanel.canBecomeKeyWindow
-                # returns True and NSNonactivatingPanelMask only prevents AUTOMATIC
-                # key-window acquisition — explicit calls still work.
+                # Activate our app so the panel reliably becomes the key window.
+                # This is necessary for LSUIElement (menu-bar-only) apps: without explicit
+                # activation the panel appears but never receives keyboard events.
+                # The previous app is restored in _run_injection via _restore_focus().
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
                 self.panel.makeKeyWindow()
                 self.panel.makeFirstResponder_(self.text_view)
                 self.text_view.selectAll_(None)
@@ -386,10 +386,9 @@ class TranscriptionPreviewPanel:
                     f"alpha={self.panel.alphaValue():.2f}"
                 )
 
-                # Install key monitors so Enter/Escape work regardless of whether the
-                # panel actually received keyboard focus.
-                # Local monitor  = our app is key → can consume the event (return None).
-                # Global monitor = other app is key → observe only, cannot consume.
+                # Local monitor captures Enter/Escape when our app is key (can consume events).
+                # No global monitor: a global monitor fires on Enter/Escape pressed in ANY app,
+                # which would silently inject text when the user types in another window.
                 def _local_key_handler(event):
                     if not self._is_interactive:
                         return event
@@ -404,28 +403,12 @@ class TranscriptionPreviewPanel:
                         return None  # consume
                     return event
 
-                def _global_key_handler(event):
-                    if not self._is_interactive:
-                        return
-                    kc = event.keyCode()
-                    log_info(f"global_key_handler: keyCode={kc}")
-                    if kc in (_KEY_RETURN, _KEY_ENTER):
-                        txt = str(self.text_view.string()).strip() if self.text_view else ""
-                        _handle_confirm(txt)
-                    elif kc == _KEY_ESCAPE:
-                        _handle_cancel()
-
-                # Null out first so _remove_key_monitors() in the except block
-                # won't try to remove stale monitors from a previous session.
                 self._local_monitor = None
-                self._global_monitor = None
+                self._global_monitor = None  # kept as None; _remove_key_monitors() handles it safely
                 self._local_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
                     _NSKeyDownMask, _local_key_handler
                 )
-                self._global_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                    _NSKeyDownMask, _global_key_handler
-                )
-                log_info("_do_show_interactive: key monitors installed, popup ready")
+                log_info("_do_show_interactive: local key monitor installed, popup ready")
             except Exception as e:
                 log_exception(f"[preview_panel] _do_show_interactive error: {e}")
                 self._remove_key_monitors()  # ensure no dangling monitors on partial setup failure

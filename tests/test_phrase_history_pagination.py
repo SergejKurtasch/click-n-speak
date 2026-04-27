@@ -27,6 +27,12 @@ import textwrap
 
 class TestCountPhrases(unittest.TestCase):
 
+    def setUp(self):
+        # Reset the in-memory phrase count cache before each test so results
+        # from a previous test don't bleed through (cache is a module global).
+        import src.phrase_history as ph
+        ph._phrase_count = None
+
     def _write_history(self, tmp_path: Path, lines: list[str]) -> Path:
         p = tmp_path / "phrase_history.txt"
         p.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
