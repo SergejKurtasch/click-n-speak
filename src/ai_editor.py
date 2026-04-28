@@ -48,12 +48,13 @@ class AiEditor:
     STATUS_ERROR = "error"
 
     # Refine status codes set after every refine() call for callers to inspect.
-    REFINE_STATUS_OK = "ok"          # LLM ran and produced a different (improved) text
-    REFINE_STATUS_UNCHANGED = "unchanged"  # LLM ran but returned same text (no edits needed)
-    REFINE_STATUS_TIMEOUT = "timeout"      # LLM hit the timeout — original text returned
-    REFINE_STATUS_SKIPPED = "skipped"      # Too short / hallucination filter / GPU busy
-    REFINE_STATUS_ERROR = "error"          # Exception inside the LLM thread
-    REFINE_STATUS_DISABLED = "disabled"    # ai_editor not ready or text was empty
+    REFINE_STATUS_OK = "ok"                      # LLM ran and produced a different (improved) text
+    REFINE_STATUS_UNCHANGED = "unchanged"        # LLM ran but returned same text (no edits needed)
+    REFINE_STATUS_TIMEOUT = "timeout"            # LLM hit the timeout — original text returned
+    REFINE_STATUS_SKIPPED = "skipped"            # Too short / hallucination filter / GPU busy
+    REFINE_STATUS_ERROR = "error"                # Exception inside the LLM thread
+    REFINE_STATUS_DISABLED = "disabled"          # ai_editor not ready or text was empty
+    REFINE_STATUS_MEMORY_PRESSURE = "memory_pressure"  # Skipped — system memory pressure too high
 
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME) -> None:
         self.model_name = model_name

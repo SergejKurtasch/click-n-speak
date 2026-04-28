@@ -17,7 +17,7 @@ except ImportError:
 
 from .dataset_logger import append_to_dataset
 from .ai_editor import AiEditor, DEFAULT_MODEL_NAME
-from .transcriber import TranscriberProcessWrapper
+from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS
 from .utils import (
     build_initial_prompt,
     deduplicate_prompt_terms,
@@ -719,6 +719,15 @@ class SVoiceRecApp:
             except Exception as e:
                 log_exception(f"Error in chunk worker loop: {e}")
         log_info("Chunk worker stopped (queue empty, ready for next session).")
+        # Ensure UI cleanup always runs on the main thread.
+        # In the normal flow stop_recording_and_process also submits this — the second
+        # call is a safe no-op (_do_finish_cleanup is idempotent and preview_panel guards
+        # against update_status while interactive popup is open).
+        # In the worker-timeout flow stop_recording_and_process skips the submission, so
+        # this call is the only one that resets "Still working…" back to "Ready" after the
+        # popup is shown.
+        if self._session_id == my_session_id:
+            self._submit_for_main_thread(self._do_finish_cleanup)
 
     def process_chunk(self, audio_chunk, is_final_chunk: bool = False, session_id: int = 0):
         """Transcribe a single audio chunk, accumulate result, and show popup on final chunk."""
@@ -757,6 +766,18 @@ class SVoiceRecApp:
                 "condition_on_previous_text", True
             )
 
+            # Detect cold start: first chunk of this session after long idle or under memory
+            # pressure — GPU weights may be paged out and need extra time to reload.
+            # Use an extended timeout so the process is not killed prematurely.
+            _COLD_START_IDLE_THRESHOLD = 5 * 60  # 5 minutes
+            last_returned = getattr(self.transcriber, "_last_transcribe_returned_at", 0.0)
+            idle_since_last = time.time() - (last_returned if isinstance(last_returned, (int, float)) else 0.0)
+            is_cold_start = len(self.transcribed_parts) == 0 and (
+                idle_since_last > _COLD_START_IDLE_THRESHOLD
+                or self._is_memory_pressure_high()
+            )
+            timeout_override = TRANSCRIBER_COLD_START_TIMEOUT_SECONDS if is_cold_start else None
+
             log_info(
                 "Processing audio chunk: "
                 f"len={len(audio_chunk)}, "
@@ -764,6 +785,7 @@ class SVoiceRecApp:
                 f"condition_on_previous_text={condition_on_previous_text}, "
                 f"context_len={len(context)}"
                 + (", is_final_chunk=True" if is_final_chunk else "")
+                + (f", cold_start_timeout={timeout_override:.0f}s (idle {idle_since_last:.0f}s)" if is_cold_start else "")
             )
 
             text = self.transcriber.transcribe(
@@ -772,6 +794,7 @@ class SVoiceRecApp:
                 allowed_languages=allowed_languages,
                 condition_on_previous_text=condition_on_previous_text,
                 is_final_chunk=is_final_chunk,
+                timeout_override=timeout_override,
             )
 
             # Update last transcription time for keep-alive tracking
@@ -813,22 +836,31 @@ class SVoiceRecApp:
                         and self.ai_editor.is_ready()
                         and self.config.get("ai_editor_enabled", False)
                     ):
-                        word_count = len(full_text.split())
-                        if word_count <= 3:
-                            log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
-                        elif self.ai_editor.is_hallucination(full_text):
-                            log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
+                        if self._is_memory_pressure_high():
+                            # Under memory pressure Qwen's GPU thread blocks and can't be
+                            # interrupted cleanly, causing 8.5s + 2s stuck-thread delays.
+                            # Skip refinement entirely and notify the user.
+                            log_info("AiEditor: skipping refinement — memory pressure high.")
+                            self._ai_editor_status = AiEditor.REFINE_STATUS_MEMORY_PRESSURE
+                            self._ai_edited_text = full_text
+                            self._submit_for_main_thread(self._send_memory_pressure_notification)
                         else:
-                            refined = self.ai_editor.refine(full_text)
-                            # Always capture what the AI produced and its status so the
-                            # dataset record distinguishes "AI ran but unchanged" from
-                            # "AI was disabled / skipped / timed out".
-                            self._ai_edited_text = refined
-                            self._ai_editor_status = self.ai_editor.last_refine_status
-                            if refined and refined != full_text:
-                                log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
-                                is_ai_edited = True
-                                full_text = refined
+                            word_count = len(full_text.split())
+                            if word_count <= 3:
+                                log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
+                            elif self.ai_editor.is_hallucination(full_text):
+                                log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
+                            else:
+                                refined = self.ai_editor.refine(full_text)
+                                # Always capture what the AI produced and its status so the
+                                # dataset record distinguishes "AI ran but unchanged" from
+                                # "AI was disabled / skipped / timed out".
+                                self._ai_edited_text = refined
+                                self._ai_editor_status = self.ai_editor.last_refine_status
+                                if refined and refined != full_text:
+                                    log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
+                                    is_ai_edited = True
+                                    full_text = refined
                     # -------------------------------------------
 
                     # Cancel the delayed "still working" timer under the lock.
@@ -966,6 +998,7 @@ class SVoiceRecApp:
                 self._delayed_transcribing_timer.daemon = True
                 self._delayed_transcribing_timer.start()
 
+            worker_timed_out = False
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
                 try:
@@ -984,6 +1017,14 @@ class SVoiceRecApp:
                     # The session is only invalidated when the user starts a new
                     # recording (via start_recording → _session_id += 1).
                     self.is_processing = False
+                    worker_timed_out = True
+                    # Keep showing "still working" — chunk_worker will submit
+                    # _do_finish_cleanup when it actually completes.
+                    if self._preview_panel:
+                        s_wt = get_ui_strings(get_primary_language(self.config))
+                        self._preview_panel.update_status(
+                            s_wt["still_working_title"], self._main_thread_queue
+                        )
                 else:
                     log_info(
                         f"Worker thread finished. Waited {waited:.1f}s. "
@@ -1019,8 +1060,12 @@ class SVoiceRecApp:
                     )
                     log_info("Buffered finalization: show_interactive queued on main thread")
 
-            # All UI updates and "Finish" run on main thread so menu bar actually updates
-            self._submit_for_main_thread(self._do_finish_cleanup)
+            # Schedule UI cleanup on main thread.
+            # Skip when worker timed out: the worker is still running and will submit
+            # _do_finish_cleanup itself when it finishes (via chunk_worker), preventing
+            # the UI from prematurely showing "Ready" while the popup hasn't appeared yet.
+            if not worker_timed_out:
+                self._submit_for_main_thread(self._do_finish_cleanup)
             log_info("Stop-recording phase done (cleanup scheduled on main thread).")
         except Exception as e:
             log_exception(f"Unhandled exception in stop_recording_and_process: {e}")
@@ -1225,6 +1270,18 @@ class SVoiceRecApp:
         except Exception as e:
             log_error(f"Error checking memory pressure: {e}")
             return False
+
+    def _send_memory_pressure_notification(self) -> None:
+        """Send a system notification when AI editor is skipped due to memory pressure.
+
+        Called on the main thread via _submit_for_main_thread so it doesn't race
+        with the interactive popup appearing at the same moment.
+        """
+        send_notification(
+            "Click-n-speak",
+            "AI-редактор пропущен",
+            "Нехватка памяти. Закройте лишние приложения для ускорения работы.",
+        )
 
     def start_wake_observer(self) -> None:
         """Subscribe to macOS NSWorkspaceDidWakeNotification to warmup model after sleep."""

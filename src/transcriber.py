@@ -3,14 +3,19 @@ import time
 import multiprocessing as mp
 import queue
 import traceback
+from typing import Optional
 
 import numpy as np
 
 from .process_watchdog import install_parent_death_watchdog
 from .utils import log_error, log_exception, log_info
 
-# Maximum seconds to wait for transcriber process to respond before killing it
+# Maximum seconds to wait for transcriber process to respond before killing it.
+# A shorter default keeps the UI responsive; cold starts use TRANSCRIBER_COLD_START_TIMEOUT_SECONDS.
 TRANSCRIBER_TIMEOUT_SECONDS = 30
+# Extended timeout for the first chunk of a session after long idle or under memory pressure.
+# Cold-GPU (model paged out) typically takes 20-25s; 90s covers even the worst case.
+TRANSCRIBER_COLD_START_TIMEOUT_SECONDS = 90
 
 # Cached result of whether mlx_whisper.transcribe accepts strict threshold kwargs.
 # None = not yet probed; True/False = result of probe.
@@ -577,11 +582,23 @@ class TranscriberProcessWrapper:
         self._process.start()
         log_info("Transcriber process restarted.")
 
-    def transcribe(self, audio_data, initial_prompt=None, allowed_languages=None, condition_on_previous_text=True, is_final_chunk=False):
+    def transcribe(
+        self,
+        audio_data,
+        initial_prompt=None,
+        allowed_languages=None,
+        condition_on_previous_text=True,
+        is_final_chunk=False,
+        timeout_override: Optional[float] = None,
+    ):
         """Blocking call to transcribe the given audio chunk using the child process.
 
-        If the child process does not respond within TRANSCRIBER_TIMEOUT_SECONDS,
-        the process is killed and restarted, and an empty string is returned.
+        If the child process does not respond within the effective timeout (timeout_override
+        if provided, else TRANSCRIBER_TIMEOUT_SECONDS), the process is killed and restarted,
+        and an empty string is returned.
+
+        Pass timeout_override=TRANSCRIBER_COLD_START_TIMEOUT_SECONDS for the first chunk
+        after a long idle period to avoid killing the process before GPU weights reload.
         """
         self.input_queue.put({
             "action": "transcribe",
@@ -591,13 +608,14 @@ class TranscriberProcessWrapper:
             "condition_on_previous_text": condition_on_previous_text,
             "is_final_chunk": is_final_chunk
         })
+        effective_timeout = timeout_override if timeout_override is not None else TRANSCRIBER_TIMEOUT_SECONDS
         # Wait for result with a hard timeout to prevent infinite hangs
-        deadline = time.time() + TRANSCRIBER_TIMEOUT_SECONDS
+        deadline = time.time() + effective_timeout
         while True:
             remaining = deadline - time.time()
             if remaining <= 0:
                 log_error(
-                    f"Transcriber process did not respond within {TRANSCRIBER_TIMEOUT_SECONDS}s. "
+                    f"Transcriber process did not respond within {effective_timeout:.0f}s. "
                     "Killing and restarting process."
                 )
                 self._restart_process()
