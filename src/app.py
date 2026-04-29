@@ -719,13 +719,10 @@ class SVoiceRecApp:
             except Exception as e:
                 log_exception(f"Error in chunk worker loop: {e}")
         log_info("Chunk worker stopped (queue empty, ready for next session).")
-        # Ensure UI cleanup always runs on the main thread.
-        # In the normal flow stop_recording_and_process also submits this — the second
-        # call is a safe no-op (_do_finish_cleanup is idempotent and preview_panel guards
-        # against update_status while interactive popup is open).
-        # In the worker-timeout flow stop_recording_and_process skips the submission, so
-        # this call is the only one that resets "Still working…" back to "Ready" after the
-        # popup is shown.
+        # Primary cleanup path for normal and timeout flows.
+        # Buffered-finalization path submits cleanup inline in stop_recording_and_process
+        # (after show_interactive) so is_processing stays True until the popup appears.
+        # For normal and timeout flows this is the only cleanup submission.
         if self._session_id == my_session_id:
             self._submit_for_main_thread(self._do_finish_cleanup)
 
@@ -1059,13 +1056,15 @@ class SVoiceRecApp:
                         title=s_ui["edit_confirm_title"],
                     )
                     log_info("Buffered finalization: show_interactive queued on main thread")
+                    # Cleanup submitted here, AFTER show_interactive, so is_processing
+                    # stays True until the popup is actually visible.
+                    self._submit_for_main_thread(self._do_finish_cleanup)
 
-            # Schedule UI cleanup on main thread.
-            # Skip when worker timed out: the worker is still running and will submit
-            # _do_finish_cleanup itself when it finishes (via chunk_worker), preventing
-            # the UI from prematurely showing "Ready" while the popup hasn't appeared yet.
-            if not worker_timed_out:
-                self._submit_for_main_thread(self._do_finish_cleanup)
+            # Cleanup responsibility by path:
+            #   normal  — chunk_worker submits _do_finish_cleanup when its loop exits
+            #   timeout — chunk_worker submits cleanup when it eventually finishes
+            #   buffered — cleanup submitted inline above, after show_interactive
+            # Nothing to submit here.
             log_info("Stop-recording phase done (cleanup scheduled on main thread).")
         except Exception as e:
             log_exception(f"Unhandled exception in stop_recording_and_process: {e}")

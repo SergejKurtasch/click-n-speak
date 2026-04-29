@@ -21,7 +21,12 @@ _ICON_CACHED = "🟢"  # 🟢  — model is on disk, instant switch
 
 from .phrase_history import get_last_phrases
 from .updater import check_for_update
-from .permissions import check_input_monitoring, open_input_monitoring_settings
+from .permissions import (
+    check_input_monitoring,
+    check_microphone,
+    open_input_monitoring_settings,
+    open_microphone_settings,
+)
 from .autostart import is_launch_at_login_enabled, set_launch_at_login
 from .utils import (
     build_initial_prompt,
@@ -384,6 +389,23 @@ except Exception as _lang_menu_exc:
     _HAVE_PHRASE_MENU = False
 
 
+try:
+    from AppKit import NSObject as _NSObject  # type: ignore
+
+    class _MainMenuDelegate(_NSObject):
+        """NSMenuDelegate: refreshes permission indicators when the menu opens."""
+        _owner = None
+
+        def menuWillOpen_(self, menu) -> None:
+            if self._owner is not None:
+                self._owner._refresh_permissions()
+
+    _HAVE_MENU_DELEGATE = True
+except Exception:
+    _MainMenuDelegate = None  # type: ignore
+    _HAVE_MENU_DELEGATE = False
+
+
 def _prompt_restart(reason: str) -> None:
     """Show a modal asking the user to relaunch the app. Relaunches on OK."""
     try:
@@ -417,6 +439,9 @@ class ClickNSpeakApp(rumps.App):
         self._accessibility_item = None  # set in setup_menu
         self._input_monitoring_ok: bool | None = None  # None = unknown until health check
         self._input_monitoring_item = None  # set in setup_menu
+        self._microphone_ok: bool | None = None  # None = unknown until first check
+        self._microphone_item = None  # set in setup_menu
+        self._permissions_item = None  # parent Permissions menu item
         self._wizard_pending = False
         self._suggestion_check_done: bool = False
         self._lang_menu_controller: "_LangMenuController | None" = None
@@ -517,7 +542,7 @@ class ClickNSpeakApp(rumps.App):
     @rumps.timer(1.0)
     def _run_wizard_if_pending(self, _) -> None:
         """One-shot timer: runs the setup wizard and checks Input Monitoring on first tick."""
-        # Check Input Monitoring once after NSApp has started
+        # Check Input Monitoring and Microphone once after NSApp has started
         if self._input_monitoring_ok is None:
             self._input_monitoring_ok = check_input_monitoring()
             self._update_input_monitoring_item()
@@ -526,6 +551,9 @@ class ClickNSpeakApp(rumps.App):
                     "Input Monitoring permission not granted — hotkeys will not work. "
                     "Add Click-n-speak to Privacy & Security → Input Monitoring."
                 )
+        if self._microphone_ok is None:
+            self._microphone_ok = check_microphone() == "granted"
+            self._update_microphone_item()
 
         if self._wizard_pending:
             self._wizard_pending = False
@@ -534,6 +562,8 @@ class ClickNSpeakApp(rumps.App):
                 run_setup_wizard()
                 self._accessibility_granted = is_accessibility_trusted()
                 self._update_accessibility_menu_item()
+                self._microphone_ok = check_microphone() == "granted"
+                self._update_microphone_item()
             except Exception as exc:
                 log_error(f"Setup wizard error: {exc}")
 
@@ -544,29 +574,27 @@ class ClickNSpeakApp(rumps.App):
             except Exception as exc:
                 log_error(f"Suggestions startup check failed: {exc}")
 
-    def _on_check_permissions(self, _) -> None:
-        """Menu item: re-run the permission wizard on demand."""
-        try:
-            from .permissions import reset_setup
-            from .setup_wizard import run_setup_wizard
-            reset_setup()
-            run_setup_wizard()
-            self._accessibility_granted = is_accessibility_trusted()
-            self._update_accessibility_menu_item()
-            self._input_monitoring_ok = check_input_monitoring()
-            self._update_input_monitoring_item()
-            # Wizard shows its own restart prompt on completion; no auto-restart here.
-        except Exception as exc:
-            log_error(f"Check permissions failed: {exc}")
+    def _update_microphone_item(self) -> None:
+        if self._microphone_item is None:
+            return
+        if self._microphone_ok:
+            self._microphone_item.title = "Microphone — Granted"
+            p = get_menu_item_icon_path("microphone-ok")
+        else:
+            self._microphone_item.title = "Microphone — Required"
+            p = get_menu_item_icon_path("microphone-warn")
+        if p:
+            self._microphone_item.set_icon(str(p), dimensions=[16, 16], template=False)
+        self._update_permissions_parent_item()
 
-    @rumps.timer(5.0)
-    def _check_accessibility_status(self, _):
-        """Periodically refresh permission indicators.
+    def _on_microphone_click(self, _) -> None:
+        if not self._microphone_ok:
+            open_microphone_settings()
+        else:
+            self.main_app.notify("Доступ", "Доступ к микрофону уже предоставлен.")
 
-        Does NOT auto-restart the hotkey listener — on macOS 15+, starting the
-        pynput listener after permissions flip live triggers a TSM crash.
-        Instead we prompt the user to relaunch the app.
-        """
+    def _refresh_permissions(self) -> None:
+        """Refresh all permission indicators. Called at startup and on menu open."""
         from .setup_wizard import is_wizard_active
         try:
             trusted = is_accessibility_trusted()
@@ -574,14 +602,19 @@ class ClickNSpeakApp(rumps.App):
                 self._accessibility_granted = trusted
                 self._update_accessibility_menu_item()
 
-            if trusted:
-                im_ok = check_input_monitoring()
-                if im_ok != self._input_monitoring_ok:
-                    self._input_monitoring_ok = im_ok
-                    self._update_input_monitoring_item()
+            im_ok = check_input_monitoring()
+            if im_ok != self._input_monitoring_ok:
+                self._input_monitoring_ok = im_ok
+                self._update_input_monitoring_item()
+
+            mic_ok = check_microphone() == "granted"
+            if mic_ok != self._microphone_ok:
+                self._microphone_ok = mic_ok
+                self._update_microphone_item()
 
             # If all permissions are now granted but the listener isn't running,
             # the user must restart. Prompt once (wizard handles its own prompt).
+            # Deferred via performSelector so any open NSMenu finishes closing first.
             if (
                 trusted
                 and self._input_monitoring_ok
@@ -590,21 +623,26 @@ class ClickNSpeakApp(rumps.App):
                 and not getattr(self, "_restart_prompt_shown", False)
             ):
                 self._restart_prompt_shown = True
-                _prompt_restart("All required permissions are now granted.")
+                # Defer past the current NSMenu close cycle; _main_thread_queue
+                # drains on the next 0.3s tick, after the menu is gone.
+                self._submit_for_main_thread(
+                    lambda: _prompt_restart("All required permissions are now granted.")
+                )
         except Exception as e:
-            log_error(f"Error in accessibility status check: {e}")
+            log_error(f"Error refreshing permissions: {e}")
 
     def _update_accessibility_menu_item(self) -> None:
         if self._accessibility_item is None:
             return
         if self._accessibility_granted:
-            self._accessibility_item.title = "Accessibility Granted"
+            self._accessibility_item.title = "Accessibility — Granted"
             p = get_menu_item_icon_path("accessibility-ok")
         else:
-            self._accessibility_item.title = "Accessibility Required"
+            self._accessibility_item.title = "Accessibility — Required"
             p = get_menu_item_icon_path("accessibility-warn")
         if p:
-            self._accessibility_item.set_icon(str(p), dimensions=[16, 16], template=True)
+            self._accessibility_item.set_icon(str(p), dimensions=[16, 16], template=False)
+        self._update_permissions_parent_item()
 
     def _on_accessibility_click(self, _) -> None:
         if not self._accessibility_granted:
@@ -634,14 +672,29 @@ class ClickNSpeakApp(rumps.App):
         if self._input_monitoring_item is None:
             return
         if self._input_monitoring_ok is None:
-            self._input_monitoring_item.title = "Input Monitoring (checking…)"
+            self._input_monitoring_item.title = "Input Monitoring — Checking…"
+            p = get_menu_item_icon_path("input-monitoring-warn")
         elif self._input_monitoring_ok:
-            self._input_monitoring_item.title = "Input Monitoring Granted"
+            self._input_monitoring_item.title = "Input Monitoring — Granted"
+            p = get_menu_item_icon_path("input-monitoring-ok")
         else:
-            self._input_monitoring_item.title = "Input Monitoring Required"
-        p = get_menu_item_icon_path("input-monitoring")
+            self._input_monitoring_item.title = "Input Monitoring — Required"
+            p = get_menu_item_icon_path("input-monitoring-warn")
         if p:
-            self._input_monitoring_item.set_icon(str(p), dimensions=[16, 16], template=True)
+            self._input_monitoring_item.set_icon(str(p), dimensions=[16, 16], template=False)
+        self._update_permissions_parent_item()
+
+    def _update_permissions_parent_item(self) -> None:
+        if self._permissions_item is None:
+            return
+        all_ok = (
+            self._accessibility_granted
+            and bool(self._input_monitoring_ok)
+            and bool(self._microphone_ok)
+        )
+        p = get_menu_item_icon_path("permissions-ok" if all_ok else "permissions-warn")
+        if p:
+            self._permissions_item.set_icon(str(p), dimensions=[16, 16], template=False)
 
     def _on_input_monitoring_click(self, _) -> None:
         if not self._input_monitoring_ok:
@@ -654,14 +707,19 @@ class ClickNSpeakApp(rumps.App):
             p = get_menu_item_icon_path(name)
             return {"icon": str(p), "dimensions": [16, 16], "template": True} if p else {}
 
-        # Accessibility + Input Monitoring status at the top
+        # Permissions parent item with submenu
+        self._permissions_item = rumps.MenuItem("Permissions")
+        self._microphone_item = rumps.MenuItem("", callback=self._on_microphone_click)
+        self._update_microphone_item()
+        self._permissions_item.add(self._microphone_item)
         self._accessibility_item = rumps.MenuItem("", callback=self._on_accessibility_click)
         self._update_accessibility_menu_item()
-        self.menu.add(self._accessibility_item)
+        self._permissions_item.add(self._accessibility_item)
         self._input_monitoring_item = rumps.MenuItem("", callback=self._on_input_monitoring_click)
         self._update_input_monitoring_item()
-        self.menu.add(self._input_monitoring_item)
-        self.menu.add(rumps.MenuItem("Check Permissions", **_icon("check-permissions"), callback=self._on_check_permissions))
+        self._permissions_item.add(self._input_monitoring_item)
+        self._update_permissions_parent_item()
+        self.menu.add(self._permissions_item)
         self.menu.add(None)  # Separator
 
         # Model selection submenu
@@ -769,6 +827,15 @@ class ClickNSpeakApp(rumps.App):
 
         # Apply the idle icon on startup (overrides CnS.png set in __init__)
         self.set_menubar_state("idle")
+
+        # Refresh permissions on menu open via NSMenuDelegate
+        if _HAVE_MENU_DELEGATE:
+            try:
+                self._menu_delegate = _MainMenuDelegate.alloc().init()
+                self._menu_delegate._owner = self
+                self.menu._menu.setDelegate_(self._menu_delegate)
+            except Exception as exc:
+                log_error(f"Could not install menu delegate: {exc}")
 
     # ------------------------------------------------------------------
     # Whisper model cache check

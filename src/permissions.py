@@ -115,6 +115,7 @@ def open_microphone_settings() -> None:
         ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"],
         check=False,
     )
+    _activate_system_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,25 @@ def check_accessibility() -> bool:
         return True  # assume granted if we cannot check
 
 
+def _activate_system_settings() -> None:
+    import threading
+
+    def _do_activate() -> None:
+        import time
+        time.sleep(0.5)
+        try:
+            from AppKit import NSWorkspace, NSApplicationActivateIgnoringOtherApps  # type: ignore
+            for app in NSWorkspace.sharedWorkspace().runningApplications():
+                bundle = app.bundleIdentifier() or ""
+                if "systempreferences" in bundle or "systemsettings" in bundle:
+                    app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+                    return
+        except Exception as exc:
+            log.debug("Could not activate System Settings: %s", exc)
+
+    threading.Thread(target=_do_activate, daemon=True).start()
+
+
 def open_accessibility_settings() -> None:
     """Open System Settings on the Accessibility privacy pane."""
     import subprocess
@@ -138,6 +158,7 @@ def open_accessibility_settings() -> None:
         ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
         check=False,
     )
+    _activate_system_settings()
 
 
 def wait_for_accessibility(timeout: float = 120.0, poll_interval: float = 1.0) -> bool:
@@ -235,6 +256,7 @@ def open_input_monitoring_settings() -> None:
         ],
         check=False,
     )
+    _activate_system_settings()
 
 
 # ---------------------------------------------------------------------------
