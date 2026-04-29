@@ -498,6 +498,17 @@ class TranscriberProcessWrapper:
                         "text": text,
                         "is_final_chunk": cmd.get("is_final_chunk", False)
                     })
+                    # Free unused MLX Metal buffers after every transcription.
+                    # mlx_whisper allocates mel/attention/logit tensors on each call;
+                    # they stay in MLX's caching allocator until explicitly released,
+                    # causing the child process to grow from ~2 GB to 6+ GB over time.
+                    try:
+                        import gc
+                        gc.collect()
+                        mlx.core.metal.clear_cache()
+                        log_info("MLX Metal cache cleared after transcription.")
+                    except Exception as _e:
+                        log_info(f"post-transcribe clear_cache skipped: {_e}")
                 elif action == "transcribe_file":
                     text = transcriber.transcribe_file(
                         cmd.get("file_path"),
@@ -509,6 +520,12 @@ class TranscriberProcessWrapper:
                         "text": text,
                         "is_final_chunk": True
                     })
+                    try:
+                        import gc
+                        gc.collect()
+                        mlx.core.metal.clear_cache()
+                    except Exception:
+                        pass
                 elif action == "update_model":
                     transcriber = WhisperTranscriber(model_name=cmd["model_name"])
                 elif action == "clear_cache":
@@ -567,8 +584,8 @@ class TranscriberProcessWrapper:
         self.input_queue.put({"action": "update_model", "model_name": model_name})
         
     def _restart_process(self) -> None:
-        """Kill the hung child process and start a fresh one."""
-        log_info("Restarting transcriber process after timeout...")
+        """Kill the child process and start a fresh one (timeout recovery or memory reset)."""
+        log_info("Restarting transcriber process...")
         try:
             self._process.kill()
             self._process.join(timeout=2.0)

@@ -37,6 +37,11 @@ from .utils import (
 # Keep-alive interval in seconds (15 minutes)
 KEEP_ALIVE_INTERVAL_SECONDS = 15 * 60
 
+# Restart the transcriber child process every N completed sessions.
+# MLX weight tensors are never freed by clear_cache() (they're always referenced);
+# only a full process restart resets them. 20 sessions ≈ 15-30 min of typical use.
+TRANSCRIBER_RESTART_AFTER_SESSIONS = 20
+
 
 def _apply_candidates_to_user_terms(config: dict, candidates: dict) -> None:
     """Merge candidates into user_terms[lang], dedup.
@@ -115,6 +120,7 @@ class SVoiceRecApp:
         self._last_transcription_time = time.time()  # Initialized to now (warmup counts)
         self._keep_alive_timer: Optional[threading.Timer] = None
         self._keep_alive_lock = threading.Lock()  # atomic guard for keep-alive warmup
+        self._completed_sessions: int = 0  # incremented on each finished recording session
         self._analysis_lock = threading.Lock()  # prevents concurrent prompt-analysis threads
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
@@ -358,6 +364,9 @@ class SVoiceRecApp:
         if self._preview_panel:
             self._preview_panel.update_status(s["ready_title"], self._main_thread_queue)
         log_info("Finish cleanup done. Ready for next recording session.")
+        self._completed_sessions += 1
+        if self._completed_sessions % TRANSCRIBER_RESTART_AFTER_SESSIONS == 0:
+            threading.Thread(target=self._restart_transcriber_for_memory, daemon=True).start()
 
     def _do_error_cleanup(self) -> None:
         """Run on main thread on stop_recording error: clear status, notify."""
@@ -1194,54 +1203,53 @@ class SVoiceRecApp:
         self._keep_alive_timer.start()
 
     def _keep_alive_tick(self) -> None:
-        """Periodic check: if no transcription happened recently, do a warmup ping."""
+        """Periodic check: clear MLX cache and optionally ping the model to stay warm."""
         try:
             elapsed = time.time() - self._last_transcription_time
-            if elapsed < KEEP_ALIVE_INTERVAL_SECONDS:
+            under_pressure = self._is_memory_pressure_high()
+
+            if elapsed < KEEP_ALIVE_INTERVAL_SECONDS and not under_pressure:
                 log_info(
                     f"Keep-alive: last transcription {elapsed:.0f}s ago, "
                     "model still warm — skipping ping."
                 )
                 return
 
-            # Check memory pressure before pinging
-            if self._is_memory_pressure_high():
-                log_info(
-                    "Keep-alive: memory pressure high, skipping warmup ping "
-                    "to avoid adding load."
-                )
-                return
-
-            log_info(
-                f"Keep-alive: no transcription for {elapsed:.0f}s, "
-                "sending warmup ping to keep model warm."
-            )
-            # Warmup in a separate thread to not block the timer
+            # Always clear the MLX Metal cache — this releases unused Metal buffers
+            # back to the OS and is the primary defence against the child process
+            # growing from ~2 GB to 6+ GB under sustained use.
+            # clear_cache() only frees buffers not currently referenced by any live
+            # tensor, so it is safe to call at any time between transcriptions.
             threading.Thread(
-                target=self._do_keep_alive_warmup, daemon=True
+                target=self._do_keep_alive_warmup,
+                kwargs={"skip_prewarm": under_pressure},
+                daemon=True,
             ).start()
         except Exception as e:
             log_exception(f"Keep-alive tick error: {e}")
         finally:
             self._schedule_keep_alive()
 
-    def _do_keep_alive_warmup(self) -> None:
-        """Perform a real silent transcription to keep GPU/MLX weights in active memory.
+    def _do_keep_alive_warmup(self, *, skip_prewarm: bool = False) -> None:
+        """Clear MLX Metal cache and optionally pre-warm the model.
 
-        Uses pre_warm() instead of warmup() for two reasons:
-        1. warmup() is a no-op after first call (_warmup_done guard in WhisperTranscriber).
-        2. The old approach drained output_queue directly, which could race with a
-           concurrent transcribe() call and steal its result, causing a 30s timeout.
-        pre_warm() fire-and-forgets; the prewarm_done response is silently consumed
-        by the next transcribe() call (which ignores non-"transcription" messages).
+        clear_cache() is always sent — it releases Metal buffers from MLX's internal
+        caching allocator and is the main mechanism preventing memory growth.
+        pre_warm() is skipped under memory pressure because it loads data into memory;
+        skipping it avoids adding load when the system is already constrained.
         """
         if not self._keep_alive_lock.acquire(blocking=False):
             log_info("Keep-alive: previous warmup still running — skipping.")
             return
         try:
             self.transcriber.clear_cache()
-            self.transcriber.pre_warm()
-            log_info("Keep-alive: cache cleared and pre_warm() sent to transcriber process.")
+            if skip_prewarm:
+                log_info(
+                    "Keep-alive: memory pressure high — cache cleared, pre_warm skipped."
+                )
+            else:
+                self.transcriber.pre_warm()
+                log_info("Keep-alive: cache cleared and pre_warm() sent to transcriber process.")
             self._last_transcription_time = time.time()
         except Exception as e:
             log_error(f"Keep-alive warmup failed: {e}")
@@ -1256,6 +1264,33 @@ class SVoiceRecApp:
             except Exception:
                 pass
             self._keep_alive_timer = None
+
+    def _restart_transcriber_for_memory(self) -> None:
+        """Restart the transcriber child process to reset accumulated MLX memory.
+
+        clear_cache() only frees unreferenced Metal buffers. The model weight tensors
+        (WhisperTranscriber._model) are always referenced and never freed. After many
+        sessions the child grows to 6+ GB; a full restart brings it back to ~2 GB.
+        Called in a daemon thread so it does not block the main thread.
+        """
+        if self.is_recording or self.is_processing:
+            log_info("Transcriber restart skipped: session in progress.")
+            return
+        log_info(
+            f"Restarting transcriber for memory reset "
+            f"(session {self._completed_sessions} of {TRANSCRIBER_RESTART_AFTER_SESSIONS})."
+        )
+        try:
+            self.transcriber._restart_process()
+            # Immediately pre-warm to reload model weights into GPU before next hotkey.
+            # Force-bypass the idle threshold: after restart _last_transcribe_returned_at
+            # is stale (still the time of the last transcription before restart), so the
+            # idle guard might wrongly skip pre_warm. Reset it to a distant past value.
+            self.transcriber._last_transcribe_returned_at = 0.0
+            self.transcriber.pre_warm()
+            log_info("Transcriber restarted and pre_warm sent.")
+        except Exception as e:
+            log_error(f"Transcriber restart failed: {e}")
 
     def _is_memory_pressure_high(self) -> bool:
         """Check if system memory usage exceeds the threshold."""
