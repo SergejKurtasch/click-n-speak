@@ -3,14 +3,19 @@ import time
 import multiprocessing as mp
 import queue
 import traceback
+from typing import Optional
 
 import numpy as np
 
 from .process_watchdog import install_parent_death_watchdog
 from .utils import log_error, log_exception, log_info
 
-# Maximum seconds to wait for transcriber process to respond before killing it
+# Maximum seconds to wait for transcriber process to respond before killing it.
+# A shorter default keeps the UI responsive; cold starts use TRANSCRIBER_COLD_START_TIMEOUT_SECONDS.
 TRANSCRIBER_TIMEOUT_SECONDS = 30
+# Extended timeout for the first chunk of a session after long idle or under memory pressure.
+# Cold-GPU (model paged out) typically takes 20-25s; 90s covers even the worst case.
+TRANSCRIBER_COLD_START_TIMEOUT_SECONDS = 90
 
 # Cached result of whether mlx_whisper.transcribe accepts strict threshold kwargs.
 # None = not yet probed; True/False = result of probe.
@@ -31,12 +36,35 @@ def _supports_strict_thresholds() -> bool:
         _STRICT_THRESHOLDS_SUPPORTED = False
     return _STRICT_THRESHOLDS_SUPPORTED
 
-# Final chunks shorter than this (in samples at 16kHz) are skipped — they are
-# almost always silence/noise that cause Whisper to hallucinate for 10-43 seconds.
-MIN_FINAL_CHUNK_SAMPLES = 4800  # 0.3 seconds at 16 kHz
+# Final chunks shorter than or equal to this (in samples at 16kHz) are skipped —
+# they are almost always trailing silence that cause Whisper to hallucinate for 10-43s.
+# 0.5s threshold: real speech endings are longer; exact-boundary 4800-sample chunks
+# were reaching Whisper and producing YouTube-subtitle hallucinations (off-by-one fix).
+MIN_FINAL_CHUNK_SAMPLES = 8000  # 0.5 seconds at 16 kHz
+
+# Short chunks (< 3s) below this RMS level are pure silence — skip Whisper entirely
+# to avoid the 14-22s tail-decode hallucination caused by decoding silence.
+_SILENCE_RMS_THRESHOLD = 0.005  # calibrated against MacBook Air mic noise floor
 
 # Strip leading/trailing punctuation so "hundred", "hundred!", "hundred." count as same word
 _WORD_NORMALIZE = re.compile(r"^[\W_]+|[\W_]+$")
+
+# Subword repetition: any 2-8 char unit that repeats 6+ times in a row.
+# Catches Whisper tail-hallucinations like "oiseoiseoiseoise..." or "ftaftafta..."
+# which _collapse_consecutive_word_repetition misses because they form a single token.
+# 6 repetitions required to avoid false positives on normal stutters/emphasis ("ха-ха-ха").
+_SUBWORD_REPEAT_RE = re.compile(r"(.{2,8}?)\1{5,}", re.UNICODE)
+
+
+def _is_audio_silent(audio_data) -> bool:
+    """Return True if the RMS energy of the audio is below the silence threshold.
+
+    Used as a cheap pre-filter before calling Whisper on short chunks: when the
+    chunk is pure microphone noise, Whisper spends 14-22s on tail-decode hallucinations
+    instead of immediately returning an empty result.
+    """
+    rms = float(np.sqrt(np.mean(audio_data.astype(np.float32) ** 2)))
+    return rms < _SILENCE_RMS_THRESHOLD
 
 
 def _normalize_word(w: str) -> str:
@@ -193,10 +221,23 @@ class WhisperTranscriber:
 
         # Skip very short final chunks — they are almost always post-speech silence
         # that Whisper decodes into hallucinations (10-43 seconds of wasted time).
-        if is_final_chunk and len(audio_data) < MIN_FINAL_CHUNK_SAMPLES:
+        # Uses <= so the exact 4800-sample boundary (0.30s) is also rejected.
+        if is_final_chunk and len(audio_data) <= MIN_FINAL_CHUNK_SAMPLES:
             log_info(
                 f"Skipping tiny final chunk ({len(audio_data)} samples, "
                 f"{len(audio_data) / 16000:.2f}s) to avoid hallucination."
+            )
+            return ""
+
+        # Cheap RMS pre-filter for short non-final chunks: if audio is under 3s and
+        # nearly silent, skip Whisper entirely — silence decoding takes 14-22s and
+        # always produces hallucinations. Not applied to final chunks (MIN check above
+        # covers them; real speech can sometimes be quiet).
+        _SHORT_CHUNK_SAMPLES = 48000  # 3 seconds at 16 kHz
+        if not is_final_chunk and len(audio_data) < _SHORT_CHUNK_SAMPLES and _is_audio_silent(audio_data):
+            log_info(
+                f"Skipping silent short chunk ({len(audio_data)} samples, "
+                f"{len(audio_data) / 16000:.2f}s, rms<{_SILENCE_RMS_THRESHOLD}) to avoid tail-decode."
             )
             return ""
 
@@ -333,6 +374,13 @@ class WhisperTranscriber:
                 )
                 text = collapsed
 
+            stripped = _SUBWORD_REPEAT_RE.sub(r"\1", text)
+            if stripped != text:
+                log_info(
+                    f"Stripped subword repetition: '{text[:80]}' → '{stripped[:80]}'"
+                )
+                text = stripped
+
             if is_final_chunk:
                 log_info(f"Final chunk: keeping after light filter: '{text}'")
 
@@ -383,7 +431,10 @@ class TranscriberProcessWrapper:
         self.input_queue = mp.Queue()
         self.output_queue = mp.Queue()
         self.model_name = model_name
-        
+        # Epoch time of the last completed transcription in this wrapper.
+        # Used to skip prewarm when the model is already warm (recent transcription).
+        self._last_transcribe_returned_at: float = 0.0
+
         # Start child process
         self._process = mp.Process(target=self._run_loop, daemon=True)
         self._process.start()
@@ -418,11 +469,22 @@ class TranscriberProcessWrapper:
                     transcriber.warmup(language=cmd.get("language"))
                     self.output_queue.put({"type": "warmup_done"})
                 elif action == "prewarm":
-                    # Run a real short transcription on silence to bring GPU/MLX weights
-                    # back into active memory. Fire-and-forget: result is discarded.
-                    silence = np.zeros(16000, dtype=np.float32)  # 1s at 16kHz
-                    transcriber.transcribe(silence, is_final_chunk=False)
-                    self.output_queue.put({"type": "prewarm_done"})
+                    # Skip prewarm if a real transcribe request is already waiting —
+                    # the queue became non-empty between pre_warm() being sent and the
+                    # child getting here, meaning the user started speaking immediately.
+                    # Running prewarm in that case would block the real chunk for 15-22s.
+                    if not self.input_queue.empty():
+                        log_info(
+                            "Prewarm skipped: real transcribe pending in queue "
+                            "— model will warm on first real chunk."
+                        )
+                        self.output_queue.put({"type": "prewarm_done"})
+                    else:
+                        # Run a real short transcription on silence to bring GPU/MLX weights
+                        # back into active memory. Fire-and-forget: result is discarded.
+                        silence = np.zeros(16000, dtype=np.float32)  # 1s at 16kHz
+                        transcriber.transcribe(silence, is_final_chunk=False)
+                        self.output_queue.put({"type": "prewarm_done"})
                 elif action == "transcribe":
                     text = transcriber.transcribe(
                         cmd.get("audio_data"),
@@ -436,6 +498,18 @@ class TranscriberProcessWrapper:
                         "text": text,
                         "is_final_chunk": cmd.get("is_final_chunk", False)
                     })
+                    # Free unused MLX Metal buffers after every transcription.
+                    # mlx_whisper allocates mel/attention/logit tensors on each call;
+                    # they stay in MLX's caching allocator until explicitly released,
+                    # causing the child process to grow from ~2 GB to 6+ GB over time.
+                    try:
+                        import gc
+                        import mlx.core
+                        gc.collect()
+                        mlx.core.metal.clear_cache()
+                        log_info("MLX Metal cache cleared after transcription.")
+                    except Exception as _e:
+                        log_info(f"post-transcribe clear_cache skipped: {_e}")
                 elif action == "transcribe_file":
                     text = transcriber.transcribe_file(
                         cmd.get("file_path"),
@@ -447,6 +521,13 @@ class TranscriberProcessWrapper:
                         "text": text,
                         "is_final_chunk": True
                     })
+                    try:
+                        import gc
+                        import mlx.core
+                        gc.collect()
+                        mlx.core.metal.clear_cache()
+                    except Exception:
+                        pass
                 elif action == "update_model":
                     transcriber = WhisperTranscriber(model_name=cmd["model_name"])
                 elif action == "clear_cache":
@@ -479,10 +560,20 @@ class TranscriberProcessWrapper:
     def warmup(self, language=None):
         self.input_queue.put({"action": "warmup", "language": language})
 
+    # Seconds since last transcription below which prewarm is skipped (model still warm).
+    _PREWARM_IDLE_THRESHOLD = 45.0
+
     def pre_warm(self) -> None:
         """Fire-and-forget: push a tiny silent transcription to the child process so
         GPU/MLX model weights are in active memory before the first real chunk arrives.
-        The prewarm_done response will be silently consumed by the next transcribe() call."""
+        Skipped when the model is already warm (recent transcription within threshold)."""
+        idle = time.time() - self._last_transcribe_returned_at
+        if idle < self._PREWARM_IDLE_THRESHOLD:
+            log_info(
+                f"Pre-warm skipped: last transcription {idle:.1f}s ago "
+                f"(threshold {self._PREWARM_IDLE_THRESHOLD}s) — model is warm."
+            )
+            return
         self.input_queue.put({"action": "prewarm"})
         
     def clear_cache(self) -> None:
@@ -495,8 +586,8 @@ class TranscriberProcessWrapper:
         self.input_queue.put({"action": "update_model", "model_name": model_name})
         
     def _restart_process(self) -> None:
-        """Kill the hung child process and start a fresh one."""
-        log_info("Restarting transcriber process after timeout...")
+        """Kill the child process and start a fresh one (timeout recovery or memory reset)."""
+        log_info("Restarting transcriber process...")
         try:
             self._process.kill()
             self._process.join(timeout=2.0)
@@ -510,11 +601,23 @@ class TranscriberProcessWrapper:
         self._process.start()
         log_info("Transcriber process restarted.")
 
-    def transcribe(self, audio_data, initial_prompt=None, allowed_languages=None, condition_on_previous_text=True, is_final_chunk=False):
+    def transcribe(
+        self,
+        audio_data,
+        initial_prompt=None,
+        allowed_languages=None,
+        condition_on_previous_text=True,
+        is_final_chunk=False,
+        timeout_override: Optional[float] = None,
+    ):
         """Blocking call to transcribe the given audio chunk using the child process.
 
-        If the child process does not respond within TRANSCRIBER_TIMEOUT_SECONDS,
-        the process is killed and restarted, and an empty string is returned.
+        If the child process does not respond within the effective timeout (timeout_override
+        if provided, else TRANSCRIBER_TIMEOUT_SECONDS), the process is killed and restarted,
+        and an empty string is returned.
+
+        Pass timeout_override=TRANSCRIBER_COLD_START_TIMEOUT_SECONDS for the first chunk
+        after a long idle period to avoid killing the process before GPU weights reload.
         """
         self.input_queue.put({
             "action": "transcribe",
@@ -524,13 +627,14 @@ class TranscriberProcessWrapper:
             "condition_on_previous_text": condition_on_previous_text,
             "is_final_chunk": is_final_chunk
         })
+        effective_timeout = timeout_override if timeout_override is not None else TRANSCRIBER_TIMEOUT_SECONDS
         # Wait for result with a hard timeout to prevent infinite hangs
-        deadline = time.time() + TRANSCRIBER_TIMEOUT_SECONDS
+        deadline = time.time() + effective_timeout
         while True:
             remaining = deadline - time.time()
             if remaining <= 0:
                 log_error(
-                    f"Transcriber process did not respond within {TRANSCRIBER_TIMEOUT_SECONDS}s. "
+                    f"Transcriber process did not respond within {effective_timeout:.0f}s. "
                     "Killing and restarting process."
                 )
                 self._restart_process()
@@ -539,6 +643,7 @@ class TranscriberProcessWrapper:
                 poll_timeout = min(0.1, remaining)
                 res = self.output_queue.get(timeout=poll_timeout)
                 if res["type"] == "transcription":
+                    self._last_transcribe_returned_at = time.time()
                     return res["text"]
                 elif res["type"] == "error":
                     log_error(f"Transcriber process error: {res['message']}\n{res.get('trace')}")

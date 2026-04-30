@@ -17,7 +17,7 @@ except ImportError:
 
 from .dataset_logger import append_to_dataset
 from .ai_editor import AiEditor, DEFAULT_MODEL_NAME
-from .transcriber import TranscriberProcessWrapper
+from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS
 from .utils import (
     build_initial_prompt,
     deduplicate_prompt_terms,
@@ -36,6 +36,11 @@ from .utils import (
 
 # Keep-alive interval in seconds (15 minutes)
 KEEP_ALIVE_INTERVAL_SECONDS = 15 * 60
+
+# Restart the transcriber child process every N completed sessions.
+# MLX weight tensors are never freed by clear_cache() (they're always referenced);
+# only a full process restart resets them. 20 sessions ≈ 15-30 min of typical use.
+TRANSCRIBER_RESTART_AFTER_SESSIONS = 20
 
 
 def _apply_candidates_to_user_terms(config: dict, candidates: dict) -> None:
@@ -115,6 +120,7 @@ class SVoiceRecApp:
         self._last_transcription_time = time.time()  # Initialized to now (warmup counts)
         self._keep_alive_timer: Optional[threading.Timer] = None
         self._keep_alive_lock = threading.Lock()  # atomic guard for keep-alive warmup
+        self._completed_sessions: int = 0  # incremented on each finished recording session
         self._analysis_lock = threading.Lock()  # prevents concurrent prompt-analysis threads
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
@@ -122,6 +128,7 @@ class SVoiceRecApp:
         self._raw_whisper_text = ""
         self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
         self._ai_edited_text = None
+        self._ai_editor_status: Optional[str] = None
 
         # Cached result of build_initial_prompt(). Invalidated by load_config_data()
         # so process_chunk() avoids rebuilding (dedup+join+truncate) on every chunk.
@@ -357,6 +364,9 @@ class SVoiceRecApp:
         if self._preview_panel:
             self._preview_panel.update_status(s["ready_title"], self._main_thread_queue)
         log_info("Finish cleanup done. Ready for next recording session.")
+        self._completed_sessions += 1
+        if self._completed_sessions % TRANSCRIBER_RESTART_AFTER_SESSIONS == 0:
+            threading.Thread(target=self._restart_transcriber_for_memory, daemon=True).start()
 
     def _do_error_cleanup(self) -> None:
         """Run on main thread on stop_recording error: clear status, notify."""
@@ -385,7 +395,12 @@ class SVoiceRecApp:
                     log_info("_run_injection: start")
 
                     # Log to dataset (background thread, file I/O — safe)
-                    append_to_dataset(self._raw_whisper_text, self._ai_edited_text, user_text)
+                    append_to_dataset(
+                        self._raw_whisper_text,
+                        self._ai_edited_text,
+                        user_text,
+                        ai_status=self._ai_editor_status,
+                    )
                     log_info("_run_injection: dataset saved")
 
                     if user_text:
@@ -622,6 +637,7 @@ class SVoiceRecApp:
         self._raw_whisper_text = ""
         self._raw_whisper_chunks = []
         self._ai_edited_text = None
+        self._ai_editor_status = None
         self.stop_worker.clear()
         self._session_id += 1  # Invalidate any lingering worker from previous session
 
@@ -705,14 +721,6 @@ class SVoiceRecApp:
                     f"is_final={is_final_chunk}, chunks_remaining_in_queue={remaining}{drain_note}"
                 )
 
-                # Early cancel: skip ALL non-final chunks when stop was requested.
-                # The final chunk (is_final=True) is always processed; it was put into
-                # the queue before stop_worker.set() so it is never skipped here.
-                if self.stop_worker.is_set() and not is_final_chunk:
-                    log_info("Skipping non-final chunk (stop requested).")
-                    self.chunk_queue.task_done()
-                    continue
-
                 self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk, session_id=my_session_id)
                 self.chunk_queue.task_done()
             except queue.Empty:
@@ -720,15 +728,16 @@ class SVoiceRecApp:
             except Exception as e:
                 log_exception(f"Error in chunk worker loop: {e}")
         log_info("Chunk worker stopped (queue empty, ready for next session).")
+        # Primary cleanup path for normal and timeout flows.
+        # Buffered-finalization path submits cleanup inline in stop_recording_and_process
+        # (after show_interactive) so is_processing stays True until the popup appears.
+        # For normal and timeout flows this is the only cleanup submission.
+        if self._session_id == my_session_id:
+            self._submit_for_main_thread(self._do_finish_cleanup)
 
     def process_chunk(self, audio_chunk, is_final_chunk: bool = False, session_id: int = 0):
         """Transcribe a single audio chunk, accumulate result, and show popup on final chunk."""
         try:
-            # Check if stop was requested before starting expensive transcription
-            if self.stop_worker.is_set() and not is_final_chunk:
-                log_info("Skipping non-final chunk transcription (stop requested).")
-                return
-
             # Build context: always keep the full vocab prompt, then fill the
             # remaining token budget with whole recent chunks (newest first) so
             # vocabulary terms stay in context for every chunk, not just the first.
@@ -763,6 +772,18 @@ class SVoiceRecApp:
                 "condition_on_previous_text", True
             )
 
+            # Detect cold start: first chunk of this session after long idle or under memory
+            # pressure — GPU weights may be paged out and need extra time to reload.
+            # Use an extended timeout so the process is not killed prematurely.
+            _COLD_START_IDLE_THRESHOLD = 5 * 60  # 5 minutes
+            last_returned = getattr(self.transcriber, "_last_transcribe_returned_at", 0.0)
+            idle_since_last = time.time() - (last_returned if isinstance(last_returned, (int, float)) else 0.0)
+            is_cold_start = len(self.transcribed_parts) == 0 and (
+                idle_since_last > _COLD_START_IDLE_THRESHOLD
+                or self._is_memory_pressure_high()
+            )
+            timeout_override = TRANSCRIBER_COLD_START_TIMEOUT_SECONDS if is_cold_start else None
+
             log_info(
                 "Processing audio chunk: "
                 f"len={len(audio_chunk)}, "
@@ -770,6 +791,7 @@ class SVoiceRecApp:
                 f"condition_on_previous_text={condition_on_previous_text}, "
                 f"context_len={len(context)}"
                 + (", is_final_chunk=True" if is_final_chunk else "")
+                + (f", cold_start_timeout={timeout_override:.0f}s (idle {idle_since_last:.0f}s)" if is_cold_start else "")
             )
 
             text = self.transcriber.transcribe(
@@ -778,6 +800,7 @@ class SVoiceRecApp:
                 allowed_languages=allowed_languages,
                 condition_on_previous_text=condition_on_previous_text,
                 is_final_chunk=is_final_chunk,
+                timeout_override=timeout_override,
             )
 
             # Update last transcription time for keep-alive tracking
@@ -819,18 +842,31 @@ class SVoiceRecApp:
                         and self.ai_editor.is_ready()
                         and self.config.get("ai_editor_enabled", False)
                     ):
-                        word_count = len(full_text.split())
-                        if word_count <= 3:
-                            log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
-                        elif self.ai_editor.is_hallucination(full_text):
-                            log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
+                        if self._is_memory_pressure_high():
+                            # Under memory pressure Qwen's GPU thread blocks and can't be
+                            # interrupted cleanly, causing 8.5s + 2s stuck-thread delays.
+                            # Skip refinement entirely and notify the user.
+                            log_info("AiEditor: skipping refinement — memory pressure high.")
+                            self._ai_editor_status = AiEditor.REFINE_STATUS_MEMORY_PRESSURE
+                            self._ai_edited_text = full_text
+                            self._submit_for_main_thread(self._send_memory_pressure_notification)
                         else:
-                            refined = self.ai_editor.refine(full_text)
-                            if refined and refined != full_text:
-                                log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
-                                is_ai_edited = True
+                            word_count = len(full_text.split())
+                            if word_count <= 3:
+                                log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
+                            elif self.ai_editor.is_hallucination(full_text):
+                                log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
+                            else:
+                                refined = self.ai_editor.refine(full_text)
+                                # Always capture what the AI produced and its status so the
+                                # dataset record distinguishes "AI ran but unchanged" from
+                                # "AI was disabled / skipped / timed out".
                                 self._ai_edited_text = refined
-                                full_text = refined
+                                self._ai_editor_status = self.ai_editor.last_refine_status
+                                if refined and refined != full_text:
+                                    log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
+                                    is_ai_edited = True
+                                    full_text = refined
                     # -------------------------------------------
 
                     # Cancel the delayed "still working" timer under the lock.
@@ -968,6 +1004,7 @@ class SVoiceRecApp:
                 self._delayed_transcribing_timer.daemon = True
                 self._delayed_transcribing_timer.start()
 
+            worker_timed_out = False
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
                 try:
@@ -986,6 +1023,14 @@ class SVoiceRecApp:
                     # The session is only invalidated when the user starts a new
                     # recording (via start_recording → _session_id += 1).
                     self.is_processing = False
+                    worker_timed_out = True
+                    # Keep showing "still working" — chunk_worker will submit
+                    # _do_finish_cleanup when it actually completes.
+                    if self._preview_panel:
+                        s_wt = get_ui_strings(get_primary_language(self.config))
+                        self._preview_panel.update_status(
+                            s_wt["still_working_title"], self._main_thread_queue
+                        )
                 else:
                     log_info(
                         f"Worker thread finished. Waited {waited:.1f}s. "
@@ -1020,9 +1065,15 @@ class SVoiceRecApp:
                         title=s_ui["edit_confirm_title"],
                     )
                     log_info("Buffered finalization: show_interactive queued on main thread")
+                    # Cleanup submitted here, AFTER show_interactive, so is_processing
+                    # stays True until the popup is actually visible.
+                    self._submit_for_main_thread(self._do_finish_cleanup)
 
-            # All UI updates and "Finish" run on main thread so menu bar actually updates
-            self._submit_for_main_thread(self._do_finish_cleanup)
+            # Cleanup responsibility by path:
+            #   normal  — chunk_worker submits _do_finish_cleanup when its loop exits
+            #   timeout — chunk_worker submits cleanup when it eventually finishes
+            #   buffered — cleanup submitted inline above, after show_interactive
+            # Nothing to submit here.
             log_info("Stop-recording phase done (cleanup scheduled on main thread).")
         except Exception as e:
             log_exception(f"Unhandled exception in stop_recording_and_process: {e}")
@@ -1152,54 +1203,53 @@ class SVoiceRecApp:
         self._keep_alive_timer.start()
 
     def _keep_alive_tick(self) -> None:
-        """Periodic check: if no transcription happened recently, do a warmup ping."""
+        """Periodic check: clear MLX cache and optionally ping the model to stay warm."""
         try:
             elapsed = time.time() - self._last_transcription_time
-            if elapsed < KEEP_ALIVE_INTERVAL_SECONDS:
+            under_pressure = self._is_memory_pressure_high()
+
+            if elapsed < KEEP_ALIVE_INTERVAL_SECONDS and not under_pressure:
                 log_info(
                     f"Keep-alive: last transcription {elapsed:.0f}s ago, "
                     "model still warm — skipping ping."
                 )
                 return
 
-            # Check memory pressure before pinging
-            if self._is_memory_pressure_high():
-                log_info(
-                    "Keep-alive: memory pressure high, skipping warmup ping "
-                    "to avoid adding load."
-                )
-                return
-
-            log_info(
-                f"Keep-alive: no transcription for {elapsed:.0f}s, "
-                "sending warmup ping to keep model warm."
-            )
-            # Warmup in a separate thread to not block the timer
+            # Always clear the MLX Metal cache — this releases unused Metal buffers
+            # back to the OS and is the primary defence against the child process
+            # growing from ~2 GB to 6+ GB under sustained use.
+            # clear_cache() only frees buffers not currently referenced by any live
+            # tensor, so it is safe to call at any time between transcriptions.
             threading.Thread(
-                target=self._do_keep_alive_warmup, daemon=True
+                target=self._do_keep_alive_warmup,
+                kwargs={"skip_prewarm": under_pressure},
+                daemon=True,
             ).start()
         except Exception as e:
             log_exception(f"Keep-alive tick error: {e}")
         finally:
             self._schedule_keep_alive()
 
-    def _do_keep_alive_warmup(self) -> None:
-        """Perform a real silent transcription to keep GPU/MLX weights in active memory.
+    def _do_keep_alive_warmup(self, *, skip_prewarm: bool = False) -> None:
+        """Clear MLX Metal cache and optionally pre-warm the model.
 
-        Uses pre_warm() instead of warmup() for two reasons:
-        1. warmup() is a no-op after first call (_warmup_done guard in WhisperTranscriber).
-        2. The old approach drained output_queue directly, which could race with a
-           concurrent transcribe() call and steal its result, causing a 30s timeout.
-        pre_warm() fire-and-forgets; the prewarm_done response is silently consumed
-        by the next transcribe() call (which ignores non-"transcription" messages).
+        clear_cache() is always sent — it releases Metal buffers from MLX's internal
+        caching allocator and is the main mechanism preventing memory growth.
+        pre_warm() is skipped under memory pressure because it loads data into memory;
+        skipping it avoids adding load when the system is already constrained.
         """
         if not self._keep_alive_lock.acquire(blocking=False):
             log_info("Keep-alive: previous warmup still running — skipping.")
             return
         try:
             self.transcriber.clear_cache()
-            self.transcriber.pre_warm()
-            log_info("Keep-alive: cache cleared and pre_warm() sent to transcriber process.")
+            if skip_prewarm:
+                log_info(
+                    "Keep-alive: memory pressure high — cache cleared, pre_warm skipped."
+                )
+            else:
+                self.transcriber.pre_warm()
+                log_info("Keep-alive: cache cleared and pre_warm() sent to transcriber process.")
             self._last_transcription_time = time.time()
         except Exception as e:
             log_error(f"Keep-alive warmup failed: {e}")
@@ -1215,6 +1265,33 @@ class SVoiceRecApp:
                 pass
             self._keep_alive_timer = None
 
+    def _restart_transcriber_for_memory(self) -> None:
+        """Restart the transcriber child process to reset accumulated MLX memory.
+
+        clear_cache() only frees unreferenced Metal buffers. The model weight tensors
+        (WhisperTranscriber._model) are always referenced and never freed. After many
+        sessions the child grows to 6+ GB; a full restart brings it back to ~2 GB.
+        Called in a daemon thread so it does not block the main thread.
+        """
+        if self.is_recording or self.is_processing:
+            log_info("Transcriber restart skipped: session in progress.")
+            return
+        log_info(
+            f"Restarting transcriber for memory reset "
+            f"(session {self._completed_sessions} of {TRANSCRIBER_RESTART_AFTER_SESSIONS})."
+        )
+        try:
+            self.transcriber._restart_process()
+            # Immediately pre-warm to reload model weights into GPU before next hotkey.
+            # Force-bypass the idle threshold: after restart _last_transcribe_returned_at
+            # is stale (still the time of the last transcription before restart), so the
+            # idle guard might wrongly skip pre_warm. Reset it to a distant past value.
+            self.transcriber._last_transcribe_returned_at = 0.0
+            self.transcriber.pre_warm()
+            log_info("Transcriber restarted and pre_warm sent.")
+        except Exception as e:
+            log_error(f"Transcriber restart failed: {e}")
+
     def _is_memory_pressure_high(self) -> bool:
         """Check if system memory usage exceeds the threshold."""
         try:
@@ -1227,6 +1304,18 @@ class SVoiceRecApp:
         except Exception as e:
             log_error(f"Error checking memory pressure: {e}")
             return False
+
+    def _send_memory_pressure_notification(self) -> None:
+        """Send a system notification when AI editor is skipped due to memory pressure.
+
+        Called on the main thread via _submit_for_main_thread so it doesn't race
+        with the interactive popup appearing at the same moment.
+        """
+        send_notification(
+            "Click-n-speak",
+            "AI-редактор пропущен",
+            "Нехватка памяти. Закройте лишние приложения для ускорения работы.",
+        )
 
     def start_wake_observer(self) -> None:
         """Subscribe to macOS NSWorkspaceDidWakeNotification to warmup model after sleep."""

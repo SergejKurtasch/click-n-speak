@@ -20,20 +20,23 @@ def append_to_dataset(
     raw_text: str,
     ai_text: Optional[str],
     user_final_text: str,
+    ai_status: Optional[str] = None,
     dataset_path: str = _DEFAULT_DATASET_PATH,
 ) -> None:
     """Append a single transcription record to the JSONL dataset file.
 
     Args:
         raw_text: Original text from Whisper (before AI editing).
-        ai_text: Text after AI Editor refinement (None if AI Editor was off).
+        ai_text: Text after AI Editor refinement (None if AI Editor was off or skipped).
         user_final_text: Text the user actually confirmed/sent after editing.
+        ai_status: One of AiEditor.REFINE_STATUS_* or None (AI disabled / not run).
         dataset_path: Path to the JSONL file.
     """
     record = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "raw_whisper": raw_text,
         "ai_edited": ai_text,
+        "ai_status": ai_status,
         "user_final": user_final_text,
     }
 

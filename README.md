@@ -7,12 +7,13 @@ All processing runs on-device using Apple Silicon — no data leaves your machin
 ## Features
 
 - **100% local** — Whisper via MLX, no cloud, no internet required for transcription
-- **AI cleanup** — optional Qwen 2.5 1.5B (4-bit) post-processes each transcription for punctuation and grammar
+- **AI cleanup** — optional Qwen 2.5 1.5B (4-bit) post-processes each transcription for punctuation and grammar (8s timeout)
 - **Global hotkey** — `Alt+Space` starts and stops recording from any app
 - **Adaptive VAD** — silence detection adjusts to speech pace; short pauses buffer, longer pauses trigger send
 - **Multilingual** — primary + additional languages in one session, no layout switching
+- **Auto vocabulary** — analyzes phrase history every 50 transcriptions, suggests (or auto-adds) domain terms to improve Whisper accuracy; configurable in Suggest / Auto / Disabled mode
 - **Setup wizard** — first-launch wizard guides through all required permissions automatically
-- **Menu bar UI** — model selection, language config, prompt editing, phrase history
+- **Menu bar UI** — model selection, language config, vocabulary management, phrase history with copy
 - **Clean shutdown** — no orphan MLX helper processes left behind, even after Force Quit or crash (kqueue-driven parent-death watchdog + startup sweep)
 
 ## Requirements
@@ -65,17 +66,25 @@ The app stores its config in `~/Library/Application Support/Click-n-speak/config
 
 ```json
 {
+    "schema_version": 4,
     "primary_language": "ru",
     "additional_languages": ["en"],
     "model_name": "mlx-community/whisper-large-v3-turbo",
     "ai_editor_enabled": true,
     "ai_editor_model": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "user_terms": {"ru": ["термин1"], "en": ["PCA"]},
+    "prompt_update_mode": "suggest",
+    "auto_prompt_check_interval": 50,
     "silence_duration": 1.0,
     "target_speech_duration": 4.0,
     "max_speech_duration": 8.0,
     "autostart": false
 }
 ```
+
+`user_terms` — domain vocabulary injected into Whisper's initial prompt for better accuracy. Updated manually via *Edit Terms* or automatically via the auto-vocabulary feature.
+
+`prompt_update_mode` — controls auto-vocabulary: `"suggest"` (review before adding), `"auto"` (add immediately), `"disabled"`.
 
 All fields are also editable via the menu bar UI.
 

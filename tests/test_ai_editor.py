@@ -131,6 +131,54 @@ class TestAiEditorFallbacks(unittest.TestCase):
         result = editor.refine(raw)
         self.assertEqual(result, raw)
 
+    # ------------------------------------------------------------------
+    # last_refine_status
+    # ------------------------------------------------------------------
+
+    def test_status_disabled_when_not_ready(self):
+        editor = AiEditor()
+        editor.refine("любой текст")
+        self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_DISABLED)
+
+    def test_status_ok_on_successful_refinement(self):
+        editor = self._make_ready_editor()
+        editor._call_llm = lambda t: "Исправленный текст."
+        editor.refine("исправленный текст")
+        self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_OK)
+
+    def test_status_unchanged_when_llm_returns_same(self):
+        editor = self._make_ready_editor()
+        text = "Уже хороший текст."
+        editor._call_llm = lambda t: text
+        editor.refine(text)
+        self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_UNCHANGED)
+
+    def test_status_timeout_on_slow_llm(self):
+        editor = self._make_ready_editor()
+
+        def _slow_call(text):
+            threading.Event().wait(_REFINE_TIMEOUT_SECONDS + 5)
+            return "никогда не вернётся"  # pragma: no cover
+
+        editor._call_llm = _slow_call
+        editor.refine("таймаут тест")
+        self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_TIMEOUT)
+
+    def test_status_error_on_llm_exception(self):
+        editor = self._make_ready_editor()
+        editor._call_llm = lambda t: (_ for _ in ()).throw(RuntimeError("crash"))
+        editor.refine("ошибка теста")
+        self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_ERROR)
+
+    def test_status_skipped_when_lock_held(self):
+        editor = self._make_ready_editor()
+        editor._lock.acquire()  # simulate another call in progress
+        try:
+            editor.refine("занято")
+            self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_SKIPPED)
+        finally:
+            editor._lock.release()
+
 
 # ---------------------------------------------------------------------------
 # Integration smoke-test (only runs if mlx-lm is installed)

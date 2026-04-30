@@ -17,7 +17,9 @@ from .utils import log_error, log_info
 
 # Default generation settings for the editor LLM
 _DEFAULT_TEMP = 0.0        # greedy — deterministic and fastest
-_REFINE_TIMEOUT_SECONDS = 15.0   # fallback to raw text if LLM is too slow
+# Successful refinements complete in 0.7-3s; 8s gives ample headroom without
+# the 15s penalty that was previously paid on every slow/large input.
+_REFINE_TIMEOUT_SECONDS = 8.0
 
 DEFAULT_MODEL_NAME = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 
@@ -45,6 +47,15 @@ class AiEditor:
     STATUS_READY = "ready"
     STATUS_ERROR = "error"
 
+    # Refine status codes set after every refine() call for callers to inspect.
+    REFINE_STATUS_OK = "ok"                      # LLM ran and produced a different (improved) text
+    REFINE_STATUS_UNCHANGED = "unchanged"        # LLM ran but returned same text (no edits needed)
+    REFINE_STATUS_TIMEOUT = "timeout"            # LLM hit the timeout — original text returned
+    REFINE_STATUS_SKIPPED = "skipped"            # Too short / hallucination filter / GPU busy
+    REFINE_STATUS_ERROR = "error"                # Exception inside the LLM thread
+    REFINE_STATUS_DISABLED = "disabled"          # ai_editor not ready or text was empty
+    REFINE_STATUS_MEMORY_PRESSURE = "memory_pressure"  # Skipped — system memory pressure too high
+
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME) -> None:
         self.model_name = model_name
         self._model = None
@@ -52,6 +63,7 @@ class AiEditor:
         self._ready = False
         self._lock = threading.Lock()  # Prevent concurrent LLM calls
         self._abort_event = threading.Event()
+        self.last_refine_status: str = self.REFINE_STATUS_DISABLED
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,6 +154,7 @@ class AiEditor:
         the original *text* is returned unchanged so dictation is never blocked.
         """
         if not self._ready or not text.strip():
+            self.last_refine_status = self.REFINE_STATUS_DISABLED
             return text
 
         # Non-blocking lock: if a previous LLM call is still running (hung thread),
@@ -151,6 +164,7 @@ class AiEditor:
                 "AiEditor: previous LLM call still in progress "
                 "— skipping refinement to avoid Metal GPU conflict."
             )
+            self.last_refine_status = self.REFINE_STATUS_SKIPPED
             return text
 
         result: list[str] = []
@@ -185,12 +199,14 @@ class AiEditor:
                 f"AiEditor: LLM thread timed out after {_REFINE_TIMEOUT_SECONDS + 0.5}s "
                 "— returning original text."
             )
+            self.last_refine_status = self.REFINE_STATUS_TIMEOUT
             return text
 
         self._lock.release()
 
         if exc:
             log_error(f"AiEditor: error during refinement: {exc[0]}")
+            self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
         cleaned = result[0] if (result and result[0].strip()) else text
@@ -201,8 +217,13 @@ class AiEditor:
             log_error(
                 "AiEditor: output suspiciously long — returning original text."
             )
+            self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
+        if cleaned != text:
+            self.last_refine_status = self.REFINE_STATUS_OK
+        else:
+            self.last_refine_status = self.REFINE_STATUS_UNCHANGED
         log_info(
             f"AiEditor refined chunk "
             f"({len(text)} → {len(cleaned)} chars): '{cleaned[:80]}...'"
