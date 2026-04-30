@@ -504,6 +504,7 @@ class TranscriberProcessWrapper:
                     # causing the child process to grow from ~2 GB to 6+ GB over time.
                     try:
                         import gc
+                        import mlx.core
                         gc.collect()
                         mlx.core.metal.clear_cache()
                         log_info("MLX Metal cache cleared after transcription.")
@@ -522,6 +523,7 @@ class TranscriberProcessWrapper:
                     })
                     try:
                         import gc
+                        import mlx.core
                         gc.collect()
                         mlx.core.metal.clear_cache()
                     except Exception:
