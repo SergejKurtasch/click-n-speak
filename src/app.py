@@ -872,7 +872,7 @@ class SVoiceRecApp:
                             elif self.ai_editor.is_hallucination(full_text):
                                 log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
                             else:
-                                refined = self.ai_editor.refine(full_text)
+                                refined = self.ai_editor.refine(full_text, languages=get_allowed_languages(self.config))
                                 # Always capture what the AI produced and its status so the
                                 # dataset record distinguishes "AI ran but unchanged" from
                                 # "AI was disabled / skipped / timed out".
