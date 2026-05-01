@@ -349,3 +349,103 @@ class AiEditor:
                 return True
 
         return False
+
+
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+_GEMINI_REFINE_TIMEOUT_SECONDS = 10.0
+
+
+class GeminiEditor:
+    """Calls Gemini API to clean up Whisper transcription chunks.
+
+    Drop-in replacement for AiEditor with the same refine() interface.
+    Uses GOOGLE_API_KEY from environment. Falls back to original text on
+    any error or timeout so dictation is never blocked.
+    """
+
+    REFINE_STATUS_OK = "ok"
+    REFINE_STATUS_UNCHANGED = "unchanged"
+    REFINE_STATUS_TIMEOUT = "timeout"
+    REFINE_STATUS_ERROR = "error"
+    REFINE_STATUS_DISABLED = "disabled"
+
+    def __init__(self, model_name: str = DEFAULT_GEMINI_MODEL) -> None:
+        self.model_name = model_name
+        self.last_refine_status: str = self.REFINE_STATUS_DISABLED
+        self._client = None
+        self._ready = False
+
+    def load(self) -> None:
+        """Initialise the Gemini client. Raises if GOOGLE_API_KEY is missing."""
+        try:
+            from google import genai  # type: ignore
+            api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_GENAI_API_KEY")
+            if not api_key:
+                raise RuntimeError("GOOGLE_API_KEY is not set in environment.")
+            self._client = genai.Client(api_key=api_key)
+            self._ready = True
+            log_info(f"GeminiEditor: ready (model={self.model_name})")
+        except Exception as e:
+            log_error(f"GeminiEditor: failed to initialise — {e}")
+            self._ready = False
+
+    def is_ready(self) -> bool:
+        return self._ready
+
+    def refine(self, text: str, languages: list[str] | None = None) -> str:
+        """Return cleaned text, or original text unchanged on any failure."""
+        if not self._ready or not text.strip():
+            self.last_refine_status = self.REFINE_STATUS_DISABLED
+            return text
+
+        result: list[str] = []
+        exc: list[Exception] = []
+
+        def _run() -> None:
+            try:
+                cleaned = self._call_gemini(text, languages=languages)
+                result.append(cleaned)
+            except Exception as e:
+                exc.append(e)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=_GEMINI_REFINE_TIMEOUT_SECONDS)
+
+        if t.is_alive():
+            log_error(f"GeminiEditor: request timed out after {_GEMINI_REFINE_TIMEOUT_SECONDS}s.")
+            self.last_refine_status = self.REFINE_STATUS_TIMEOUT
+            return text
+
+        if exc:
+            log_error(f"GeminiEditor: error during refinement: {exc[0]}")
+            self.last_refine_status = self.REFINE_STATUS_ERROR
+            return text
+
+        cleaned = result[0].strip() if result else ""
+        if not cleaned:
+            self.last_refine_status = self.REFINE_STATUS_ERROR
+            return text
+
+        if cleaned == text:
+            self.last_refine_status = self.REFINE_STATUS_UNCHANGED
+        else:
+            self.last_refine_status = self.REFINE_STATUS_OK
+            log_info(f"GeminiEditor refined: {len(text)} → {len(cleaned)} chars")
+
+        return cleaned
+
+    def _call_gemini(self, text: str, languages: list[str] | None = None) -> str:
+        system_prompt = _build_system_prompt(languages)
+        tagged = f"<speech>\n{text}\n</speech>"
+
+        response = self._client.models.generate_content(
+            model=self.model_name,
+            contents=tagged,
+            config={
+                "system_instruction": system_prompt,
+                "temperature": 0.0,
+                "max_output_tokens": min(1024, max(64, int(len(text) * 1.2))),
+            },
+        )
+        return response.text or ""
