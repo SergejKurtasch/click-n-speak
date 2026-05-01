@@ -299,6 +299,11 @@ def get_primary_language(config: dict) -> str:
     return "ru"
 
 
+# Maps app-internal language codes to ISO 639-1 codes that Whisper recognises.
+# "ua" (country code) is used in the UI for Ukrainian; Whisper requires "uk".
+_WHISPER_LANG_CODE: dict[str, str] = {"ua": "uk"}
+
+
 def get_allowed_languages(config: dict) -> list[str]:
     """Return the list of languages allowed for recognition: primary + additional (no duplicates)."""
     primary = get_primary_language(config)
@@ -311,12 +316,12 @@ def get_allowed_languages(config: dict) -> list[str]:
         if isinstance(lang_list, list) and len(lang_list) > 1:
             additional = [str(x).lower().strip() for x in lang_list[1:] if x]
     seen = {primary}
-    result = [primary]
+    result = [_WHISPER_LANG_CODE.get(primary, primary)]
     for lang in additional:
         code = str(lang).lower().strip()
         if code and code not in seen:
             seen.add(code)
-            result.append(code)
+            result.append(_WHISPER_LANG_CODE.get(code, code))
     return result
 
 
@@ -422,6 +427,16 @@ LANG_PROMPTS: dict[str, str] = {
     "de": "Deutscher Text.",
     "es": "Texto en español.",
     "fr": "Texte en français.",
+    "it": "Testo in italiano.",
+    "pt": "Texto em português.",
+    "nl": "Nederlandse tekst.",
+    "pl": "Tekst po polsku.",
+    "ua": "Українська мова.",
+    "tr": "Türkçe metin.",
+    "zh": "中文文本。",
+    "ja": "日本語テキスト。",
+    "ko": "한국어 텍스트。",
+    "ar": "نص عربي.",
 }
 
 # One natural sentence per language used as a style-and-register hint for Whisper
@@ -434,6 +449,16 @@ LANG_DEFAULT_CONTEXT: dict[str, str] = {
     "de": "Dies ist gesprochene Sprache mit Fachbegriffen.",
     "es": "Este es lenguaje hablado con vocabulario técnico y profesional.",
     "fr": "Ceci est du langage parlé avec du vocabulaire professionnel et technique.",
+    "it": "Questo è linguaggio parlato con vocabolario professionale e tecnico.",
+    "pt": "Esta é linguagem falada com vocabulário profissional e técnico.",
+    "nl": "Dit is gesproken taal met professionele en technische woordenschat.",
+    "pl": "To jest mowa potoczna z profesjonalnym słownictwem technicznym.",
+    "ua": "Це розмовна мова з використанням професійних термінів і абревіатур.",
+    "tr": "Bu, profesyonel ve teknik kelime hazinesiyle konuşma dilidir.",
+    "zh": "这是口语，使用专业和技术词汇。",
+    "ja": "これは専門的・技術的な語彙を使った話し言葉です。",
+    "ko": "이것은 전문적이고 기술적인 어휘가 포함된 구어체입니다。",
+    "ar": "هذا هو اللغة المنطوقة مع المفردات المهنية والتقنية.",
 }
 
 # Normalised set for filtering language-hint phrases during term parsing.

@@ -19,6 +19,7 @@ WHISPER_MODELS = [
 
 _ICON_CACHED = "🟢"  # 🟢  — model is on disk, instant switch
 
+from .ai_editor import get_gemini_api_key, set_gemini_api_key
 from .phrase_history import get_last_phrases
 from .updater import check_for_update
 from .permissions import (
@@ -55,13 +56,23 @@ from .utils import (
 # Language Selection Panel (NSPanel — stays open across multiple clicks)
 # ---------------------------------------------------------------------------
 
-LANGS = ["ru", "en", "de", "es", "fr"]
+LANGS = ["ru", "en", "de", "es", "fr", "it", "pt", "nl", "pl", "ua", "tr", "zh", "ja", "ko", "ar"]
 LANG_LABELS = {
     "ru": "RU — Russian",
     "en": "EN — English",
     "de": "DE — German",
     "es": "ES — Spanish",
     "fr": "FR — French",
+    "it": "IT — Italian",
+    "pt": "PT — Portuguese",
+    "nl": "NL — Dutch",
+    "pl": "PL — Polish",
+    "ua": "UA — Ukrainian",
+    "tr": "TR — Turkish",
+    "zh": "ZH — Chinese",
+    "ja": "JA — Japanese",
+    "ko": "KO — Korean",
+    "ar": "AR — Arabic",
 }
 # LANG_PROMPTS is now defined in utils.py and imported above.
 
@@ -756,6 +767,18 @@ class ClickNSpeakApp(rumps.App):
         ai_editor_item = rumps.MenuItem("AI Editor (Punctuation & Cleanup)", **_icon("ai-editor"), callback=self._toggle_ai_editor)
         ai_editor_item.state = 1 if self.config.get("ai_editor_enabled", False) else 0
         self.menu.add(ai_editor_item)
+
+        # AI Editor Backend submenu
+        self._ai_backend_submenu = rumps.MenuItem("AI Editor Backend ▶")
+        self._ai_backend_local_item = rumps.MenuItem("Local (Qwen)", callback=self._on_set_ai_backend_local)
+        self._ai_backend_gemini_item = rumps.MenuItem("Gemini API", callback=self._on_set_ai_backend_gemini)
+        self._ai_backend_submenu.add(self._ai_backend_local_item)
+        self._ai_backend_submenu.add(self._ai_backend_gemini_item)
+        self._ai_backend_submenu.add(None)
+        self._ai_backend_submenu.add(rumps.MenuItem("Set Gemini API Key…", callback=self._on_set_gemini_api_key))
+        self.menu.add(self._ai_backend_submenu)
+        self._update_ai_backend_submenu_state()
+
         self.menu.add(rumps.MenuItem("Download AI Editor Model", **_icon("download-model"), callback=self._download_ai_model))
 
         # Initial Prompt submenu
@@ -1334,6 +1357,72 @@ class ClickNSpeakApp(rumps.App):
             self.main_app.notify("AI Editor", "Загрузка модели... Вы получите уведомление о готовности.")
         else:
             self.main_app.notify("AI Editor", "Умная очистка отключена.")
+
+    def _update_ai_backend_submenu_state(self) -> None:
+        """Sync checkmarks on the backend submenu with current config."""
+        backend = self.config.get("ai_editor_backend", "local")
+        self._ai_backend_local_item.state = 1 if backend == "local" else 0
+        self._ai_backend_gemini_item.state = 1 if backend == "gemini" else 0
+
+    def _on_set_ai_backend_local(self, _) -> None:
+        self.main_app.update_config({"ai_editor_backend": "local"})
+        self._update_ai_backend_submenu_state()
+        log_info("AI Editor backend set to: local")
+        self.main_app.notify("AI Editor", "Бэкенд: Local (Qwen). Перезапустите приложение для смены модели.")
+
+    def _on_set_ai_backend_gemini(self, _) -> None:
+        self.main_app.update_config({"ai_editor_backend": "gemini"})
+        self._update_ai_backend_submenu_state()
+        log_info("AI Editor backend set to: gemini")
+        self.main_app.notify("AI Editor", "Бэкенд: Gemini API. Перезапустите приложение для смены модели.")
+
+    # Strict format check: "AIzaSy" + 33 base64url chars = 39 chars total
+    _GEMINI_KEY_RE = __import__("re").compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
+
+    def _on_set_gemini_api_key(self, _) -> None:
+        """Show a dialog to enter and save the Gemini API key to macOS Keychain."""
+        try:
+            from AppKit import NSAlert, NSSecureTextField, NSMakeRect, NSApp, NSPasteboard, NSPasteboardTypeString, NSFloatingWindowLevel  # type: ignore
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Gemini API Key")
+            existing = get_gemini_api_key()
+            hint = "Уже сохранён (оставьте пустым, чтобы не менять)." if existing else "Введите ключ из console.cloud.google.com."
+            alert.setInformativeText_(hint)
+            alert.addButtonWithTitle_("Сохранить")
+            alert.addButtonWithTitle_("Отмена")
+
+            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
+            field.setPlaceholderString_("AIzaSy…")
+
+            # Auto-fill from clipboard only if it matches the exact Gemini key format
+            pb = NSPasteboard.generalPasteboard()
+            candidate = (pb.stringForType_(NSPasteboardTypeString) or "").strip()
+            if self._GEMINI_KEY_RE.match(candidate):
+                field.setStringValue_(candidate)
+
+            alert.setAccessoryView_(field)
+            alert.layout()  # forces NSAlert to create its window before we access it
+            alert.window().setInitialFirstResponder_(field)
+
+            # Float above other windows and activate so Cmd+V works after the user
+            # switches to another app to copy the key and returns.
+            alert.window().setLevel_(NSFloatingWindowLevel)
+            NSApp.activateIgnoringOtherApps_(True)
+            alert.window().makeKeyAndOrderFront_(None)
+
+            result = alert.runModal()
+            if result == 1000:  # "Сохранить"
+                key = field.stringValue().strip()
+                if key:
+                    try:
+                        set_gemini_api_key(key)
+                        log_info("Gemini API key saved to Keychain.")
+                        self.main_app.notify("AI Editor", "Ключ сохранён в Keychain. Перезапустите приложение.")
+                    except Exception as save_exc:
+                        log_error(f"Failed to save Gemini API key to Keychain: {save_exc}")
+                        self.main_app.notify("AI Editor: Ошибка", f"Не удалось сохранить ключ: {save_exc}")
+        except Exception as exc:
+            log_error(f"Set Gemini API key dialog failed: {exc}")
 
     def _download_ai_model(self, _) -> None:
         """Open a new Terminal window and run the download script with visible progress."""

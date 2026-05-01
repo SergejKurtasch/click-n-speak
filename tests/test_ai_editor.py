@@ -88,7 +88,7 @@ class TestAiEditorFallbacks(unittest.TestCase):
         short_input = "ну это текст"
         # Simulate an LLM that returns something 3× longer (hallucination)
         long_output = short_input * 10
-        editor._call_llm = lambda t: long_output
+        editor._call_llm = lambda t, **kw: long_output
         result = editor.refine(short_input)
         self.assertEqual(result, short_input)
 
@@ -96,7 +96,7 @@ class TestAiEditorFallbacks(unittest.TestCase):
         editor = self._make_ready_editor()
         raw = "привет это тест короче вот"
         cleaned = "Привет. Это тест."
-        editor._call_llm = lambda t: cleaned
+        editor._call_llm = lambda t, **kw: cleaned
         result = editor.refine(raw)
         self.assertEqual(result, cleaned)
 
@@ -109,14 +109,14 @@ class TestAiEditorFallbacks(unittest.TestCase):
         editor = self._make_ready_editor()
         raw = "ну вот это короче тест"
         polished = "Это тест."
-        editor._call_llm = lambda t: polished
+        editor._call_llm = lambda t, **kw: polished
         result = editor.refine(raw)
         self.assertEqual(result, polished)
 
     def test_refine_returns_original_if_llm_returns_empty(self):
         editor = self._make_ready_editor()
         raw = "это некий текст"
-        editor._call_llm = lambda t: ""
+        editor._call_llm = lambda t, **kw: ""
         result = editor.refine(raw)
         self.assertEqual(result, raw)
 
@@ -124,7 +124,7 @@ class TestAiEditorFallbacks(unittest.TestCase):
         editor = self._make_ready_editor()
         raw = "критическая ошибка"
 
-        def _crash(_):
+        def _crash(_, **kw):
             raise RuntimeError("LLM exploded")
 
         editor._call_llm = _crash
@@ -142,21 +142,21 @@ class TestAiEditorFallbacks(unittest.TestCase):
 
     def test_status_ok_on_successful_refinement(self):
         editor = self._make_ready_editor()
-        editor._call_llm = lambda t: "Исправленный текст."
+        editor._call_llm = lambda t, **kw: "Исправленный текст."
         editor.refine("исправленный текст")
         self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_OK)
 
     def test_status_unchanged_when_llm_returns_same(self):
         editor = self._make_ready_editor()
         text = "Уже хороший текст."
-        editor._call_llm = lambda t: text
+        editor._call_llm = lambda t, **kw: text
         editor.refine(text)
         self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_UNCHANGED)
 
     def test_status_timeout_on_slow_llm(self):
         editor = self._make_ready_editor()
 
-        def _slow_call(text):
+        def _slow_call(text, **kw):
             threading.Event().wait(_REFINE_TIMEOUT_SECONDS + 5)
             return "никогда не вернётся"  # pragma: no cover
 
@@ -166,7 +166,7 @@ class TestAiEditorFallbacks(unittest.TestCase):
 
     def test_status_error_on_llm_exception(self):
         editor = self._make_ready_editor()
-        editor._call_llm = lambda t: (_ for _ in ()).throw(RuntimeError("crash"))
+        editor._call_llm = lambda t, **kw: (_ for _ in ()).throw(RuntimeError("crash"))
         editor.refine("ошибка теста")
         self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_ERROR)
 

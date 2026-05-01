@@ -16,7 +16,7 @@ except ImportError:
     NSRunningApplication = None
 
 from .dataset_logger import append_to_dataset
-from .ai_editor import AiEditor, DEFAULT_MODEL_NAME
+from .ai_editor import AiEditor, DEFAULT_MODEL_NAME, GeminiEditor, DEFAULT_GEMINI_MODEL
 from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS
 from .utils import (
     build_initial_prompt,
@@ -36,6 +36,21 @@ from .utils import (
 
 # Keep-alive interval in seconds (15 minutes)
 KEEP_ALIVE_INTERVAL_SECONDS = 15 * 60
+
+
+def _join_chunks(parts: list[str]) -> str:
+    """Join Whisper chunk texts, removing spurious sentence-ending punctuation at
+    chunk boundaries where the next chunk continues mid-sentence (starts with a
+    lowercase letter).  Whisper independently punctuates each chunk, so a period
+    appended to a non-final chunk frequently lands in the middle of a sentence."""
+    if len(parts) <= 1:
+        return " ".join(parts).strip()
+    result = parts[0]
+    for part in parts[1:]:
+        if result and part and result[-1] in ".!?" and part[0].islower():
+            result = result[:-1]
+        result += " " + part
+    return result.strip()
 
 # Restart the transcriber child process every N completed sessions.
 # MLX weight tensors are never freed by clear_cache() (they're always referenced);
@@ -76,8 +91,10 @@ class SVoiceRecApp:
         self.transcriber = TranscriberProcessWrapper(
             model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
         )
-        # AI Editor: optional LLM post-processing for punctuation and cleanup
+        # AI Editor: optional LLM post-processing for punctuation and cleanup.
+        # Backend is chosen by config["ai_editor_backend"]: "local" (MLX) or "gemini".
         self.ai_editor: Optional[AiEditor] = None
+        self.gemini_editor: Optional[GeminiEditor] = None
         self._ai_editor_loading = False
         self._ai_editor_lock = threading.Lock()  # guards _ai_editor_loading read/write
         if self.config.get("ai_editor_enabled", False):
@@ -141,14 +158,28 @@ class SVoiceRecApp:
             self._preview_panel = TranscriptionPreviewPanel()
 
     def _init_ai_editor(self) -> None:
-        """Create and load the AiEditor in a background thread (non-blocking)."""
+        """Create and load the AI editor backend in a background thread (non-blocking).
+
+        Backend is selected by config["ai_editor_backend"]:
+          "gemini"  — GeminiEditor (API call, requires GOOGLE_API_KEY)
+          "local"   — AiEditor (MLX local model, default)
+        """
         with self._ai_editor_lock:
             if self._ai_editor_loading:
                 return
+            self._ai_editor_loading = True
+
+        backend = self.config.get("ai_editor_backend", "local")
+        if backend == "gemini":
+            self.ai_editor = None  # release stale local model from GPU RAM
+            model_name = self.config.get("gemini_model", DEFAULT_GEMINI_MODEL)
+            self.gemini_editor = GeminiEditor(model_name=model_name)
+            threading.Thread(target=self._gemini_editor_load_worker, daemon=True).start()
+        else:
+            self.gemini_editor = None  # release stale Gemini client
             model_name = self.config.get("ai_editor_model", DEFAULT_MODEL_NAME)
             self.ai_editor = AiEditor(model_name=model_name)
-            self._ai_editor_loading = True
-        threading.Thread(target=self._ai_editor_load_worker, daemon=True).start()
+            threading.Thread(target=self._ai_editor_load_worker, daemon=True).start()
 
     def _ai_editor_load_worker(self) -> None:
         """Background worker: load the LLM model and notify when ready."""
@@ -182,6 +213,25 @@ class SVoiceRecApp:
                 self.notify("AI Editor: Ошибка загрузки", "Не удалось загрузить модель. Проверьте логи.")
         except Exception as e:
             log_exception(f"AiEditor background load failed: {e}")
+        finally:
+            with self._ai_editor_lock:
+                self._ai_editor_loading = False
+
+    def _gemini_editor_load_worker(self) -> None:
+        """Background worker: initialise the Gemini API client."""
+        try:
+            editor = self.gemini_editor
+            if editor is None:
+                return
+            editor.load()
+            if editor.is_ready():
+                self.notify("AI Editor Готов", f"Gemini ({editor.model_name}) активирован.")
+                log_info(f"GeminiEditor loaded and ready (model={editor.model_name}).")
+            else:
+                log_error("GeminiEditor failed to initialise — editor will be skipped.")
+                self.notify("AI Editor: Ошибка", "Не удалось подключиться к Gemini API. Проверьте GOOGLE_API_KEY.")
+        except Exception as e:
+            log_exception(f"GeminiEditor background load failed: {e}")
         finally:
             with self._ai_editor_lock:
                 self._ai_editor_loading = False
@@ -272,13 +322,22 @@ class SVoiceRecApp:
         # React to ai_editor_enabled toggle from the menu
         if "ai_editor_enabled" in updates:
             if updates["ai_editor_enabled"]:
-                if self.ai_editor is None or not self.ai_editor.is_ready():
+                backend = self.config.get("ai_editor_backend", "local")
+                if backend == "gemini":
+                    active = self.gemini_editor
+                else:
+                    active = self.ai_editor
+                if active is None or not active.is_ready():
                     self._init_ai_editor()
             else:
                 self.ai_editor = None
+                self.gemini_editor = None
                 with self._ai_editor_lock:
                     self._ai_editor_loading = False
                 log_info("AiEditor disabled.")
+        # React to backend switch — load the newly selected editor if not already ready
+        if "ai_editor_backend" in updates and self.config.get("ai_editor_enabled", False):
+            self._init_ai_editor()
 
     def toggle_recording(self):
         """Hotkey callback: toggles recording state with debounce and safety logging."""
@@ -831,18 +890,27 @@ class SVoiceRecApp:
                 self.transcribed_parts.append(text)
 
                 if is_final_chunk:
-                    full_text = " ".join(self.transcribed_parts).strip()
+                    full_text = _join_chunks(self.transcribed_parts)
 
                     # --- AI Editor post-processing (optional) ---
                     # Refine the FULL accumulated text, not just the final chunk,
                     # so partial chunks (which make up most of the content) are also
                     # punctuated and capitalized.
-                    if (
-                        self.ai_editor is not None
-                        and self.ai_editor.is_ready()
-                        and self.config.get("ai_editor_enabled", False)
-                    ):
-                        if self._is_memory_pressure_high():
+                    _active_editor = (
+                        self.gemini_editor if (
+                            self.config.get("ai_editor_backend", "local") == "gemini"
+                            and self.gemini_editor is not None
+                            and self.gemini_editor.is_ready()
+                        ) else (
+                            self.ai_editor if (
+                                self.ai_editor is not None
+                                and self.ai_editor.is_ready()
+                            ) else None
+                        )
+                    )
+                    if _active_editor is not None and self.config.get("ai_editor_enabled", False):
+                        is_gemini = isinstance(_active_editor, GeminiEditor)
+                        if not is_gemini and self._is_memory_pressure_high():
                             # Under memory pressure Qwen's GPU thread blocks and can't be
                             # interrupted cleanly, causing 8.5s + 2s stuck-thread delays.
                             # Skip refinement entirely and notify the user.
@@ -854,17 +922,16 @@ class SVoiceRecApp:
                             word_count = len(full_text.split())
                             if word_count <= 3:
                                 log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
-                            elif self.ai_editor.is_hallucination(full_text):
+                            elif not is_gemini and self.ai_editor.is_hallucination(full_text):
                                 log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
                             else:
-                                refined = self.ai_editor.refine(full_text)
+                                refined = _active_editor.refine(full_text, languages=get_allowed_languages(self.config))
                                 # Always capture what the AI produced and its status so the
                                 # dataset record distinguishes "AI ran but unchanged" from
                                 # "AI was disabled / skipped / timed out".
                                 self._ai_edited_text = refined
-                                self._ai_editor_status = self.ai_editor.last_refine_status
+                                self._ai_editor_status = _active_editor.last_refine_status
                                 if refined and refined != full_text:
-                                    log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
                                     is_ai_edited = True
                                     full_text = refined
                     # -------------------------------------------
@@ -901,7 +968,7 @@ class SVoiceRecApp:
                     elif self._preview_panel:
                         self._preview_panel.hide(self._main_thread_queue, delay=0.8)
                 else:
-                    accumulated = " ".join(self.transcribed_parts).strip()
+                    accumulated = _join_chunks(self.transcribed_parts)
                     if self._preview_panel:
                         self._preview_panel.update_text(accumulated, self._main_thread_queue)
                     log_info(
@@ -912,7 +979,7 @@ class SVoiceRecApp:
                 if is_final_chunk and not self.transcribed_parts and self._session_id == session_id:
                     self.notify("Нет речи", "Не удалось распознать речь. Попробуйте ещё раз.", delay=2.0)
                 if is_final_chunk and self.transcribed_parts and self._session_id == session_id:
-                    full_text = " ".join(self.transcribed_parts).strip()
+                    full_text = _join_chunks(self.transcribed_parts)
                     if full_text and self._preview_panel:
                         self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
                         _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
@@ -1049,7 +1116,7 @@ class SVoiceRecApp:
                 and not (self.worker_thread is not None and self.worker_thread.is_alive())
             ):
                 self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
-                full_text = " ".join(self.transcribed_parts).strip()
+                full_text = _join_chunks(self.transcribed_parts)
                 if full_text:
                     log_info(
                         f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
