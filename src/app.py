@@ -37,6 +37,21 @@ from .utils import (
 # Keep-alive interval in seconds (15 minutes)
 KEEP_ALIVE_INTERVAL_SECONDS = 15 * 60
 
+
+def _join_chunks(parts: list[str]) -> str:
+    """Join Whisper chunk texts, removing spurious sentence-ending punctuation at
+    chunk boundaries where the next chunk continues mid-sentence (starts with a
+    lowercase letter).  Whisper independently punctuates each chunk, so a period
+    appended to a non-final chunk frequently lands in the middle of a sentence."""
+    if len(parts) <= 1:
+        return " ".join(parts).strip()
+    result = parts[0]
+    for part in parts[1:]:
+        if result and part and result[-1] in ".!?" and part[0].islower():
+            result = result[:-1]
+        result += " " + part
+    return result.strip()
+
 # Restart the transcriber child process every N completed sessions.
 # MLX weight tensors are never freed by clear_cache() (they're always referenced);
 # only a full process restart resets them. 20 sessions ≈ 15-30 min of typical use.
@@ -831,7 +846,7 @@ class SVoiceRecApp:
                 self.transcribed_parts.append(text)
 
                 if is_final_chunk:
-                    full_text = " ".join(self.transcribed_parts).strip()
+                    full_text = _join_chunks(self.transcribed_parts)
 
                     # --- AI Editor post-processing (optional) ---
                     # Refine the FULL accumulated text, not just the final chunk,
@@ -901,7 +916,7 @@ class SVoiceRecApp:
                     elif self._preview_panel:
                         self._preview_panel.hide(self._main_thread_queue, delay=0.8)
                 else:
-                    accumulated = " ".join(self.transcribed_parts).strip()
+                    accumulated = _join_chunks(self.transcribed_parts)
                     if self._preview_panel:
                         self._preview_panel.update_text(accumulated, self._main_thread_queue)
                     log_info(
@@ -912,7 +927,7 @@ class SVoiceRecApp:
                 if is_final_chunk and not self.transcribed_parts and self._session_id == session_id:
                     self.notify("Нет речи", "Не удалось распознать речь. Попробуйте ещё раз.", delay=2.0)
                 if is_final_chunk and self.transcribed_parts and self._session_id == session_id:
-                    full_text = " ".join(self.transcribed_parts).strip()
+                    full_text = _join_chunks(self.transcribed_parts)
                     if full_text and self._preview_panel:
                         self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
                         _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
@@ -1049,7 +1064,7 @@ class SVoiceRecApp:
                 and not (self.worker_thread is not None and self.worker_thread.is_alive())
             ):
                 self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
-                full_text = " ".join(self.transcribed_parts).strip()
+                full_text = _join_chunks(self.transcribed_parts)
                 if full_text:
                     log_info(
                         f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
