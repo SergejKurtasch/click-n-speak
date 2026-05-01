@@ -377,6 +377,7 @@ _GEMINI_REFINE_TIMEOUT_SECONDS = 15.0
 
 _KEYCHAIN_SERVICE = "click-n-speak"
 _KEYCHAIN_ACCOUNT = "google_api_key"
+_SECURITY_BIN = "/usr/bin/security"
 
 
 def get_gemini_api_key() -> str | None:
@@ -386,14 +387,14 @@ def get_gemini_api_key() -> str | None:
         return key
     try:
         result = subprocess.run(
-            ["/usr/bin/security", "find-generic-password",
+            [_SECURITY_BIN, "find-generic-password",
              "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip() or None
-    except Exception:
-        pass
+    except Exception as e:
+        log_info(f"Keychain read skipped: {e}")
     return None
 
 
@@ -401,16 +402,16 @@ def set_gemini_api_key(key: str) -> None:
     """Store Gemini API key in macOS Keychain via security CLI. Raises on failure."""
     try:
         result = subprocess.run(
-            ["/usr/bin/security", "add-generic-password",
-             "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w", key, "-U"],
-            capture_output=True, text=True, timeout=5,
+            [_SECURITY_BIN, "add-generic-password",
+             "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w", "-", "-U"],
+            input=key, capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "security command failed")
     except subprocess.TimeoutExpired as e:
         raise RuntimeError("Keychain access timed out") from e
     except FileNotFoundError as e:
-        raise RuntimeError("/usr/bin/security not found") from e
+        raise RuntimeError(f"{_SECURITY_BIN} not found") from e
 
 
 class GeminiEditor:
