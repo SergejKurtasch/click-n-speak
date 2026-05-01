@@ -17,7 +17,7 @@ except ImportError:
 
 from .dataset_logger import append_to_dataset
 from .ai_editor import AiEditor, DEFAULT_MODEL_NAME, GeminiEditor, DEFAULT_GEMINI_MODEL
-from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS
+from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS, FileTranscriptionError
 from .utils import (
     build_initial_prompt,
     deduplicate_prompt_terms,
@@ -1185,11 +1185,19 @@ class SVoiceRecApp:
 
             self._last_transcription_time = time.time()
 
-            text = self.transcriber.transcribe_file(
-                file_path,
-                initial_prompt=context,
-                allowed_languages=allowed_languages,
-            )
+            try:
+                text = self.transcriber.transcribe_file(
+                    file_path,
+                    initial_prompt=context,
+                    allowed_languages=allowed_languages,
+                )
+            except FileTranscriptionError as fte:
+                _file_notify_timer.cancel()
+                log_error(f"File transcription error: {fte}")
+                self.notify("Ошибка открытия файла", str(fte))
+                self._submit_for_main_thread(self._do_finish_cleanup)
+                return
+
             _file_notify_timer.cancel()
 
             self._last_transcription_time = time.time()
