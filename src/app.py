@@ -921,7 +921,6 @@ class SVoiceRecApp:
                                 self._ai_edited_text = refined
                                 self._ai_editor_status = _active_editor.last_refine_status
                                 if refined and refined != full_text:
-                                    log_info(f"AiEditor refined: {len(full_text)} → {len(refined)} chars")
                                     is_ai_edited = True
                                     full_text = refined
                     # -------------------------------------------

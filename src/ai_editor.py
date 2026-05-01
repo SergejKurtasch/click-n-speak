@@ -192,6 +192,7 @@ class AiEditor:
 
         self._abort_event.clear()
         t = threading.Thread(target=_run, daemon=True)
+        refine_start = time.time()
         t.start()
         # Give slight padding so the in-loop stream_generate timeout triggers first.
         t.join(timeout=_REFINE_TIMEOUT_SECONDS + 0.5)
@@ -233,15 +234,15 @@ class AiEditor:
             self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
+        elapsed = time.time() - refine_start
         if cleaned != text:
             self.last_refine_status = self.REFINE_STATUS_OK
         else:
             self.last_refine_status = self.REFINE_STATUS_UNCHANGED
+        preview = f"'{cleaned[:80]}...'" if len(cleaned) > 80 else f"'{cleaned}'"
         log_info(
-            f"AiEditor refined chunk "
-            f"({len(text)} → {len(cleaned)} chars): '{cleaned[:80]}...'"
-            if len(cleaned) > 80
-            else f"AiEditor refined chunk ({len(text)} → {len(cleaned)} chars): '{cleaned}'"
+            f"AiEditor [{self.model_name}] refined chunk "
+            f"({len(text)} → {len(cleaned)} chars, {elapsed:.2f}s): {preview}"
         )
         return cleaned
 
@@ -409,16 +410,18 @@ class GeminiEditor:
                 exc.append(e)
 
         t = threading.Thread(target=_run, daemon=True)
+        refine_start = time.time()
         t.start()
         t.join(timeout=_GEMINI_REFINE_TIMEOUT_SECONDS)
+        elapsed = time.time() - refine_start
 
         if t.is_alive():
-            log_error(f"GeminiEditor: request timed out after {_GEMINI_REFINE_TIMEOUT_SECONDS}s.")
+            log_error(f"GeminiEditor [{self.model_name}]: request timed out after {elapsed:.1f}s.")
             self.last_refine_status = self.REFINE_STATUS_TIMEOUT
             return text
 
         if exc:
-            log_error(f"GeminiEditor: error during refinement: {exc[0]}")
+            log_error(f"GeminiEditor [{self.model_name}]: error during refinement: {exc[0]}")
             self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
@@ -427,11 +430,16 @@ class GeminiEditor:
             self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
+        preview = f"'{cleaned[:80]}...'" if len(cleaned) > 80 else f"'{cleaned}'"
         if cleaned == text:
             self.last_refine_status = self.REFINE_STATUS_UNCHANGED
+            log_info(f"GeminiEditor [{self.model_name}] unchanged ({len(text)} chars, {elapsed:.2f}s)")
         else:
             self.last_refine_status = self.REFINE_STATUS_OK
-            log_info(f"GeminiEditor refined: {len(text)} → {len(cleaned)} chars")
+            log_info(
+                f"GeminiEditor [{self.model_name}] refined "
+                f"({len(text)} → {len(cleaned)} chars, {elapsed:.2f}s): {preview}"
+            )
 
         return cleaned
 
