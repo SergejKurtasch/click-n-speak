@@ -324,9 +324,13 @@ class SVoiceRecApp:
                     self._init_ai_editor()
             else:
                 self.ai_editor = None
+                self.gemini_editor = None
                 with self._ai_editor_lock:
                     self._ai_editor_loading = False
                 log_info("AiEditor disabled.")
+        # React to backend switch — load the newly selected editor if not already ready
+        if "ai_editor_backend" in updates and self.config.get("ai_editor_enabled", False):
+            self._init_ai_editor()
 
     def toggle_recording(self):
         """Hotkey callback: toggles recording state with debounce and safety logging."""

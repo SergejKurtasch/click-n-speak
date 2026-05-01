@@ -19,6 +19,7 @@ WHISPER_MODELS = [
 
 _ICON_CACHED = "🟢"  # 🟢  — model is on disk, instant switch
 
+from .ai_editor import get_gemini_api_key, set_gemini_api_key
 from .phrase_history import get_last_phrases
 from .updater import check_for_update
 from .permissions import (
@@ -55,13 +56,23 @@ from .utils import (
 # Language Selection Panel (NSPanel — stays open across multiple clicks)
 # ---------------------------------------------------------------------------
 
-LANGS = ["ru", "en", "de", "es", "fr"]
+LANGS = ["ru", "en", "de", "es", "fr", "it", "pt", "nl", "pl", "ua", "tr", "zh", "ja", "ko", "ar"]
 LANG_LABELS = {
     "ru": "RU — Russian",
     "en": "EN — English",
     "de": "DE — German",
     "es": "ES — Spanish",
     "fr": "FR — French",
+    "it": "IT — Italian",
+    "pt": "PT — Portuguese",
+    "nl": "NL — Dutch",
+    "pl": "PL — Polish",
+    "ua": "UA — Ukrainian",
+    "tr": "TR — Turkish",
+    "zh": "ZH — Chinese",
+    "ja": "JA — Japanese",
+    "ko": "KO — Korean",
+    "ar": "AR — Arabic",
 }
 # LANG_PROMPTS is now defined in utils.py and imported above.
 
@@ -763,6 +774,8 @@ class ClickNSpeakApp(rumps.App):
         self._ai_backend_gemini_item = rumps.MenuItem("Gemini API", callback=self._on_set_ai_backend_gemini)
         self._ai_backend_submenu.add(self._ai_backend_local_item)
         self._ai_backend_submenu.add(self._ai_backend_gemini_item)
+        self._ai_backend_submenu.add(None)
+        self._ai_backend_submenu.add(rumps.MenuItem("Set Gemini API Key…", callback=self._on_set_gemini_api_key))
         self.menu.add(self._ai_backend_submenu)
         self._update_ai_backend_submenu_state()
 
@@ -1362,6 +1375,51 @@ class ClickNSpeakApp(rumps.App):
         self._update_ai_backend_submenu_state()
         log_info("AI Editor backend set to: gemini")
         self.main_app.notify("AI Editor", "Бэкенд: Gemini API. Перезапустите приложение для смены модели.")
+
+    def _on_set_gemini_api_key(self, _) -> None:
+        """Show a dialog to enter and save the Gemini API key to macOS Keychain."""
+        try:
+            from AppKit import NSAlert, NSTextField, NSMakeRect, NSApp, NSPasteboard, NSPasteboardTypeString, NSFloatingWindowLevel  # type: ignore
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Gemini API Key")
+            existing = get_gemini_api_key()
+            hint = "Уже сохранён (оставьте пустым, чтобы не менять)." if existing else "Введите ключ из console.cloud.google.com."
+            alert.setInformativeText_(hint)
+            alert.addButtonWithTitle_("Сохранить")
+            alert.addButtonWithTitle_("Отмена")
+
+            field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
+            field.setPlaceholderString_("AIza…")
+
+            # Auto-fill from clipboard if it looks like a Gemini API key
+            pb = NSPasteboard.generalPasteboard()
+            clipboard = pb.stringForType_(NSPasteboardTypeString) or ""
+            if clipboard.strip().startswith("AIza"):
+                field.setStringValue_(clipboard.strip())
+
+            alert.setAccessoryView_(field)
+            alert.layout()  # forces NSAlert to create its window before we access it
+            alert.window().setInitialFirstResponder_(field)
+
+            # Float above other windows and activate so Cmd+V works after the user
+            # switches to another app to copy the key and returns.
+            alert.window().setLevel_(NSFloatingWindowLevel)
+            NSApp.activateIgnoringOtherApps_(True)
+            alert.window().makeKeyAndOrderFront_(None)
+
+            result = alert.runModal()
+            if result == 1000:  # "Сохранить"
+                key = field.stringValue().strip()
+                if key:
+                    try:
+                        set_gemini_api_key(key)
+                        log_info("Gemini API key saved to Keychain.")
+                        self.main_app.notify("AI Editor", "Ключ сохранён в Keychain. Перезапустите приложение.")
+                    except Exception as save_exc:
+                        log_error(f"Failed to save Gemini API key to Keychain: {save_exc}")
+                        self.main_app.notify("AI Editor: Ошибка", f"Не удалось сохранить ключ: {save_exc}")
+        except Exception as exc:
+            log_error(f"Set Gemini API key dialog failed: {exc}")
 
     def _download_ai_model(self, _) -> None:
         """Open a new Terminal window and run the download script with visible progress."""
