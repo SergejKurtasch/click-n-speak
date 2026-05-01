@@ -1376,10 +1376,13 @@ class ClickNSpeakApp(rumps.App):
         log_info("AI Editor backend set to: gemini")
         self.main_app.notify("AI Editor", "Бэкенд: Gemini API. Перезапустите приложение для смены модели.")
 
+    # Strict format check: "AIzaSy" + 33 base64url chars = 39 chars total
+    _GEMINI_KEY_RE = __import__("re").compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
+
     def _on_set_gemini_api_key(self, _) -> None:
         """Show a dialog to enter and save the Gemini API key to macOS Keychain."""
         try:
-            from AppKit import NSAlert, NSTextField, NSMakeRect, NSApp, NSPasteboard, NSPasteboardTypeString, NSFloatingWindowLevel  # type: ignore
+            from AppKit import NSAlert, NSSecureTextField, NSMakeRect, NSApp, NSPasteboard, NSPasteboardTypeString, NSFloatingWindowLevel  # type: ignore
             alert = NSAlert.alloc().init()
             alert.setMessageText_("Gemini API Key")
             existing = get_gemini_api_key()
@@ -1388,14 +1391,14 @@ class ClickNSpeakApp(rumps.App):
             alert.addButtonWithTitle_("Сохранить")
             alert.addButtonWithTitle_("Отмена")
 
-            field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
-            field.setPlaceholderString_("AIza…")
+            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
+            field.setPlaceholderString_("AIzaSy…")
 
-            # Auto-fill from clipboard if it looks like a Gemini API key
+            # Auto-fill from clipboard only if it matches the exact Gemini key format
             pb = NSPasteboard.generalPasteboard()
-            clipboard = pb.stringForType_(NSPasteboardTypeString) or ""
-            if clipboard.strip().startswith("AIza"):
-                field.setStringValue_(clipboard.strip())
+            candidate = (pb.stringForType_(NSPasteboardTypeString) or "").strip()
+            if self._GEMINI_KEY_RE.match(candidate):
+                field.setStringValue_(candidate)
 
             alert.setAccessoryView_(field)
             alert.layout()  # forces NSAlert to create its window before we access it

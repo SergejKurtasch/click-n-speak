@@ -171,10 +171,12 @@ class SVoiceRecApp:
 
         backend = self.config.get("ai_editor_backend", "local")
         if backend == "gemini":
+            self.ai_editor = None  # release stale local model from GPU RAM
             model_name = self.config.get("gemini_model", DEFAULT_GEMINI_MODEL)
             self.gemini_editor = GeminiEditor(model_name=model_name)
             threading.Thread(target=self._gemini_editor_load_worker, daemon=True).start()
         else:
+            self.gemini_editor = None  # release stale Gemini client
             model_name = self.config.get("ai_editor_model", DEFAULT_MODEL_NAME)
             self.ai_editor = AiEditor(model_name=model_name)
             threading.Thread(target=self._ai_editor_load_worker, daemon=True).start()
@@ -320,7 +322,12 @@ class SVoiceRecApp:
         # React to ai_editor_enabled toggle from the menu
         if "ai_editor_enabled" in updates:
             if updates["ai_editor_enabled"]:
-                if self.ai_editor is None or not self.ai_editor.is_ready():
+                backend = self.config.get("ai_editor_backend", "local")
+                if backend == "gemini":
+                    active = self.gemini_editor
+                else:
+                    active = self.ai_editor
+                if active is None or not active.is_ready():
                     self._init_ai_editor()
             else:
                 self.ai_editor = None

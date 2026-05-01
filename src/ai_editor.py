@@ -384,7 +384,7 @@ def get_gemini_api_key() -> str | None:
     """Return Gemini API key: env var first, then macOS Keychain via security CLI."""
     key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_GENAI_API_KEY")
     if key:
-        return key
+        return key.strip() or None
     try:
         result = subprocess.run(
             [_SECURITY_BIN, "find-generic-password",
