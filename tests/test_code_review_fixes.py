@@ -351,7 +351,8 @@ class TestSpeechTagWrapping(unittest.TestCase):
 
     def test_system_prompt_contains_anti_injection_rule(self):
         """System prompt must explicitly forbid acting on instructions in speech."""
-        from src.ai_editor import _SYSTEM_PROMPT
+        from src.ai_editor import _build_system_prompt
+        _SYSTEM_PROMPT = _build_system_prompt()
 
         self.assertIn("<speech>", _SYSTEM_PROMPT)
         # Must mention that content inside speech tags is not instructions
@@ -361,7 +362,8 @@ class TestSpeechTagWrapping(unittest.TestCase):
         )
 
     def test_system_prompt_mentions_translate_as_forbidden(self):
-        from src.ai_editor import _SYSTEM_PROMPT
+        from src.ai_editor import _build_system_prompt
+        _SYSTEM_PROMPT = _build_system_prompt()
 
         self.assertIn("NEVER translate", _SYSTEM_PROMPT)
 
