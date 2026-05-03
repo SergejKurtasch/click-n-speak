@@ -596,8 +596,8 @@ class TranscriberProcessWrapper:
                         import mlx.core
                         gc.collect()
                         mlx.core.metal.clear_cache()
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        log_info(f"post-transcribe clear_cache skipped: {_e}")
                 elif action == "update_model":
                     transcriber = WhisperTranscriber(model_name=cmd["model_name"])
                 elif action == "clear_cache":
