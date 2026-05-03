@@ -101,6 +101,29 @@ def _collapse_consecutive_word_repetition(text: str) -> str:
     return " ".join(result)
 
 
+def _find_wav_data_chunk(wav_bytes: bytes) -> tuple[int, int]:
+    """Walk the RIFF chunk tree and return (data_start_offset, pcm_byte_count).
+
+    Using a chunk-aware walk instead of bytes.find(b"data") prevents false
+    matches on the bytes 64 61 74 61 inside a fmt extension or LIST payload.
+    chunk_size is clamped to the actual buffer length to handle corrupt fields.
+    """
+    if len(wav_bytes) < 12 or wav_bytes[:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+        raise RuntimeError("Converted WAV is not a valid RIFF/WAVE file.")
+    pos = 12
+    while pos + 8 <= len(wav_bytes):
+        chunk_id = wav_bytes[pos:pos + 4]
+        chunk_size = int.from_bytes(wav_bytes[pos + 4:pos + 8], "little")
+        if chunk_id == b"data":
+            data_start = pos + 8
+            # Clamp against actual buffer to guard against a corrupt size field.
+            actual_size = min(chunk_size, len(wav_bytes) - data_start)
+            return data_start, actual_size
+        # RIFF chunks are word-aligned: odd sizes are padded by one byte.
+        pos += 8 + chunk_size + (chunk_size & 1)
+    raise RuntimeError("No 'data' chunk found in converted WAV.")
+
+
 def _load_audio_for_transcription(file_path: str) -> np.ndarray:
     """Convert audio file to 16kHz mono float32 numpy array.
 
@@ -119,6 +142,7 @@ def _load_audio_for_transcription(file_path: str) -> np.ndarray:
             ["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
              str(src), str(tmp_path)],
             capture_output=True,
+            timeout=300,
         )
         if result.returncode != 0:
             stderr = result.stderr.decode(errors="replace").strip()
@@ -131,11 +155,8 @@ def _load_audio_for_transcription(file_path: str) -> np.ndarray:
     finally:
         tmp_path.unlink(missing_ok=True)
 
-    data_offset = wav_bytes.find(b"data", 12)
-    if data_offset == -1:
-        raise RuntimeError(f"Audio file '{src.name}': no data chunk in converted WAV.")
-    chunk_size = int.from_bytes(wav_bytes[data_offset + 4:data_offset + 8], "little")
-    pcm = wav_bytes[data_offset + 8:data_offset + 8 + chunk_size]
+    data_start, pcm_size = _find_wav_data_chunk(wav_bytes)
+    pcm = wav_bytes[data_start:data_start + pcm_size]
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     if audio.size == 0:
         raise RuntimeError(f"Audio file '{src.name}' produced no audio data.")
@@ -439,7 +460,7 @@ class WhisperTranscriber:
             log_exception(f"Transcription error with model {self.model_name}: {e}")
             return ""
 
-    def transcribe_file(self, file_path: str, initial_prompt=None, allowed_languages=None):
+    def transcribe_file(self, file_path: str, initial_prompt: Optional[str] = None, allowed_languages: Optional[list[str]] = None) -> str:
         """Transcribe a full audio file. Raises on audio loading or model errors."""
         if not file_path:
             return ""
@@ -564,7 +585,7 @@ class TranscriberProcessWrapper:
                             "text": text,
                             "is_final_chunk": True
                         })
-                    except Exception as file_err:
+                    except (FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired) as file_err:
                         log_exception(f"File transcription failed: {file_err}")
                         self.output_queue.put({
                             "type": "file_transcription_error",
