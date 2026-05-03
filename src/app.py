@@ -1207,7 +1207,12 @@ class SVoiceRecApp:
 
                 from pathlib import Path
                 src = Path(file_path)
-                output_file = Path.home() / "Downloads" / f"{src.stem}_transcription.md"
+                base = Path.home() / "Downloads" / f"{src.stem}_transcription"
+                output_file = base.with_suffix(".md")
+                counter = 2
+                while output_file.exists():
+                    output_file = base.parent / f"{base.name}_{counter}.md"
+                    counter += 1
 
                 try:
                     output_file.write_text(
