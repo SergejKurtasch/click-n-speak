@@ -1202,6 +1202,19 @@ class SVoiceRecApp:
 
             self._last_transcription_time = time.time()
 
+            if text and self.config.get("ai_editor_enabled", False):
+                backend = self.config.get("ai_editor_backend", "local")
+                is_gemini = backend == "gemini"
+                active_editor = (
+                    self.gemini_editor
+                    if is_gemini and self.gemini_editor and self.gemini_editor.is_ready()
+                    else self.ai_editor
+                    if not is_gemini and self.ai_editor and self.ai_editor.is_ready()
+                    else None
+                )
+                if active_editor is not None:
+                    text = active_editor.refine_file_text(text, languages=allowed_languages)
+
             if text:
                 log_info(f"File transcription successful, {len(text)} chars.")
 

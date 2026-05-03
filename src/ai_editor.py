@@ -21,6 +21,14 @@ _DEFAULT_TEMP = 0.0        # greedy — deterministic and fastest
 # Successful refinements complete in 0.7-3s; 8s gives ample headroom without
 # the 15s penalty that was previously paid on every slow/large input.
 _REFINE_TIMEOUT_SECONDS = 8.0
+# Qwen 2.5 1.5B context window. Half is reserved for output; system prompt ≈ 400 tokens.
+# Russian ≈ 2.5 chars/token → each chunk can be at most ~40 K chars of input.
+_LOCAL_MODEL_CONTEXT_TOKENS = 32768
+_LOCAL_SYSTEM_PROMPT_TOKENS = 400
+_CHARS_PER_TOKEN = 2.5
+_LOCAL_MAX_FILE_CHUNK_CHARS: int = int(
+    (_LOCAL_MODEL_CONTEXT_TOKENS - _LOCAL_SYSTEM_PROMPT_TOKENS) / 2 * _CHARS_PER_TOKEN
+)
 
 DEFAULT_MODEL_NAME = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 
@@ -69,6 +77,35 @@ def _build_system_prompt(languages: list[str] | None = None) -> str:
         "- DO NOT add or invent new meaning.\n"
         "- Output ONLY the resulting corrected text (without the <speech> tags), no explanations."
     )
+
+
+def _split_text_at_sentences(text: str, max_chars: int) -> list[str]:
+    """Split *text* into chunks ≤ *max_chars*, breaking only at sentence-end punctuation.
+
+    Tries period/exclamation/question mark followed by a space or newline.
+    If no boundary exists within the limit, falls back to a hard cut at max_chars.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        best = -1
+        for sep in (". ", ".\n", "! ", "!\n", "? ", "?\n"):
+            pos = remaining.rfind(sep, 0, max_chars)
+            if pos > best:
+                best = pos
+        if best == -1:
+            best = max_chars - 1
+        else:
+            best += 1  # include the period
+        chunk = remaining[:best].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[best:].lstrip()
+    if remaining.strip():
+        chunks.append(remaining.strip())
+    return chunks
 
 
 class AiEditor:
@@ -266,11 +303,53 @@ class AiEditor:
         )
         return cleaned
 
+    def refine_file_text(self, text: str, languages: list[str] | None = None) -> str:
+        """Refine a full file transcription synchronously.
+
+        Splits into chunks at sentence boundaries if the text exceeds the
+        local model's context window (~40 K chars). No 8 s timeout — runs
+        directly in the file-transcription worker thread which is already
+        a background daemon.
+        """
+        if not self._ready or not text.strip():
+            return text
+
+        if not self._lock.acquire(blocking=True, timeout=10.0):
+            log_error("AiEditor.refine_file_text: could not acquire lock — skipping.")
+            return text
+
+        try:
+            chunks = _split_text_at_sentences(text, _LOCAL_MAX_FILE_CHUNK_CHARS)
+            if len(chunks) > 1:
+                log_info(
+                    f"AiEditor: file text split into {len(chunks)} chunks "
+                    f"({len(text)} chars total, limit {_LOCAL_MAX_FILE_CHUNK_CHARS} chars/chunk)."
+                )
+            refined_parts: list[str] = []
+            for i, chunk in enumerate(chunks):
+                tag = f"chunk {i + 1}/{len(chunks)} " if len(chunks) > 1 else ""
+                log_info(f"AiEditor: refining file {tag}({len(chunk)} chars)...")
+                try:
+                    # Output budget ≈ same token count as input (no 1024 cap for files).
+                    max_out = max(256, int(len(chunk) / _CHARS_PER_TOKEN) + 500)
+                    refined = self._call_llm(chunk, languages=languages, max_output_tokens=max_out)
+                    refined_parts.append(refined)
+                    log_info(f"AiEditor: file {tag}done ({len(chunk)} → {len(refined)} chars).")
+                except Exception as e:
+                    log_error(f"AiEditor: file {tag}failed: {e} — keeping original chunk.")
+                    refined_parts.append(chunk)
+
+            result = "\n\n".join(refined_parts)
+            log_info(f"AiEditor: file refinement complete ({len(text)} → {len(result)} chars).")
+            return result
+        finally:
+            self._lock.release()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _call_llm(self, text: str, languages: list[str] | None = None) -> str:
+    def _call_llm(self, text: str, languages: list[str] | None = None, max_output_tokens: int | None = None) -> str:
         """Run the MLX LLM synchronously and return the cleaned text."""
         import mlx_lm  # type: ignore
 
@@ -295,9 +374,12 @@ class AiEditor:
         except Exception:
             prompt = f"{_SYSTEM_PROMPT}\n\n<speech>\n{text}\n</speech>\n\nCleaned text:"
 
-        # Russian text ≈ 3–4 chars/token; allow ~0.8× input length in tokens,
-        # capped at 1024 so the LLM never runs unbounded on huge inputs.
-        max_allowed_tokens = min(1024, max(64, int(len(text) * 0.8)))
+        # For short chunks (realtime recording): cap at 1024 to stay responsive.
+        # For file mode, caller passes an explicit max_output_tokens.
+        if max_output_tokens is not None:
+            max_allowed_tokens = max_output_tokens
+        else:
+            max_allowed_tokens = min(1024, max(64, int(len(text) * 0.8)))
         output_text = ""
         start_time = time.time()
 
@@ -518,6 +600,59 @@ class GeminiEditor:
                 f"({len(text)} → {len(cleaned)} chars, {elapsed:.2f}s): {preview}"
             )
 
+        return cleaned
+
+    def refine_file_text(self, text: str, languages: list[str] | None = None) -> str:
+        """Refine a full file transcription via Gemini API.
+
+        Gemini Flash has a 1 M-token context window — no chunking needed.
+        Runs synchronously in the file-transcription worker thread with a
+        generous 5-minute timeout for large files.
+        """
+        if not self._ready or not text.strip():
+            return text
+
+        if not self._lock.acquire(blocking=True, timeout=10.0):
+            log_error("GeminiEditor.refine_file_text: could not acquire lock — skipping.")
+            return text
+
+        log_info(f"GeminiEditor [{self.model_name}]: refining file text ({len(text)} chars)...")
+        start = time.time()
+        result: list[str] = []
+        exc: list[Exception] = []
+
+        def _run() -> None:
+            try:
+                result.append(self._call_gemini(text, languages=languages))
+            except Exception as e:
+                exc.append(e)
+            finally:
+                self._lock.release()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=300.0)
+
+        if t.is_alive():
+            log_error(
+                f"GeminiEditor [{self.model_name}]: file refinement timed out after 300s "
+                "— returning original text."
+            )
+            return text
+
+        if exc:
+            log_error(f"GeminiEditor [{self.model_name}]: file refinement error: {exc[0]} — returning original.")
+            return text
+
+        cleaned = result[0].strip() if result else ""
+        if not cleaned:
+            return text
+
+        elapsed = time.time() - start
+        log_info(
+            f"GeminiEditor [{self.model_name}]: file refinement complete "
+            f"({len(text)} → {len(cleaned)} chars, {elapsed:.2f}s)."
+        )
         return cleaned
 
     @staticmethod
