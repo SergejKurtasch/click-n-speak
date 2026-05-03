@@ -17,7 +17,7 @@ except ImportError:
 
 from .dataset_logger import append_to_dataset
 from .ai_editor import AiEditor, DEFAULT_MODEL_NAME, GeminiEditor, DEFAULT_GEMINI_MODEL
-from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS
+from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS, FileTranscriptionError
 from .utils import (
     build_initial_prompt,
     deduplicate_prompt_terms,
@@ -1185,21 +1185,47 @@ class SVoiceRecApp:
 
             self._last_transcription_time = time.time()
 
-            text = self.transcriber.transcribe_file(
-                file_path,
-                initial_prompt=context,
-                allowed_languages=allowed_languages,
-            )
+            try:
+                text = self.transcriber.transcribe_file(
+                    file_path,
+                    initial_prompt=context,
+                    allowed_languages=allowed_languages,
+                )
+            except FileTranscriptionError as fte:
+                _file_notify_timer.cancel()
+                log_error(f"File transcription error: {fte}")
+                self.notify("Ошибка открытия файла", str(fte))
+                self._submit_for_main_thread(self._do_finish_cleanup)
+                return
+
             _file_notify_timer.cancel()
 
             self._last_transcription_time = time.time()
+
+            if text and self.config.get("ai_editor_enabled", False):
+                backend = self.config.get("ai_editor_backend", "local")
+                is_gemini = backend == "gemini"
+                active_editor = (
+                    self.gemini_editor
+                    if is_gemini and self.gemini_editor and self.gemini_editor.is_ready()
+                    else self.ai_editor
+                    if not is_gemini and self.ai_editor and self.ai_editor.is_ready()
+                    else None
+                )
+                if active_editor is not None:
+                    text = active_editor.refine_file_text(text, languages=allowed_languages)
 
             if text:
                 log_info(f"File transcription successful, {len(text)} chars.")
 
                 from pathlib import Path
                 src = Path(file_path)
-                output_file = Path.home() / "Downloads" / f"{src.stem}_transcription.md"
+                base = Path.home() / "Downloads" / f"{src.stem}_transcription"
+                output_file = base.with_suffix(".md")
+                counter = 2
+                while output_file.exists():
+                    output_file = base.parent / f"{base.name}_{counter}.md"
+                    counter += 1
 
                 try:
                     output_file.write_text(

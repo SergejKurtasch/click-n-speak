@@ -1,14 +1,21 @@
 import re
+import subprocess
+import tempfile
 import time
 import multiprocessing as mp
 import queue
 import traceback
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from .process_watchdog import install_parent_death_watchdog
 from .utils import log_error, log_exception, log_info
+
+
+class FileTranscriptionError(Exception):
+    """Raised when audio file loading or transcription fails in the child process."""
 
 # Maximum seconds to wait for transcriber process to respond before killing it.
 # A shorter default keeps the UI responsive; cold starts use TRANSCRIBER_COLD_START_TIMEOUT_SECONDS.
@@ -92,6 +99,68 @@ def _collapse_consecutive_word_repetition(text: str) -> str:
         result.append(w)
         prev = curr
     return " ".join(result)
+
+
+def _find_wav_data_chunk(wav_bytes: bytes) -> tuple[int, int]:
+    """Walk the RIFF chunk tree and return (data_start_offset, pcm_byte_count).
+
+    Using a chunk-aware walk instead of bytes.find(b"data") prevents false
+    matches on the bytes 64 61 74 61 inside a fmt extension or LIST payload.
+    chunk_size is clamped to the actual buffer length to handle corrupt fields.
+    """
+    if len(wav_bytes) < 12 or wav_bytes[:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+        raise RuntimeError("Converted WAV is not a valid RIFF/WAVE file.")
+    pos = 12
+    while pos + 8 <= len(wav_bytes):
+        chunk_id = wav_bytes[pos:pos + 4]
+        chunk_size = int.from_bytes(wav_bytes[pos + 4:pos + 8], "little")
+        if chunk_id == b"data":
+            data_start = pos + 8
+            # Clamp against actual buffer to guard against a corrupt size field.
+            actual_size = min(chunk_size, len(wav_bytes) - data_start)
+            return data_start, actual_size
+        # RIFF chunks are word-aligned: odd sizes are padded by one byte.
+        pos += 8 + chunk_size + (chunk_size & 1)
+    raise RuntimeError("No 'data' chunk found in converted WAV.")
+
+
+def _load_audio_for_transcription(file_path: str) -> np.ndarray:
+    """Convert audio file to 16kHz mono float32 numpy array.
+
+    Uses /usr/bin/afconvert (macOS built-in Core Audio) — no ffmpeg required.
+    Supports m4a, mp3, mp4, aac, wav, aiff, flac and all other Core Audio formats.
+    """
+    src = Path(file_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Audio file not found: {file_path}")
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        result = subprocess.run(
+            ["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
+             str(src), str(tmp_path)],
+            capture_output=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                f"Cannot open '{src.name}': {stderr or 'unsupported format'}"
+            )
+        # Parse the WAV manually to support WAVE_FORMAT_EXTENSIBLE (format tag 65534)
+        # which afconvert emits for mono 16-bit audio but Python's wave module rejects.
+        wav_bytes = tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    data_start, pcm_size = _find_wav_data_chunk(wav_bytes)
+    pcm = wav_bytes[data_start:data_start + pcm_size]
+    audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    if audio.size == 0:
+        raise RuntimeError(f"Audio file '{src.name}' produced no audio data.")
+    return audio
 
 
 def _call_mlx_transcribe(
@@ -391,8 +460,8 @@ class WhisperTranscriber:
             log_exception(f"Transcription error with model {self.model_name}: {e}")
             return ""
 
-    def transcribe_file(self, file_path: str, initial_prompt=None, allowed_languages=None):
-        """Transcribe a full audio file directly."""
+    def transcribe_file(self, file_path: str, initial_prompt: Optional[str] = None, allowed_languages: Optional[list[str]] = None) -> str:
+        """Transcribe a full audio file. Raises on audio loading or model errors."""
         if not file_path:
             return ""
 
@@ -405,24 +474,18 @@ class WhisperTranscriber:
             f"model={self.model_name}, allowed_languages={allowed_languages}"
         )
         start_time = time.time()
-        try:
-            result = _call_mlx_transcribe(
-                file_path,
-                model_name=self.model_name,
-                initial_prompt=initial_prompt,
-                condition_on_previous_text=False,
-                verbose=True,
-                **whisper_kw,
-            )
-            
-            end_time = time.time()
-            log_info(f"File transcription finished in {end_time - start_time:.2f} seconds.")
-
-            text = result.get("text", "").strip()
-            return text.strip(" .…")
-        except Exception as e:
-            log_exception(f"File transcription error with model {self.model_name}: {e}")
-            return ""
+        audio_data = _load_audio_for_transcription(file_path)
+        result = _call_mlx_transcribe(
+            audio_data,
+            model_name=self.model_name,
+            initial_prompt=initial_prompt,
+            condition_on_previous_text=False,
+            verbose=True,
+            **whisper_kw,
+        )
+        log_info(f"File transcription finished in {time.time() - start_time:.2f} seconds.")
+        text = result.get("text", "").strip()
+        return text.strip(" .…")
 
 
 class TranscriberProcessWrapper:
@@ -511,23 +574,30 @@ class TranscriberProcessWrapper:
                     except Exception as _e:
                         log_info(f"post-transcribe clear_cache skipped: {_e}")
                 elif action == "transcribe_file":
-                    text = transcriber.transcribe_file(
-                        cmd.get("file_path"),
-                        initial_prompt=cmd.get("initial_prompt"),
-                        allowed_languages=cmd.get("allowed_languages")
-                    )
-                    self.output_queue.put({
-                        "type": "transcription",
-                        "text": text,
-                        "is_final_chunk": True
-                    })
+                    try:
+                        text = transcriber.transcribe_file(
+                            cmd.get("file_path"),
+                            initial_prompt=cmd.get("initial_prompt"),
+                            allowed_languages=cmd.get("allowed_languages")
+                        )
+                        self.output_queue.put({
+                            "type": "transcription",
+                            "text": text,
+                            "is_final_chunk": True
+                        })
+                    except (FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired) as file_err:
+                        log_exception(f"File transcription failed: {file_err}")
+                        self.output_queue.put({
+                            "type": "file_transcription_error",
+                            "message": str(file_err),
+                        })
                     try:
                         import gc
                         import mlx.core
                         gc.collect()
                         mlx.core.metal.clear_cache()
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        log_info(f"post-transcribe clear_cache skipped: {_e}")
                 elif action == "update_model":
                     transcriber = WhisperTranscriber(model_name=cmd["model_name"])
                 elif action == "clear_cache":
@@ -679,6 +749,8 @@ class TranscriberProcessWrapper:
                 res = self.output_queue.get(timeout=poll_timeout)
                 if res["type"] == "transcription":
                     return res["text"]
+                elif res["type"] == "file_transcription_error":
+                    raise FileTranscriptionError(res["message"])
                 elif res["type"] == "error":
                     log_error(f"Transcriber process error: {res['message']}\n{res.get('trace')}")
                     return ""
