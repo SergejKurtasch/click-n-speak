@@ -17,7 +17,131 @@ WHISPER_MODELS = [
     ("Base",     "mlx-community/whisper-base-mlx"),
 ]
 
+# Approximate download sizes shown in the "model not cached" alert.
+WHISPER_MODEL_SIZES: dict[str, str] = {
+    "mlx-community/whisper-large-v3-turbo": "~795 MB",
+    "mlx-community/whisper-large-v3-mlx":   "~1.5 GB",
+    "mlx-community/whisper-medium-mlx":      "~790 MB",
+    "mlx-community/whisper-small-mlx":       "~244 MB",
+    "mlx-community/whisper-base-mlx":        "~74 MB",
+}
+
 _ICON_CACHED = "🟢"  # 🟢  — model is on disk, instant switch
+_RECOMMENDED_MODEL = "mlx-community/whisper-large-v3-turbo"
+
+
+_MODEL_ROW_W = 220.0   # default row width; the menu column may be wider
+_MODEL_ROW_H = 22.0
+
+_HAVE_MODEL_ROWS = False
+try:
+    from Foundation import NSObject as _NSObjectRow  # type: ignore
+    import objc as _objc_row  # type: ignore
+    from AppKit import (  # type: ignore
+        NSMenu as _NSMenuRow, NSMenuItem as _NSMenuItemRow,
+        NSView as _NSViewRow, NSButton as _NSButtonRow,
+        NSTextField as _NSTextFieldRow, NSImageView as _NSImageViewRow,
+        NSImage as _NSImageRow, NSFont as _NSFontRow,
+        NSButtonTypeMomentaryPushIn as _NSBtnTypePush,
+        NSMakeRect as _NSMakeRectRow,
+    )
+
+    class _ModelRowDelegate(_NSObjectRow):
+        """Per-model ObjC target: routes 'switch' and 'delete' button actions."""
+
+        _ns_menu = None
+        _switch_fn = None
+        _delete_fn = None
+
+        @_objc_row.python_method
+        def configure(self, ns_menu, switch_fn, delete_fn) -> "_ModelRowDelegate":
+            self._ns_menu = ns_menu
+            self._switch_fn = switch_fn
+            self._delete_fn = delete_fn
+            return self
+
+        def switchClicked_(self, sender) -> None:
+            if self._ns_menu is not None:
+                self._ns_menu.cancelTracking()
+            if self._switch_fn:
+                self._switch_fn()
+
+        def deleteClicked_(self, sender) -> None:
+            if self._ns_menu is not None:
+                self._ns_menu.cancelTracking()
+            if self._delete_fn:
+                self._delete_fn()
+
+    def _build_model_row_ns_item(delegate: "_ModelRowDelegate"):
+        """Return (NSMenuItem, icon_view, label_field, trash_btn) with inline layout:
+        [icon_view][label_field  …  ][trash_btn]  all in one row.
+        """
+        w, h = _MODEL_ROW_W, _MODEL_ROW_H
+        trash_w = 20.0
+        switch_w = w - trash_w - 4.0
+
+        container = _NSViewRow.alloc().initWithFrame_(_NSMakeRectRow(0, 0, w, h))
+
+        # Left icon (NSImageView)
+        icon_view = _NSImageViewRow.alloc().initWithFrame_(
+            _NSMakeRectRow(4, (h - 16) / 2, 16, 16)
+        )
+        container.addSubview_(icon_view)
+
+        # Label text
+        label_field = _NSTextFieldRow.labelWithString_("")
+        label_field.setFrame_(_NSMakeRectRow(24, (h - 16) / 2, switch_w - 28, 16))
+        label_field.setFont_(_NSFontRow.menuFontOfSize_(0))
+        container.addSubview_(label_field)
+
+        # Transparent full-row switch button (on top of icon + label)
+        switch_btn = _NSButtonRow.alloc().initWithFrame_(
+            _NSMakeRectRow(0, 0, switch_w, h)
+        )
+        switch_btn.setTitle_("")
+        switch_btn.setBordered_(False)
+        switch_btn.setButtonType_(_NSBtnTypePush)
+        switch_btn.cell().setHighlightsBy_(0)  # no visual flash on click
+        switch_btn.setTarget_(delegate)
+        switch_btn.setAction_("switchClicked:")
+        container.addSubview_(switch_btn)
+
+        # Trash button (right side, initially hidden)
+        trash_btn = _NSButtonRow.alloc().initWithFrame_(
+            _NSMakeRectRow(switch_w + 2, (h - 16) / 2, 16, 16)
+        )
+        trash_img = _NSImageRow.imageWithSystemSymbolName_accessibilityDescription_(
+            "trash", None
+        )
+        if trash_img:
+            trash_btn.setImage_(trash_img)
+        trash_btn.setBordered_(False)
+        trash_btn.setHidden_(True)
+        trash_btn.setTarget_(delegate)
+        trash_btn.setAction_("deleteClicked:")
+        container.addSubview_(trash_btn)
+
+        ns_item = _NSMenuItemRow.alloc().init()
+        ns_item.setView_(container)
+        return ns_item, icon_view, label_field, trash_btn
+
+    _HAVE_MODEL_ROWS = True
+except Exception as _model_row_exc:
+    import logging as _logging_mr
+    _logging_mr.getLogger(__name__).error(
+        "Custom model row views unavailable: %s", _model_row_exc
+    )
+    _ModelRowDelegate = None  # type: ignore
+    _build_model_row_ns_item = None  # type: ignore
+
+# Byte sizes for disk-space preflight check (with 20% safety margin in _preflight_download)
+_MODEL_SIZE_BYTES: dict[str, int] = {
+    "mlx-community/whisper-large-v3-turbo":  795_000_000,
+    "mlx-community/whisper-large-v3-mlx":  1_500_000_000,
+    "mlx-community/whisper-medium-mlx":     790_000_000,
+    "mlx-community/whisper-small-mlx":      244_000_000,
+    "mlx-community/whisper-base-mlx":        74_000_000,
+}
 
 from .ai_editor import get_gemini_api_key, set_gemini_api_key
 from .phrase_history import get_last_phrases
@@ -43,6 +167,7 @@ from .utils import (
     is_accessibility_trusted,
     LANG_PROMPTS,
     log_error,
+    log_exception,
     log_info,
     open_accessibility_settings,
     parse_prompt_terms,
@@ -467,6 +592,15 @@ class ClickNSpeakApp(rumps.App):
             log_error(f"SuggestionsPanel unavailable: {exc}")
             self._suggestions_panel = None
 
+        # Download state — tracks in-progress and errored downloads
+        self._download_state: dict[str, str] = {}   # model_id → "downloading" | "partial" | "error"
+        self._download_progress: dict[str, int] = {}  # model_id → percent 0..100
+        self._partial_bytes: dict[str, int] = {}      # model_id → bytes downloaded before cancel
+        self._cached_models: dict[str, bool] = {}    # model_id → True if in HF cache
+        self._download_panel = None   # ModelDownloadPanel instance (at most one active)
+        self._downloader = None       # ModelDownloader instance (at most one active)
+        self._model_row_refs: dict[str, dict] = {}  # model_id → {ns_item, icon_view, label, trash_btn, delegate}
+
         # Build Menu
         self.setup_menu()
 
@@ -736,14 +870,42 @@ class ClickNSpeakApp(rumps.App):
         # Model selection submenu
         current_model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
         self.menu.add(rumps.MenuItem("Model", **_icon("model")))
-        _dl_icon = get_menu_item_icon_path("download-model")
-        for label, model_id in WHISPER_MODELS:
-            item = rumps.MenuItem(label, callback=self.change_model)
-            if _dl_icon:
-                item.set_icon(str(_dl_icon), dimensions=[16, 16], template=True)
-            if model_id == current_model:
-                item.state = 1
-            self.menu["Model"].add(item)
+
+        if _HAVE_MODEL_ROWS:
+            model_ns_menu = _NSMenuRow.alloc().initWithTitle_("Model")
+            model_ns_menu.setAutoenablesItems_(False)
+            self.menu["Model"]._menuitem.setSubmenu_(model_ns_menu)
+
+            for label, model_id in WHISPER_MODELS:
+                delegate = _ModelRowDelegate.alloc().init().configure(
+                    ns_menu=model_ns_menu,
+                    switch_fn=lambda mid=model_id, lbl=label: self._do_switch_model(mid, lbl),
+                    delete_fn=lambda mid=model_id, lbl=label: self._confirm_and_delete_model(lbl, mid),
+                )
+                ns_item, icon_view, lbl_field, trash_btn = _build_model_row_ns_item(delegate)
+                size = WHISPER_MODEL_SIZES.get(model_id, "?")
+                lbl_field.setStringValue_(f"{label} · {size}")
+                ns_item.setState_(1 if model_id == current_model else 0)
+                model_ns_menu.addItem_(ns_item)
+
+                self._model_row_refs[model_id] = {
+                    "ns_item": ns_item,
+                    "icon_view": icon_view,
+                    "label": lbl_field,
+                    "trash_btn": trash_btn,
+                    "delegate": delegate,
+                }
+        else:
+            # Fallback: plain rumps items (no inline trash button)
+            _dl_icon = get_menu_item_icon_path("download-model")
+            for label, model_id in WHISPER_MODELS:
+                size = WHISPER_MODEL_SIZES.get(model_id, "?")
+                item = rumps.MenuItem(f"{label} · {size}", callback=self.change_model)
+                if _dl_icon:
+                    item.set_icon(str(_dl_icon), dimensions=[16, 16], template=True)
+                if model_id == current_model:
+                    item.state = 1
+                self.menu["Model"].add(item)
 
         # Language selection — native submenu, stays open after clicks via NSMenuItem.setView_()
         lang_item = rumps.MenuItem("Languages", **_icon("languages"))
@@ -864,46 +1026,103 @@ class ClickNSpeakApp(rumps.App):
     # Whisper model cache check
     # ------------------------------------------------------------------
 
+    def _parse_model_title(self, title: str) -> str:
+        """Extract clean label from a menu item title, stripping all state decorations.
+
+        '🟢 Turbo · ~795 MB' → 'Turbo'
+        'Large v3 · ~1.5 GB' → 'Large v3'
+        'Turbo · 45% ↓'      → 'Turbo'
+        'Turbo ⚠ Повтор'     → 'Turbo'
+        """
+        t = title.strip()
+        if t.startswith(_ICON_CACHED):
+            t = t[len(_ICON_CACHED):].strip()
+        t = t.split(" · ", 1)[0]   # cut at first " · " (size, percent, etc.)
+        t = t.split(" ⚠", 1)[0]    # cut error suffix
+        return t.strip()
+
     def _start_model_cache_check(self) -> None:
         """Start a daemon thread that checks HuggingFace cache for all Whisper models."""
         t = threading.Thread(target=self._update_model_cache_indicators, daemon=True)
         t.start()
 
+    def _get_model_bytes_on_disk(self, model_id: str) -> int:
+        """Return bytes present on disk for a model — both complete and partial blobs.
+
+        HF Hub stores incomplete downloads as '<sha256>.incomplete' files alongside
+        finished blobs in the model's blobs/ directory.  Summing all of them gives an
+        accurate picture of how much has been transferred so far.
+        """
+        import pathlib
+        cache_dir = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface/hub")
+        blobs_dir = pathlib.Path(cache_dir) / ("models--" + model_id.replace("/", "--")) / "blobs"
+        if not blobs_dir.exists():
+            return 0
+        try:
+            return sum(f.stat().st_size for f in blobs_dir.iterdir() if f.is_file())
+        except Exception:
+            return 0
+
     def _update_model_cache_indicators(self) -> None:
         """Check each Whisper model against the local HF cache and update menu icons.
+
+        For each model:
+        - fully cached   → green icon, no state entry
+        - partially on disk (≥1 MB)  → "partial" state with % in menu title
+        - nothing on disk → download icon, no state entry
 
         Runs in a background thread; schedules UI updates on the main thread.
         """
         try:
-            from huggingface_hub import snapshot_download  # type: ignore
+            import huggingface_hub  # type: ignore  # noqa: F401
         except ImportError:
             log_error("huggingface_hub not installed — cannot check model cache status.")
             return
 
         for label, model_id in WHISPER_MODELS:
-            try:
-                snapshot_download(repo_id=model_id, local_files_only=True)
-                cached = True
-            except Exception:
-                cached = False
+            cached = self._is_whisper_model_cached(model_id)
+            disk_bytes = 0 if cached else self._get_model_bytes_on_disk(model_id)
 
-            def _apply(lbl: str = label, is_cached: bool = cached) -> None:
+            def _apply(
+                lbl: str = label,
+                mid: str = model_id,
+                is_cached: bool = cached,
+                d_bytes: int = disk_bytes,
+            ) -> None:
                 try:
-                    for item in self.menu["Model"].values():
-                        # Strip 🟢 prefix to find the base label
-                        base = item.title
-                        if base.startswith(_ICON_CACHED):
-                            base = base[len(_ICON_CACHED):].lstrip()
-                        if base == lbl:
-                            if is_cached:
-                                item.title = f"{_ICON_CACHED} {lbl}"
-                                item.set_icon(None)
-                            else:
-                                item.title = lbl
-                                p = get_menu_item_icon_path("download-model")
-                                if p:
-                                    item.set_icon(str(p), dimensions=[16, 16], template=True)
-                            break
+                    # Trust positive results; don't overwrite a known-good True with a
+                    # stale False from a scan that ran just after _on_download_complete.
+                    if not self._cached_models.get(mid):
+                        self._cached_models[mid] = is_cached
+                    # Never overwrite an active in-session download.
+                    if self._download_state.get(mid) == "downloading":
+                        return
+
+                    if not is_cached and d_bytes >= 1_000_000:
+                        # Partial download detected on disk — restore progress display.
+                        # Only initialise if there is no fresher in-session value.
+                        if self._download_state.get(mid) != "partial":
+                            total = _MODEL_SIZE_BYTES.get(mid, 0)
+                            pct = min(99, int(100 * d_bytes / total)) if total else 0
+                            self._partial_bytes[mid] = d_bytes
+                            self._download_progress[mid] = pct
+                            self._download_state[mid] = "partial"
+
+                    if self._model_row_refs:
+                        self._update_model_row_view(mid)
+                    else:
+                        for item in self.menu["Model"].values():
+                            if self._parse_model_title(item.title) == lbl:
+                                new_title = self._render_model_menu_item(mid)
+                                if item.title != new_title:
+                                    item.title = new_title
+                                if is_cached:
+                                    item.set_icon(None)
+                                else:
+                                    p = get_menu_item_icon_path("download-model")
+                                    if p:
+                                        item.set_icon(str(p), dimensions=[16, 16], template=True)
+                                break
                 except Exception as exc:
                     log_error(f"Model cache indicator update failed for '{lbl}': {exc}")
 
@@ -913,25 +1132,486 @@ class ClickNSpeakApp(rumps.App):
             else:
                 _apply()
 
-    def change_model(self, sender):
-        # Strip 🟢 prefix if present (e.g. "🟢 Turbo" → "Turbo")
-        clean_label = sender.title
-        if clean_label.startswith(_ICON_CACHED):
-            clean_label = clean_label[len(_ICON_CACHED):].lstrip()
+    def _render_model_menu_item(self, model_id: str) -> str:
+        """Return the title string for a model menu item based on current state."""
+        label = next((l for l, mid in WHISPER_MODELS if mid == model_id), model_id)
+        size = WHISPER_MODEL_SIZES.get(model_id, "?")
+        state = self._download_state.get(model_id)
+        if state == "downloading":
+            pct = self._download_progress.get(model_id, 0)
+            return f"{label} · {pct}% ↓"
+        if state == "partial":
+            pct = self._download_progress.get(model_id, 0)
+            return f"{label} · {pct}% ↙ продолжить"
+        if state == "error":
+            return f"{label} ⚠ Повтор"
+        if self._cached_models.get(model_id):
+            return f"{_ICON_CACHED} {label} · {size}"
+        return f"{label} · {size}"
 
-        model_id = {lbl: mid for lbl, mid in WHISPER_MODELS}.get(clean_label)
-        if not model_id:
-            log_error(f"change_model: unknown label '{clean_label}'")
+    def _refresh_model_menu_titles(self) -> None:
+        """Update all model rows. Must run on main thread."""
+        if self._model_row_refs:
+            for _, model_id in WHISPER_MODELS:
+                self._update_model_row_view(model_id)
+        else:
+            for label, model_id in WHISPER_MODELS:
+                new_title = self._render_model_menu_item(model_id)
+                for item in self.menu["Model"].values():
+                    if self._parse_model_title(item.title) == label:
+                        if item.title != new_title:
+                            item.title = new_title
+                        break
+
+    def _on_download_progress(self, model_id: str, downloaded: int, total: int | None) -> None:
+        """Called from download thread; posts a throttled menu refresh to main thread.
+
+        downloaded — bytes transferred in the current session (starts at 0 for each new
+        download, even on resume). The caller adds initial_bytes before calling so that
+        this value already reflects the cumulative total across sessions.
+        """
+        total_ref = total or _MODEL_SIZE_BYTES.get(model_id, 0)
+        pct = min(99, int(100 * downloaded / total_ref)) if total_ref else 0
+        if pct == self._download_progress.get(model_id):
+            return  # skip when percent hasn't changed — avoids menu thrash
+        if hasattr(self.main_app, "_main_thread_queue"):
+            def _apply_progress(p: int = pct, d: int = downloaded) -> None:
+                self._download_progress[model_id] = p
+                self._partial_bytes[model_id] = d
+                self._refresh_model_menu_titles()
+            self.main_app._main_thread_queue.put_nowait((_apply_progress, [], {}))
+
+    def _preflight_download(self, model_id: str) -> tuple[bool, str | None]:
+        """Check disk space before starting a download. Returns (ok, error_message)."""
+        import shutil
+        cache_dir = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface/hub")
+        os.makedirs(cache_dir, exist_ok=True)
+        needed = _MODEL_SIZE_BYTES.get(model_id, 0)
+        if needed:
+            try:
+                free = shutil.disk_usage(cache_dir).free
+                if free < needed * 1.2:
+                    free_gb = free / 1e9
+                    need_gb = needed * 1.2 / 1e9
+                    return False, (
+                        f"Недостаточно места на диске.\n\n"
+                        f"Свободно: {free_gb:.1f} ГБ\n"
+                        f"Требуется: {need_gb:.1f} ГБ (с запасом 20%)\n\n"
+                        f"Освободите место и попробуйте снова."
+                    )
+            except Exception:
+                pass  # disk_usage failed — proceed optimistically
+        return True, None
+
+    # ------------------------------------------------------------------
+    # Model row view helpers
+    # ------------------------------------------------------------------
+
+    def _get_model_left_nsimage(
+        self, model_id: str, is_active: bool, is_cached: bool, state: str | None
+    ):
+        """Return the appropriate NSImage for the model row's left icon slot."""
+        try:
+            from AppKit import NSImage, NSImageSymbolConfiguration, NSColor  # type: ignore
+            if is_cached:
+                symbol = "checkmark.circle.fill" if is_active else "circle.fill"
+                img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, None)
+                if img:
+                    cfg = NSImageSymbolConfiguration.configurationWithHierarchicalColor_(
+                        NSColor.systemGreenColor()
+                    )
+                    return img.imageWithSymbolConfiguration_(cfg)
+            p = get_menu_item_icon_path("download-model")
+            if p:
+                from AppKit import NSImage as _NSImage2  # type: ignore
+                img = _NSImage2.alloc().initWithContentsOfFile_(str(p))
+                if img:
+                    img.setTemplate_(True)  # renders white in menu context, like template icons
+                return img
+        except Exception:
+            pass
+        return None
+
+    def _update_model_row_view(self, model_id: str) -> None:
+        """Refresh label, icon, and trash-btn visibility for one custom model row.
+        Must run on the main thread.
+        """
+        refs = self._model_row_refs.get(model_id)
+        if not refs:
+            return
+        label_name = next((l for l, mid in WHISPER_MODELS if mid == model_id), model_id)
+        is_cached = self._cached_models.get(model_id, False)
+        is_active = self.config.get("model_name") == model_id
+        state = self._download_state.get(model_id)
+        pct = self._download_progress.get(model_id, 0)
+
+        if state == "downloading":
+            text = f"{label_name} · {pct}% ↓"
+        elif state == "partial":
+            text = f"{label_name} · {pct}% ↙ продолжить"
+        elif state == "error":
+            text = f"{label_name} ⚠ Повтор"
+        else:
+            text = f"{label_name} · {WHISPER_MODEL_SIZES.get(model_id, '?')}"
+
+        refs["label"].setStringValue_(text)
+        refs["icon_view"].setImage_(
+            self._get_model_left_nsimage(model_id, is_active, is_cached, state)
+        )
+        refs["trash_btn"].setHidden_(not is_cached)
+        refs["ns_item"].setState_(1 if is_active else 0)
+
+    def _do_switch_model(self, model_id: str, label: str) -> None:
+        """Core model-switch logic. Called from row delegate and change_model fallback."""
+        if self._download_state.get(model_id) == "downloading":
+            if self._download_panel:
+                self._download_panel.bring_to_front()
+            return
+
+        if self._download_state.get(model_id) in ("error", "partial"):
+            self._download_state.pop(model_id, None)
+            self._refresh_model_menu_titles()
+
+        if not self._is_whisper_model_cached_fresh(model_id):
+            self._prompt_whisper_model_download(label, model_id)
             return
 
         log_info(f"Switching model to {model_id}")
         self.main_app.update_config({"model_name": model_id})
 
-        # Update UI: uncheck all, then check the selected item
-        for item in self.menu["Model"].values():
-            if hasattr(item, "state"):
-                item.state = 0  # type: ignore
-        sender.state = 1
+        if self._model_row_refs:
+            for mid in self._model_row_refs:
+                self._update_model_row_view(mid)
+        else:
+            # Fallback: update rumps item states
+            for item in self.menu["Model"].values():
+                if hasattr(item, "state"):
+                    item.state = 0
+            for item in self.menu["Model"].values():
+                if self._parse_model_title(getattr(item, "title", "")) == label:
+                    item.state = 1
+                    break
+
+    def change_model(self, sender):
+        """Fallback callback used when custom row views are unavailable."""
+        clean_label = self._parse_model_title(sender.title)
+        model_id = {lbl: mid for lbl, mid in WHISPER_MODELS}.get(clean_label)
+        if not model_id:
+            log_error(f"change_model: unknown label '{clean_label}'")
+            return
+        self._do_switch_model(model_id, clean_label)
+
+    def _is_whisper_model_cached(self, model_id: str) -> bool:
+        """Return True if the model is fully present in the local HuggingFace cache.
+
+        A model is considered cached only when its snapshot directory contains at least
+        one weight file (.npz, .safetensors, .bin, .pt).  A snapshot with only metadata
+        (config.json, README) means the download was interrupted before weights arrived.
+        """
+        try:
+            from huggingface_hub import snapshot_download  # type: ignore
+            import pathlib
+            local_path = snapshot_download(repo_id=model_id, local_files_only=True)
+            _WEIGHT_SUFFIXES = {".npz", ".safetensors", ".bin", ".pt", ".gguf"}
+            return any(
+                f.suffix in _WEIGHT_SUFFIXES
+                for f in pathlib.Path(local_path).iterdir()
+            )
+        except Exception:
+            return False
+
+    def _is_whisper_model_cached_fresh(self, model_id: str) -> bool:
+        """Return True if the model is in the local HF cache.
+
+        Always reads from the in-memory _cached_models dict — O(1), no disk I/O.
+        If the background scan hasn't reached this model yet, returns False
+        (treated as uncached), which will show the download prompt.  The background
+        scan updates _cached_models when it finishes; re-opening the submenu then
+        shows the correct state.  We never fall back to a synchronous disk check here
+        because this method is called on the main thread from an ObjC action, and a
+        blocking snapshot_download() call would freeze AppKit's event loop.
+        """
+        return self._cached_models.get(model_id, False)
+
+    def _prompt_whisper_model_download(self, label: str, model_id: str) -> None:
+        """Show an NSAlert offering to download a Whisper model that isn't cached."""
+        try:
+            from AppKit import NSAlert, NSInformationalAlertStyle  # type: ignore
+        except ImportError:
+            self.main_app.notify(
+                f"Модель {label} не загружена",
+                f"Запустите: python scripts/download_whisper_model.py --model {model_id}",
+            )
+            return
+
+        import shutil as _shutil
+        size_str = WHISPER_MODEL_SIZES.get(model_id, "?")
+        total_bytes = _MODEL_SIZE_BYTES.get(model_id, 0)
+        partial_bytes = self._partial_bytes.get(model_id, 0)
+        is_partial = partial_bytes >= 1_000_000
+
+        cache_dir = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface/hub")
+        try:
+            free_gb = _shutil.disk_usage(cache_dir).free / 1e9
+            disk_info = f"Свободно: {free_gb:.0f} ГБ"
+        except Exception:
+            disk_info = ""
+
+        if is_partial and total_bytes:
+            done_pct = min(99, int(100 * partial_bytes / total_bytes))
+            remaining_mb = max(0, (total_bytes - partial_bytes)) / (1024 * 1024)
+            informative = f"Уже скачано: {done_pct}% · Осталось: ~{remaining_mb:.0f} МБ"
+        else:
+            informative = f"Размер: {size_str}"
+        if disk_info:
+            informative += f" · {disk_info}"
+        informative += (
+            "\n\nЗагрузка идёт в фоне прямо в приложении."
+            "\nМожно отменить и продолжить позже — скачанные части не потеряются."
+        )
+
+        alert = NSAlert.alloc().init()
+        alert.setAlertStyle_(NSInformationalAlertStyle)
+        if is_partial:
+            alert.setMessageText_(f"Продолжить загрузку «{label}»?")
+        else:
+            alert.setMessageText_(f"Модель «{label}» не загружена")
+        alert.setInformativeText_(informative)
+        alert.addButtonWithTitle_("Продолжить" if is_partial else "Загрузить")
+        alert.addButtonWithTitle_("Отмена")
+
+        response = alert.runModal()
+        # First button (Загрузить) = 1000
+        if response != 1000:
+            return
+
+        ok, err_msg = self._preflight_download(model_id)
+        if not ok:
+            from AppKit import NSCriticalAlertStyle  # type: ignore
+            err_alert = NSAlert.alloc().init()
+            err_alert.setAlertStyle_(NSCriticalAlertStyle)
+            err_alert.setMessageText_("Невозможно начать загрузку")
+            err_alert.setInformativeText_(err_msg or "")
+            err_alert.addButtonWithTitle_("OK")
+            err_alert.runModal()
+            return
+
+        log_info(f"_prompt_whisper_model_download: preflight OK, queuing _start for {model_id}")
+        # Queue panel creation on the main-thread drain cycle — avoids showing a new
+        # NSPanel while still inside the menu callback (AppKit event-handling context).
+        if hasattr(self.main_app, "_main_thread_queue"):
+            self.main_app._main_thread_queue.put_nowait(
+                (self._start_whisper_model_download, [label, model_id], {})
+            )
+        else:
+            self._start_whisper_model_download(label, model_id)
+
+    def _start_whisper_model_download(self, label: str, model_id: str) -> None:
+        """Start an in-app download using ModelDownloader + ModelDownloadPanel.
+
+        On completion calls _on_download_complete() directly — no polling, no restart needed.
+        Only one download runs at a time.
+        """
+        log_info(f"_start_whisper_model_download: entry for {model_id}")
+        from .model_downloader import ModelDownloader
+        from .model_download_panel import ModelDownloadPanel
+
+        # Iterate over the constant WHISPER_MODELS list, not the mutable _download_state dict,
+        # to avoid RuntimeError if the download thread mutates _download_state concurrently.
+        if any(self._download_state.get(mid) == "downloading" for _, mid in WHISPER_MODELS):
+            self.main_app.notify(
+                "Загрузка уже идёт",
+                "Дождитесь завершения текущей загрузки и попробуйте снова.",
+            )
+            return
+
+        self._download_state[model_id] = "downloading"
+        self._refresh_model_menu_titles()
+
+        total_size = _MODEL_SIZE_BYTES.get(model_id, 0)
+        # Bytes already downloaded in a previous session (saved when user cancelled).
+        # Added to the session counter so progress display is cumulative across resumes.
+        initial_bytes = self._partial_bytes.get(model_id, 0)
+        log_info(
+            f"_start_whisper_model_download: total={total_size}, initial_bytes={initial_bytes}"
+        )
+        panel = ModelDownloadPanel()
+        self._download_panel = panel
+        downloader = ModelDownloader()
+        self._downloader = downloader
+
+        q = self.main_app._main_thread_queue
+        _last_panel_put: list[float] = [0.0]
+
+        def on_progress(session_bytes: int, total: int | None) -> None:
+            cumulative = initial_bytes + session_bytes
+            self._on_download_progress(model_id, cumulative, total)
+            import time as _time
+            now = _time.monotonic()
+            if now - _last_panel_put[0] >= 0.2:
+                _last_panel_put[0] = now
+                q.put_nowait((panel.update_progress, [cumulative, total or total_size], {}))
+
+        def on_done() -> None:
+            log_info(f"Download complete: {model_id}")
+            self._partial_bytes.pop(model_id, None)
+            q.put_nowait((panel.finish, [], {"success": True}))
+            q.put_nowait((self._on_download_complete, [model_id, label], {}))
+
+        def on_error(err: str) -> None:
+            log_error(f"Download error {model_id}: {err}")
+            # Mutations of _download_state/_download_progress go through the main-thread
+            # queue so they never race with _start_whisper_model_download's guard check.
+            def _apply_error() -> None:
+                self._download_state[model_id] = "error"
+                self._download_progress.pop(model_id, None)
+                self._refresh_model_menu_titles()
+                panel.finish(success=False, error=err)
+                try:
+                    from AppKit import NSAlert, NSCriticalAlertStyle  # type: ignore
+                    alert = NSAlert.alloc().init()
+                    alert.setAlertStyle_(NSCriticalAlertStyle)
+                    alert.setMessageText_(f"Ошибка загрузки «{label}»")
+                    alert.setInformativeText_(err[:300])
+                    alert.addButtonWithTitle_("OK")
+                    alert.runModal()
+                except Exception:
+                    self.main_app.notify(f"Ошибка загрузки «{label}»", err[:120])
+            q.put_nowait((_apply_error, [], {}))
+
+        def on_cancelled() -> None:
+            log_info(f"Download cancelled: {model_id}")
+            def _apply_cancel() -> None:
+                # Keep _download_progress so the menu shows the partial percentage.
+                self._download_state[model_id] = "partial"
+                self._refresh_model_menu_titles()
+                panel.close()
+            q.put_nowait((_apply_cancel, [], {}))
+
+        panel.show(label, model_id, total_size, cancel_callback=downloader.cancel)
+        # If resuming a partial download, initialise the panel at the saved progress position.
+        if initial_bytes > 0 and total_size > 0:
+            panel.update_progress(initial_bytes, total_size)
+        log_info(f"_start_whisper_model_download: panel shown, starting downloader")
+        downloader.start(model_id, total_size, on_progress, on_done, on_error, on_cancelled)
+        log_info(f"Whisper model download started internally: {model_id}")
+
+    def _on_download_complete(self, model_id: str, label: str) -> None:
+        """Called on the main thread after a Whisper model download finishes successfully."""
+        log_info(f"Whisper model download complete, activating: {model_id}")
+
+        self._download_state.pop(model_id, None)
+        self._download_progress.pop(model_id, None)
+        self._cached_models[model_id] = True
+
+        # Switch active model — no restart needed
+        self.main_app.update_config({"model_name": model_id})
+
+        # Refresh all rows (icon, trash btn, checkmark)
+        self._refresh_model_menu_titles()
+
+        # Trigger full cache rescan to update any other models' icons
+        self._start_model_cache_check()
+
+        if not self._model_row_refs:
+            # Fallback: update rumps item checkmarks
+            for item in self.menu["Model"].values():
+                if hasattr(item, "state"):
+                    item.state = 0
+                if self._parse_model_title(getattr(item, "title", "")) == label:
+                    item.state = 1
+
+        self.main_app.notify(
+            f"Модель «{label}» готова",
+            "Модель активирована — можно начинать диктовку.",
+        )
+
+    def _confirm_and_delete_model(self, label: str, model_id: str) -> None:
+        """Show a confirmation alert, then delete the model from the HF disk cache."""
+        try:
+            from AppKit import NSAlert, NSWarningAlertStyle  # type: ignore
+            alert = NSAlert.alloc().init()
+            alert.setAlertStyle_(NSWarningAlertStyle)
+            alert.setMessageText_(f"Удалить модель «{label}»?")
+            alert.setInformativeText_(
+                f"Модель будет полностью удалена с диска "
+                f"(освободится ~{WHISPER_MODEL_SIZES.get(model_id, '?')}).\n"
+                "Для использования потребуется повторная загрузка."
+            )
+            alert.addButtonWithTitle_("Удалить")
+            alert.addButtonWithTitle_("Отмена")
+            if alert.runModal() != 1000:
+                return
+        except ImportError:
+            pass
+
+        import pathlib
+        import shutil
+
+        cache_dir = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface/hub")
+        model_dir = pathlib.Path(cache_dir) / ("models--" + model_id.replace("/", "--"))
+
+        try:
+            if model_dir.exists():
+                shutil.rmtree(model_dir)
+            log_info(f"Deleted model cache: {model_dir}")
+        except OSError as exc:
+            log_error(f"Failed to delete model {model_id}: {exc}")
+            try:
+                from AppKit import NSAlert, NSCriticalAlertStyle  # type: ignore
+                err = NSAlert.alloc().init()
+                err.setAlertStyle_(NSCriticalAlertStyle)
+                err.setMessageText_(f"Ошибка удаления «{label}»")
+                err.setInformativeText_(str(exc)[:300])
+                err.addButtonWithTitle_("OK")
+                err.runModal()
+            except ImportError:
+                pass
+            return
+
+        # Update in-memory state
+        self._cached_models[model_id] = False
+        self._download_state.pop(model_id, None)
+        self._download_progress.pop(model_id, None)
+        self._partial_bytes.pop(model_id, None)
+
+        # Refresh row view (hides trash btn, restores download icon)
+        self._refresh_model_menu_titles()
+        # Also trigger full rescan so other models' icons are consistent
+        self._start_model_cache_check()
+
+        # If the active model was deleted, fall back to the best available cached model.
+        # _RECOMMENDED_MODEL is preferred but must itself be cached; if it isn't, pick
+        # any other cached model in WHISPER_MODELS order.
+        current = self.config.get("model_name", "")
+        if current == model_id:
+            fallback_id = next(
+                (
+                    mid for mid in
+                    [_RECOMMENDED_MODEL, *(m for _, m in WHISPER_MODELS)]
+                    if mid != model_id and self._cached_models.get(mid)
+                ),
+                None,
+            )
+            if fallback_id:
+                self.main_app.update_config({"model_name": fallback_id})
+                # Refresh again so the new active model gets its checkmark
+                self._refresh_model_menu_titles()
+                fallback_label = next((l for l, mid in WHISPER_MODELS if mid == fallback_id), "")
+                self.main_app.notify(
+                    f"Модель «{label}» удалена",
+                    f"Активирована модель «{fallback_label}».",
+                )
+            else:
+                self.main_app.notify(
+                    f"Модель «{label}» удалена",
+                    "Нет загруженных моделей — выберите модель для скачивания.",
+                )
+        else:
+            self.main_app.notify(
+                f"Модель «{label}» удалена",
+                f"Освобождено ~{WHISPER_MODEL_SIZES.get(model_id, '?')}.",
+            )
 
     def _apply_primary_language(self, lang: str) -> None:
         """Apply a primary language change (called from the language panel)."""

@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 import tempfile
@@ -184,6 +185,8 @@ def _call_mlx_transcribe(
         "task": "transcribe",
         "verbose": verbose,
     }
+    # HF_HUB_OFFLINE=1 is set globally at child-process startup in _run_loop(), so
+    # mlx_whisper never makes network calls here.  No per-call save/restore needed.
     # Use threshold kwargs only when the installed mlx_whisper version supports them.
     # Probed once via inspect so we never duplicate the expensive transcribe() call.
     if extra_kwargs and _supports_strict_thresholds():
@@ -509,6 +512,11 @@ class TranscriberProcessWrapper:
         # this watchdog each crashed session leaves behind a 2-4 GB orphan holding
         # the MLX model in memory.
         import os as _os
+        # Set before any huggingface_hub import so the library caches offline=True.
+        # The transcriber child process never downloads models — that is the parent's
+        # job via ModelDownloader.  Without this, mlx_whisper silently tries to fetch
+        # missing weights from HuggingFace and hangs for 30s before timing out.
+        _os.environ["HF_HUB_OFFLINE"] = "1"
         log_info(
             f"Transcriber child process started: pid={_os.getpid()} "
             f"ppid={_os.getppid()} pgid={_os.getpgrp()} model={self.model_name}"
