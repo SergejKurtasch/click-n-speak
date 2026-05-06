@@ -142,6 +142,7 @@ class SVoiceRecApp:
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
         self._previous_app_pid = None
+        self._append_to_popup: bool = False  # True when hotkey fired while popup was open
         self._raw_whisper_text = ""
         self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
         self._ai_edited_text = None
@@ -373,7 +374,13 @@ class SVoiceRecApp:
 
             if not self.is_recording:
                 # Set immediately to prevent rapid double-triggers
-                self.is_recording = True 
+                self.is_recording = True
+                self._append_to_popup = (
+                    self._preview_panel is not None
+                    and self._preview_panel._is_interactive
+                )
+                if self._append_to_popup:
+                    log_info("Popup is open — new recording will append to existing text.")
                 threading.Thread(target=self.start_recording, daemon=True).start()
             else:
                 # Set immediately to lock out further triggers
@@ -707,14 +714,17 @@ class SVoiceRecApp:
         self.transcriber.pre_warm()
         log_info("Pre-warm request sent to transcriber process.")
 
-        # Remember active app safely on main thread
-        self._previous_app_pid = None
-        if NSWorkspace is not None:
-            def _capture_app():
-                app = NSWorkspace.sharedWorkspace().frontmostApplication()
-                if app:
-                    self._previous_app_pid = app.processIdentifier()
-            self._submit_for_main_thread(_capture_app)
+        # Remember active app safely on main thread.
+        # In append mode the popup is already open and _previous_app_pid is still correct
+        # (the user's app, not ours), so we must not overwrite it.
+        if not self._append_to_popup:
+            self._previous_app_pid = None
+            if NSWorkspace is not None:
+                def _capture_app():
+                    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+                    if app:
+                        self._previous_app_pid = app.processIdentifier()
+                self._submit_for_main_thread(_capture_app)
 
         # Clear the queue just in case
         cleared = 0
@@ -734,7 +744,8 @@ class SVoiceRecApp:
 
         s = get_ui_strings(get_primary_language(self.config))
         self._ensure_preview_panel()
-        self._preview_panel.show(s["recording_title"], self._main_thread_queue)
+        if not self._append_to_popup:
+            self._preview_panel.show(s["recording_title"], self._main_thread_queue)
 
         try:
             self.recorder.start(chunk_callback=self.on_chunk_received)
@@ -957,15 +968,22 @@ class SVoiceRecApp:
                         f"session_id={session_id}"
                     )
                     if full_text and self._preview_panel:
-                        self._preview_panel.show_interactive(
-                            full_text,
-                            self._main_thread_queue,
-                            on_confirm=_on_confirm,
-                            on_cancel=_on_cancel,
-                            title=s_ui["edit_confirm_title"],
-                        )
-                        log_info("process_chunk: show_interactive queued on main thread")
+                        if self._append_to_popup and self._preview_panel._is_interactive:
+                            self._preview_panel.append_text(full_text, self._main_thread_queue)
+                            self._append_to_popup = False
+                            log_info(f"process_chunk: appended to existing popup, len={len(full_text)}")
+                        else:
+                            self._append_to_popup = False
+                            self._preview_panel.show_interactive(
+                                full_text,
+                                self._main_thread_queue,
+                                on_confirm=_on_confirm,
+                                on_cancel=_on_cancel,
+                                title=s_ui["edit_confirm_title"],
+                            )
+                            log_info("process_chunk: show_interactive queued on main thread")
                     elif self._preview_panel:
+                        self._append_to_popup = False
                         self._preview_panel.hide(self._main_thread_queue, delay=0.8)
                 else:
                     accumulated = _join_chunks(self.transcribed_parts)
@@ -982,20 +1000,28 @@ class SVoiceRecApp:
                     full_text = _join_chunks(self.transcribed_parts)
                     if full_text and self._preview_panel:
                         self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
-                        _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
                         s_ui = get_ui_strings(get_primary_language(self.config))
-                        log_info(
-                            f"process_chunk: final chunk empty but {len(self.transcribed_parts)} "
-                            f"buffered partial(s) available, showing popup. full_text_len={len(full_text)}"
-                        )
-                        self._preview_panel.show_interactive(
-                            full_text,
-                            self._main_thread_queue,
-                            on_confirm=_on_confirm,
-                            on_cancel=_on_cancel,
-                            title=s_ui["edit_confirm_title"],
-                        )
-                        log_info("process_chunk: show_interactive queued (final chunk empty, using buffered partials)")
+                        if self._append_to_popup and self._preview_panel._is_interactive:
+                            self._preview_panel.append_text(full_text, self._main_thread_queue)
+                            self._append_to_popup = False
+                            log_info(
+                                f"process_chunk: appended buffered partials to popup, len={len(full_text)}"
+                            )
+                        else:
+                            _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                            self._append_to_popup = False
+                            log_info(
+                                f"process_chunk: final chunk empty but {len(self.transcribed_parts)} "
+                                f"buffered partial(s) available, showing popup. full_text_len={len(full_text)}"
+                            )
+                            self._preview_panel.show_interactive(
+                                full_text,
+                                self._main_thread_queue,
+                                on_confirm=_on_confirm,
+                                on_cancel=_on_cancel,
+                                title=s_ui["edit_confirm_title"],
+                            )
+                            log_info("process_chunk: show_interactive queued (final chunk empty, using buffered partials)")
         except Exception as e:
             log_exception(f"Unhandled exception in process_chunk: {e}")
 
@@ -1118,20 +1144,28 @@ class SVoiceRecApp:
                 self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
                 full_text = _join_chunks(self.transcribed_parts)
                 if full_text:
-                    log_info(
-                        f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
-                        f"buffered partial chunk(s). full_text_len={len(full_text)}"
-                    )
-                    _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
                     s_ui = get_ui_strings(get_primary_language(self.config))
-                    self._preview_panel.show_interactive(
-                        full_text,
-                        self._main_thread_queue,
-                        on_confirm=_on_confirm,
-                        on_cancel=_on_cancel,
-                        title=s_ui["edit_confirm_title"],
-                    )
-                    log_info("Buffered finalization: show_interactive queued on main thread")
+                    if self._append_to_popup and self._preview_panel._is_interactive:
+                        self._preview_panel.append_text(full_text, self._main_thread_queue)
+                        self._append_to_popup = False
+                        log_info(
+                            f"Buffered finalization: appended to existing popup, len={len(full_text)}"
+                        )
+                    else:
+                        log_info(
+                            f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
+                            f"buffered partial chunk(s). full_text_len={len(full_text)}"
+                        )
+                        _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                        self._append_to_popup = False
+                        self._preview_panel.show_interactive(
+                            full_text,
+                            self._main_thread_queue,
+                            on_confirm=_on_confirm,
+                            on_cancel=_on_cancel,
+                            title=s_ui["edit_confirm_title"],
+                        )
+                        log_info("Buffered finalization: show_interactive queued on main thread")
                     # Cleanup submitted here, AFTER show_interactive, so is_processing
                     # stays True until the popup is actually visible.
                     self._submit_for_main_thread(self._do_finish_cleanup)

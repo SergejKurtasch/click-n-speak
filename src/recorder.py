@@ -238,7 +238,7 @@ class AudioRecorder:
         log_info("Stopping recording...")
         self.recording = False
         if self.stream:
-            self._stop_stream_with_timeout(timeout=3.0)
+            self._stop_stream_with_timeout()
             # self.stream is already set to None inside _stop_stream_with_timeout
 
         play_sound(SOUND_RECORDING_STOP)
@@ -261,36 +261,33 @@ class AudioRecorder:
 
         return result
 
-    def _stop_stream_with_timeout(self, timeout: float = 3.0) -> None:
-        """Stop and close the audio stream with a timeout to prevent hangs.
+    def _stop_stream_with_timeout(self) -> None:
+        """Stop and close the audio stream without blocking the caller.
 
-        Captures the stream reference immediately and sets self.stream = None
-        so that a subsequent start() call does not see a dangling stream.
-        The actual abort/close runs in a daemon thread; self._close_thread
-        tracks it so start() can wait for it before creating a new stream.
+        abort() is called synchronously — Pa_AbortStream is fast and merely
+        signals PortAudio to stop; it never hangs.  close() (Pa_CloseStream)
+        can hang indefinitely on macOS when Core Audio delivers synchronous
+        notifications to registered listeners, so it runs in a daemon thread.
+
+        self._close_thread tracks the thread so that start() can wait for it
+        (up to 5 s) before opening a new stream and avoid a PortAudio deadlock.
         """
         old_stream = self.stream
         self.stream = None  # Release reference immediately; start() won't see it
 
-        def _do_stop():
+        # abort() stops callbacks and flushes buffers — always fast.
+        try:
+            old_stream.abort()
+        except Exception:
+            pass
+
+        def _do_close():
             try:
-                # Use abort() instead of stop() to prevent macOS PortAudio deadlock
-                # where waiting for pending buffers hangs indefinitely.
-                old_stream.abort()
                 old_stream.close()
+                log_info("Recorder.stop() stream closed successfully.")
             except Exception as e:
                 log_error(f"Error closing audio stream: {e}")
 
-        t = threading.Thread(target=_do_stop, daemon=True)
+        t = threading.Thread(target=_do_close, daemon=True)
         self._close_thread = t
         t.start()
-        t.join(timeout=timeout)
-        if t.is_alive():
-            log_error(
-                f"Audio stream stop/close did not complete within {timeout}s. "
-                "Thread still running in background (possible device issue)."
-            )
-            # _close_thread remains set so start() can detect this situation.
-        else:
-            self._close_thread = None
-            log_info("Recorder.stop() stream closed successfully.")

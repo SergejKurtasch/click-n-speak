@@ -415,6 +415,18 @@ class TranscriptionPreviewPanel:
 
         queue.put((_do_show_interactive, (), {}))
 
+    def append_text(self, text, queue):
+        """Appends text to the interactive text_view (append-mode recording)."""
+        def _do_append():
+            if not self.panel or not self._is_interactive or not self.text_view:
+                return
+            current = str(self.text_view.string()).strip()
+            new_text = (current + " " + text).strip() if current else text
+            self._set_text_view_text(new_text)
+            end = len(new_text)
+            self.text_view.setSelectedRange_((end, 0))
+        queue.put((_do_append, (), {}))
+
     def update_status(self, title, queue):
         def _do_update_status():
             if not self.panel:
