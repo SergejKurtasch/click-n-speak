@@ -1,9 +1,15 @@
 import re
 from collections import Counter, defaultdict, deque
 from datetime import datetime
-from typing import Iterable
+from typing import Callable, Iterable
 
-from .utils import get_phrases_file_path, log_error, log_info
+from .utils import (
+    existing_terms_union_for_script,
+    get_phrases_file_path,
+    log_error,
+    log_info,
+    skipped_phrases_merge_for_script,
+)
 
 
 # Must start with a letter; allows letters, digits, +, #, ., _, - afterwards.
@@ -110,6 +116,11 @@ _TERM_STOPLIST: frozenset[str] = frozenset({
     "say", "she", "too", "use",
 })
 
+# Public aliases for reuse in other analyzers.
+TERM_PATTERN = _TERM_PATTERN
+TERM_STOPLIST = _TERM_STOPLIST
+RUS_FUNCTION_WORDS = _RUS_FUNCTION_WORDS
+
 
 def _levenshtein(a: str, b: str) -> int:
     """Return edit distance between two strings; returns 3 early when gap > 2."""
@@ -167,8 +178,9 @@ def _collect_english_terms(
     records: list[tuple[datetime, str]],
     session_ids: list[int],
     blacklist: frozenset[str] = frozenset(),
+    term_has_correction_signal: Callable[[str], bool] | None = None,
 ) -> list[tuple[str, int]]:
-    """Extract English terms appearing in >= 2 distinct sessions.
+    """Extract Latin-script tokens appearing in >= 2 distinct sessions (unless bypassed).
 
     Groups case variants (GitHub/github) and keeps the most-frequent spelling.
     Applies _TERM_STOPLIST, path/URL fragment filter (> 1 dot or slash), and blacklist.
@@ -198,7 +210,8 @@ def _collect_english_terms(
 
     candidates: list[tuple[str, int]] = []
     for lower, variants in lower_to_variants.items():
-        if len(term_sessions[lower]) < 2:
+        has_correction = bool(term_has_correction_signal and term_has_correction_signal(lower))
+        if not has_correction and len(term_sessions[lower]) < 2:
             continue
         best = max(variants, key=lambda v: variant_counts[v])
         total = sum(variant_counts[v] for v in variants)
@@ -278,21 +291,31 @@ def _collect_raw_english_counts(
 
 
 def get_prompt_candidates(
-    lookback: int = 100,
-    min_count: int = 5,
+    lookback: int = 300,
+    min_count: dict[str, int] | int | None = None,
     existing_lower_by_lang: dict[str, set[str]] | None = None,
     skipped_lower_by_lang: dict[str, dict[str, int]] | None = None,
     current_phrase_count: int = 0,
-    cooldown_phrases: int = 100,
-    max_per_lang: int = 20,
+    cooldown_phrases: int = 150,
+    max_per_lang: int = 15,
+    term_has_correction_signal: Callable[[str], bool] | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     """Analyze phrase history and return vocabulary candidates for user_terms.
 
-    English tokens → "en" bucket; Russian bigrams → "ru" bucket.
-    Excludes terms in existing_lower_by_lang and those within cooldown window.
-    Returns {"en": [{"term": "PCA", "count": 12}, ...], "ru": [...]},
-    each list sorted by count descending and capped at max_per_lang.
+    Latin-script tokens → "latin" bucket; Cyrillic bigrams → "cyrillic" bucket.
+    existing_lower_by_lang / skipped_lower_by_lang use ISO language codes (ru, en, de, …);
+    terms are filtered per script via union across matching languages.
+    Returns {"latin": [...], "cyrillic": [...]}, sorted by count descending.
     """
+    if min_count is None:
+        min_count_dict = {"latin": 5, "cyrillic": 8}
+    elif isinstance(min_count, int):
+        min_count_dict = {"latin": min_count, "cyrillic": min_count}
+    else:
+        min_count_dict = dict(min_count)
+    latin_min = int(min_count_dict.get("latin", 5))
+    cyrillic_min = int(min_count_dict.get("cyrillic", 8))
+
     history_path = get_phrases_file_path()
     if not history_path.exists():
         return {}
@@ -312,52 +335,57 @@ def get_prompt_candidates(
     skipped = skipped_lower_by_lang or {}
     texts = [text for _, text in records]
 
-    # English candidates — session-based filter (≥2 distinct sessions) to
-    # suppress hallucinations that Whisper repeats within one session burst.
+    # Latin-script tokens — session-based filter (≥2 distinct sessions) unless bypassed.
     session_ids = _assign_session_ids(records)
-    en_raw = _collect_english_terms(records, session_ids)
-    en_raw = _filter_near_duplicates(en_raw)
-    existing_en = existing.get("en", set())
-    skipped_en = skipped.get("en", {})
+    latin_raw = _collect_english_terms(
+        records,
+        session_ids,
+        term_has_correction_signal=term_has_correction_signal,
+    )
+    latin_raw = _filter_near_duplicates(latin_raw)
+    existing_latin = existing_terms_union_for_script(existing, "latin")
+    skipped_latin = skipped_phrases_merge_for_script(skipped, "latin")
 
-    en_candidates: list[dict] = []
-    for term, count in en_raw:
-        if count < min_count:
+    latin_candidates: list[dict] = []
+    for term, count in latin_raw:
+        if count < latin_min:
             continue  # sorted by score not count, so low-count items can appear anywhere
         lower = term.lower()
-        if lower in existing_en:
+        if lower in existing_latin:
             continue
-        skipped_at = skipped_en.get(lower, -1)
+        skipped_at = skipped_latin.get(lower, -1)
         if 0 <= skipped_at and current_phrase_count - skipped_at < cooldown_phrases:
             continue
-        en_candidates.append({"term": term, "count": count})
-        if len(en_candidates) >= max_per_lang:
+        latin_candidates.append({"term": term, "count": count})
+        if len(latin_candidates) >= max_per_lang:
             break
 
-    # Russian bigrams — sort by token-weighted score, not raw count
-    ru_counts = _collect_russian_bigrams(texts)
-    existing_ru = existing.get("ru", set())
-    skipped_ru = skipped.get("ru", {})
+    # Cyrillic bigrams — sort by token-weighted score, not raw count
+    cyrillic_counts = _collect_russian_bigrams(texts)
+    existing_cyrillic = existing_terms_union_for_script(existing, "cyrillic")
+    skipped_cyrillic = skipped_phrases_merge_for_script(skipped, "cyrillic")
 
-    ru_candidates: list[dict] = []
-    for phrase, count in sorted(ru_counts.items(), key=lambda kv: -(kv[1] * _ru_whisper_bonus(kv[0]))):
-        if count < min_count:
+    cyrillic_candidates: list[dict] = []
+    for phrase, count in sorted(
+        cyrillic_counts.items(), key=lambda kv: -(kv[1] * _ru_whisper_bonus(kv[0]))
+    ):
+        if count < cyrillic_min:
             continue
         lower = phrase.lower()
-        if lower in existing_ru:
+        if lower in existing_cyrillic:
             continue
-        skipped_at = skipped_ru.get(lower, -1)
+        skipped_at = skipped_cyrillic.get(lower, -1)
         if 0 <= skipped_at and current_phrase_count - skipped_at < cooldown_phrases:
             continue
-        ru_candidates.append({"term": phrase, "count": count})
-        if len(ru_candidates) >= max_per_lang:
+        cyrillic_candidates.append({"term": phrase, "count": count})
+        if len(cyrillic_candidates) >= max_per_lang:
             break
 
     result: dict[str, list[dict]] = {}
-    if en_candidates:
-        result["en"] = en_candidates
-    if ru_candidates:
-        result["ru"] = ru_candidates
+    if latin_candidates:
+        result["latin"] = latin_candidates
+    if cyrillic_candidates:
+        result["cyrillic"] = cyrillic_candidates
     return result
 
 

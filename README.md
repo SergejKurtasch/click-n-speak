@@ -11,7 +11,7 @@ All processing runs on-device using Apple Silicon — no data leaves your machin
 - **Global hotkey** — `Alt+Space` starts and stops recording from any app
 - **Adaptive VAD** — silence detection adjusts to speech pace; short pauses buffer, longer pauses trigger send
 - **Multilingual** — primary + additional languages in one session, no layout switching
-- **Auto vocabulary** — analyzes phrase history every 50 transcriptions, suggests (or auto-adds) domain terms to improve Whisper accuracy; configurable in Suggest / Auto / Disabled mode
+- **Auto vocabulary** — analyzes phrase history on a configurable interval (default every 20 phrases), suggests (or auto-adds) domain terms to improve Whisper accuracy; configurable in Suggest / Auto / Disabled mode
 - **Setup wizard** — first-launch wizard guides through all required permissions automatically
 - **Menu bar UI** — model selection, language config, vocabulary management, phrase history with copy
 - **Clean shutdown** — no orphan MLX helper processes left behind, even after Force Quit or crash (kqueue-driven parent-death watchdog + startup sweep)
@@ -74,7 +74,10 @@ The app stores its config in `~/Library/Application Support/Click-n-speak/config
     "ai_editor_model": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
     "user_terms": {"ru": ["термин1"], "en": ["PCA"]},
     "prompt_update_mode": "suggest",
-    "auto_prompt_check_interval": 50,
+    "auto_prompt_check_interval": 20,
+    "auto_prompt_check_min_count_primary": 5,
+    "auto_prompt_check_min_count_additional": 8,
+    "auto_prompt_lookback": 300,
     "silence_duration": 1.0,
     "target_speech_duration": 4.0,
     "max_speech_duration": 8.0,
@@ -85,6 +88,8 @@ The app stores its config in `~/Library/Application Support/Click-n-speak/config
 `user_terms` — domain vocabulary injected into Whisper's initial prompt for better accuracy. Updated manually via *Edit Terms* or automatically via the auto-vocabulary feature.
 
 `prompt_update_mode` — controls auto-vocabulary: `"suggest"` (review before adding), `"auto"` (add immediately), `"disabled"`.
+
+`auto_prompt_check_min_count_primary` / `auto_prompt_check_min_count_additional` — frequency thresholds for terms whose script matches the primary vs additional languages (defaults 5 / 8). Analyzers bucket text by script (`latin` / `cyrillic`), then map suggestions onto your configured language codes.
 
 All fields are also editable via the menu bar UI.
 
