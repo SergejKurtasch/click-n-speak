@@ -17,11 +17,19 @@ except ImportError:
 
 from .dataset_logger import append_to_dataset
 from .ai_editor import AiEditor, DEFAULT_MODEL_NAME, GeminiEditor, DEFAULT_GEMINI_MODEL
+from .correction_analyzer import (
+    has_fresh_strong_correction_signal,
+    update_corrections_index,
+    get_correction_candidates,
+)
 from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS, FileTranscriptionError
 from .utils import (
+    _term_str,
+    apply_decay,
     build_initial_prompt,
     deduplicate_prompt_terms,
     get_allowed_languages,
+    get_language_script,
     get_primary_language,
     get_ui_strings,
     log_error,
@@ -30,8 +38,11 @@ from .utils import (
     migrate_config_to_v2,
     migrate_config_to_v3,
     migrate_config_to_v4,
+    migrate_config_to_v5,
     save_config_to_disk,
     send_notification,
+    target_lang_for_script_bucket,
+    update_term_usage,
 )
 
 # Keep-alive interval in seconds (15 minutes)
@@ -62,14 +73,79 @@ def _apply_candidates_to_user_terms(config: dict, candidates: dict) -> None:
     """Merge candidates into user_terms[lang], dedup.
 
     Existing user-curated terms come first; new auto-detected terms are appended.
+    In v5 schema each new entry is stored as a dict with source/metadata.
     build_initial_prompt enforces the final length via _MAX_PROMPT_CHARS.
     """
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
     user_terms = dict(config.get("user_terms") or {})
     for lang, items in candidates.items():
-        new_terms = [item["term"] for item in items]
         current = list(user_terms.get(lang, []))
-        user_terms[lang] = deduplicate_prompt_terms(current + new_terms)
+        existing_lower = {_term_str(t).lower() for t in current}
+        for item in items:
+            if item["term"].lower() not in existing_lower:
+                raw_source = item.get("source", "auto")
+                source = raw_source if raw_source in ("manual", "auto", "correction") else "auto"
+                current.append({
+                    "term": item["term"],
+                    "source": source,
+                    "added_at": now_iso,
+                    "last_seen": now_iso,
+                    "use_count": item.get("count", 0),
+                })
+                existing_lower.add(item["term"].lower())
+        user_terms[lang] = current
     config["user_terms"] = user_terms
+
+
+def _merge_candidate_sources(
+    correction_candidates: dict[str, list[dict]],
+    frequency_candidates: dict[str, list[dict]],
+    max_per_lang: int = 15,
+) -> dict[str, list[dict]]:
+    """Merge correction and frequency candidates with correction-priority scoring."""
+    merged: dict[str, list[dict]] = {}
+    all_langs = set(correction_candidates) | set(frequency_candidates)
+    for lang in all_langs:
+        by_lower: dict[str, dict] = {}
+        for item in correction_candidates.get(lang, []):
+            lower = item["term"].lower()
+            by_lower[lower] = {
+                "term": item["term"],
+                "correction_count": int(item.get("correction_count", item.get("count", 0))),
+                "frequency_count": int(item.get("frequency_count", 0)),
+                "source": "correction",
+            }
+        for item in frequency_candidates.get(lang, []):
+            lower = item["term"].lower()
+            if lower in by_lower:
+                by_lower[lower]["frequency_count"] = int(item.get("count", 0))
+                by_lower[lower]["source"] = "both"
+            else:
+                by_lower[lower] = {
+                    "term": item["term"],
+                    "correction_count": 0,
+                    "frequency_count": int(item.get("count", 0)),
+                    "source": "frequency",
+                }
+        out: list[dict] = []
+        for payload in by_lower.values():
+            corr = int(payload["correction_count"])
+            freq = int(payload["frequency_count"])
+            score = corr * 10 + freq
+            out.append(
+                {
+                    "term": payload["term"],
+                    "count": score,
+                    "correction_count": corr,
+                    "frequency_count": freq,
+                    "source": payload["source"],
+                }
+            )
+        out.sort(key=lambda x: (-int(x["count"]), x["term"].lower()))
+        if out:
+            merged[lang] = out[:max_per_lang]
+    return merged
 # Memory pressure threshold (%) above which keep-alive is disabled
 MEMORY_PRESSURE_THRESHOLD_PERCENT = 75
 
@@ -152,6 +228,9 @@ class SVoiceRecApp:
         # so process_chunk() avoids rebuilding (dedup+join+truncate) on every chunk.
         self._cached_initial_prompt: str = ""
         self._initial_prompt_dirty: bool = True
+        # Dirty flag: True when update_term_usage() bumped counters but config
+        # has not been flushed to disk yet. Cleared on next save_config_to_disk call.
+        self._config_usage_dirty: bool = False
 
     def _ensure_preview_panel(self):
         if self._preview_panel is None:
@@ -304,6 +383,7 @@ class SVoiceRecApp:
         data = migrate_config_to_v2(data)
         data = migrate_config_to_v3(data)
         data = migrate_config_to_v4(data)
+        data = migrate_config_to_v5(data)
         self.config = data
         # Invalidate the cached prompt so process_chunk() rebuilds it on the next chunk.
         if hasattr(self, "_initial_prompt_dirty"):
@@ -472,6 +552,8 @@ class SVoiceRecApp:
                     if user_text:
                         append_phrase(user_text)
                         log_info("_run_injection: phrase appended")
+                        if update_term_usage(self.config, user_text):
+                            self._config_usage_dirty = True
                         self._maybe_trigger_prompt_analysis()
                         mb = self.menu_bar
                         if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
@@ -522,13 +604,27 @@ class SVoiceRecApp:
         mode = self.config.get("prompt_update_mode", "suggest")
         if mode == "disabled":
             return
-        interval = int(self.config.get("auto_prompt_check_interval", 50))
+        interval = int(self.config.get("auto_prompt_check_interval", 20))
         last_check = int(self.config.get("last_analysis_phrase_count", 0))
         try:
             from .phrase_history import count_phrases
             current = count_phrases()
         except Exception:
             return
+        # Fast-path: if correction signal became strong recently, run analysis now.
+        try:
+            corrections_index = update_corrections_index()
+            if has_fresh_strong_correction_signal(corrections_index, current_phrase_count=current):
+                if not self._analysis_lock.acquire(blocking=False):
+                    return
+                threading.Thread(
+                    target=self._run_prompt_analysis,
+                    kwargs={"current_phrase_count": current},
+                    daemon=True,
+                ).start()
+                return
+        except Exception:
+            pass
         if current - last_check < interval:
             return
         if not self._analysis_lock.acquire(blocking=False):
@@ -543,7 +639,7 @@ class SVoiceRecApp:
     def request_prompt_analysis(self, on_complete: Callable[[], None] | None = None) -> None:
         """Start an on-demand analysis immediately, bypassing the interval check.
 
-        Uses softer thresholds (lookback=500, min_count=5) so the user sees
+        Uses softer thresholds (lookback=1000, relaxed min_count) so the user sees
         results even from sparse history. Does not update last_analysis_phrase_count
         so the regular auto-analysis schedule is unaffected.
         on_complete, if given, is posted to the main-thread queue after analysis.
@@ -579,7 +675,7 @@ class SVoiceRecApp:
 
             existing: dict[str, set[str]] = {}
             for lang, terms in (self.config.get("user_terms") or {}).items():
-                existing.setdefault(lang, set()).update(t.lower() for t in terms)
+                existing.setdefault(lang, set()).update(_term_str(t).lower() for t in terms)
 
             skipped_raw = self.config.get("skipped_terms") or {}
             skipped: dict[str, dict[str, int]] = {
@@ -587,30 +683,61 @@ class SVoiceRecApp:
                 for lang, terms in skipped_raw.items()
             }
 
-            if on_demand:
-                lookback = 500
-                min_count = 10
-            else:
-                lookback = 100
-                min_count = int(self.config.get("auto_prompt_check_min_count", 10))
+            primary_lang = get_primary_language(self.config)
+            additional_list = list(self.config.get("additional_languages") or [])
+            primary_script = get_language_script(primary_lang)
+            non_primary_script = "cyrillic" if primary_script == "latin" else "latin"
 
-            candidates = get_prompt_candidates(
-                lookback=lookback,
-                min_count=min_count,
+            if on_demand:
+                lookback = 1000
+                min_count_by_script = {"latin": 5, "cyrillic": 5}
+            else:
+                lookback = int(self.config.get("auto_prompt_lookback", 300))
+                primary_min = int(self.config.get("auto_prompt_check_min_count_primary", 5))
+                additional_min = int(self.config.get("auto_prompt_check_min_count_additional", 8))
+                min_count_by_script = {
+                    primary_script: primary_min,
+                    non_primary_script: additional_min,
+                }
+
+            correction_index = update_corrections_index()
+            correction_candidates = get_correction_candidates(
+                correction_index,
                 existing_lower_by_lang=existing,
                 skipped_lower_by_lang=skipped,
                 current_phrase_count=current_count,
-                cooldown_phrases=100,
+                min_correction_count=2,
+                cooldown_phrases=150,
+                max_per_lang=15,
             )
 
-            # Remap candidate buckets that don't match any active language to primary.
-            # get_prompt_candidates uses script-based detection ("en" for Latin, "ru" for
-            # Cyrillic), which may not align with the user's configured languages.
-            primary_lang = get_primary_language(self.config)
-            active_langs = {primary_lang} | set(self.config.get("additional_languages") or [])
+            non_primary_inserted = set(
+                correction_index.get("inserted_terms", {}).get(non_primary_script, {}).keys()
+            )
+
+            def _term_has_correction_signal(lower: str) -> bool:
+                return lower in non_primary_inserted
+
+            frequency_candidates = get_prompt_candidates(
+                lookback=lookback,
+                min_count=min_count_by_script,
+                existing_lower_by_lang=existing,
+                skipped_lower_by_lang=skipped,
+                current_phrase_count=current_count,
+                cooldown_phrases=150,
+                max_per_lang=15,
+                term_has_correction_signal=_term_has_correction_signal,
+            )
+            candidates = _merge_candidate_sources(correction_candidates, frequency_candidates)
+
+            # Map script buckets ("latin"/"cyrillic") or stray ISO keys onto user_terms langs.
+            active_langs = {primary_lang} | set(additional_list)
             remapped: dict[str, list[dict]] = {}
-            for lang, items in candidates.items():
-                target = lang if lang in active_langs else primary_lang
+            for bucket, items in candidates.items():
+                if bucket in ("latin", "cyrillic"):
+                    target = target_lang_for_script_bucket(bucket, primary_lang, additional_list)
+                else:
+                    target = bucket if bucket in active_langs else primary_lang
                 existing_items = remapped.get(target, [])
                 seen_lower = {item["term"].lower() for item in existing_items}
                 for item in items:
@@ -628,6 +755,7 @@ class SVoiceRecApp:
                 _apply_candidates_to_user_terms(self.config, candidates)
                 self.config["initial_prompt"] = build_initial_prompt(self.config)
                 save_config_to_disk(self.config)
+                self._config_usage_dirty = False
                 # load_config_data and prompt-file sync must run on the main thread.
                 self._submit_for_main_thread(self.load_config_data, self.config)
                 mb = self.menu_bar
@@ -647,17 +775,34 @@ class SVoiceRecApp:
                     for item in candidates.get(lang, []):
                         lower = item["term"].lower()
                         if lower in by_lower:
-                            by_lower[lower]["count"] = max(by_lower[lower]["count"], item["count"])
+                            by_lower[lower]["count"] = max(by_lower[lower].get("count", 0), item["count"])
+                            by_lower[lower]["correction_count"] = max(
+                                by_lower[lower].get("correction_count", 0),
+                                item.get("correction_count", 0),
+                            )
+                            by_lower[lower]["frequency_count"] = max(
+                                by_lower[lower].get("frequency_count", 0),
+                                item.get("frequency_count", 0),
+                            )
+                            prev_source = by_lower[lower].get("source", "frequency")
+                            new_source = item.get("source", "frequency")
+                            by_lower[lower]["source"] = (
+                                "both"
+                                if prev_source != new_source
+                                else prev_source
+                            )
                         else:
                             by_lower[lower] = dict(item)
-                    merged[lang] = sorted(by_lower.values(), key=lambda x: -x["count"])
+                    merged[lang] = sorted(by_lower.values(), key=lambda x: -x.get("count", 0))
                 self.config["pending_suggestions"] = merged
                 save_config_to_disk(self.config)
+                self._config_usage_dirty = False
                 mb = self.menu_bar
                 if mb is not None and hasattr(mb, "update_suggest_menu_badge"):
                     self._submit_for_main_thread(mb.update_suggest_menu_badge)
             else:
                 save_config_to_disk(self.config)
+                self._config_usage_dirty = False
 
             if on_complete is not None:
                 self._submit_for_main_thread(on_complete)
@@ -668,6 +813,28 @@ class SVoiceRecApp:
                 self._submit_for_main_thread(on_complete)
         finally:
             self._analysis_lock.release()
+
+    def run_decay_if_due(self) -> None:
+        """Run apply_decay() at most once per 24 h; called by menu-bar hourly timer."""
+        from datetime import datetime, timezone, timedelta
+        last_run = self.config.get("last_decay_run_ts")
+        now = datetime.now(timezone.utc)
+        if last_run:
+            try:
+                elapsed = now - datetime.fromisoformat(last_run)
+                if elapsed < timedelta(hours=24):
+                    return
+            except ValueError:
+                pass
+        n = apply_decay(self.config)
+        self.config["last_decay_run_ts"] = now.isoformat()
+        if n > 0:
+            self.config["initial_prompt"] = build_initial_prompt(self.config)
+            log_info(f"Decay: {n} stale term(s) deactivated.")
+        save_config_to_disk(self.config)
+        self._config_usage_dirty = False
+        if n > 0:
+            self.notify("Click-n-speak", f"{n} устаревших терминов деактивировано. Откройте «Manage Terms» для просмотра.")
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
