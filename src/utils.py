@@ -1,10 +1,12 @@
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -162,6 +164,15 @@ def get_phrases_file_path() -> Path:
     return support_dir / "phrase_history.txt"
 
 
+def get_corrections_file_path() -> Path:
+    """Return the path to corrections.json (dev root or Application Support)."""
+    if not _get_app_bundle():
+        return ROOT / "corrections.json"
+    support_dir = APPLICATION_SUPPORT_DIR
+    support_dir.mkdir(parents=True, exist_ok=True)
+    return support_dir / "corrections.json"
+
+
 # UI strings for notifications and menu bar, keyed by primary language (ru, en, de, es, fr).
 # Fallback: en if key or lang missing.
 UI_STRINGS: dict[str, dict[str, str]] = {
@@ -299,6 +310,62 @@ def get_primary_language(config: dict) -> str:
     return "ru"
 
 
+def get_language_script(lang_code: str) -> str:
+    """Return script family for a configured language: 'latin' or 'cyrillic'.
+
+    Used to align ISO language codes with analyzer script buckets (latin/cyrillic).
+    Cyrillic: ru, uk/ua, be, bg, mk, sr. Everything else is treated as latin.
+    """
+    cyrillic_langs = {"ru", "uk", "ua", "be", "bg", "mk", "sr"}
+    return "cyrillic" if str(lang_code).lower().strip() in cyrillic_langs else "latin"
+
+
+def target_lang_for_script_bucket(
+    script: str,
+    primary_lang: str,
+    additional_langs: list[str] | None,
+) -> str:
+    """Map analyzer script bucket ('latin' | 'cyrillic') to one configured language code.
+
+    Prefers primary when its script matches, otherwise the first additional language
+    whose script matches. Falls back to primary (same role as legacy en/ru remap).
+    """
+    primary = str(primary_lang).lower().strip()
+    additional = [str(x).lower().strip() for x in (additional_langs or []) if x]
+    if get_language_script(primary) == script:
+        return primary
+    for code in additional:
+        if get_language_script(code) == script:
+            return code
+    return primary
+
+
+def existing_terms_union_for_script(
+    existing_lower_by_lang: dict[str, set[str]],
+    script: str,
+) -> set[str]:
+    """Union of lowercase terms across all configured languages that use *script*."""
+    out: set[str] = set()
+    for lang_code, terms in (existing_lower_by_lang or {}).items():
+        if get_language_script(lang_code) == script:
+            out |= terms
+    return out
+
+
+def skipped_phrases_merge_for_script(
+    skipped_lower_by_lang: dict[str, dict[str, int]],
+    script: str,
+) -> dict[str, int]:
+    """Merge skipped-term phrase indices across langs matching *script* (max per term)."""
+    merged: dict[str, int] = {}
+    for lang_code, sk in (skipped_lower_by_lang or {}).items():
+        if get_language_script(lang_code) != script:
+            continue
+        for lower, cnt in sk.items():
+            merged[lower] = max(merged.get(lower, -1), int(cnt))
+    return merged
+
+
 # Maps app-internal language codes to ISO 639-1 codes that Whisper recognises.
 # "ua" (country code) is used in the UI for Ukrainian; Whisper requires "uk".
 _WHISPER_LANG_CODE: dict[str, str] = {"ua": "uk"}
@@ -392,31 +459,38 @@ def save_config_to_disk(config: dict) -> None:
     mid-write never leaves a partial/empty JSON file that would wipe user_terms on
     the next launch.
     """
-    import json
+    config_path = get_config_path()
+    try:
+        write_json_atomic(config_path, config, indent=4)
+    except OSError as e:
+        log_error(f"Error saving config: {e}")
+
+
+def write_json_atomic(path: Path, payload: object, *, indent: int | None = None) -> None:
+    """Atomically write JSON payload to *path* using temp file + os.replace."""
     import tempfile
 
-    config_path = get_config_path()
     tmp_path = None
     try:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
         tmp_path = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=4)
+                json.dump(payload, f, indent=indent)
                 f.flush()
                 os.fsync(f.fileno())
         except Exception:
             os.close(fd)
             raise
-        os.replace(tmp_path, config_path)
-    except OSError as e:
-        log_error(f"Error saving config: {e}")
+        os.replace(tmp_path, path)
+    except OSError:
         if tmp_path is not None:
             try:
                 tmp_path.unlink(missing_ok=True)
             except Exception:
                 pass
+        raise
 
 
 # Language hints passed to Whisper as initial_prompt prefix.
@@ -521,15 +595,38 @@ def parse_prompt_terms(text: str) -> list[str]:
     return result
 
 
-def deduplicate_prompt_terms(terms: list[str]) -> list[str]:
-    """Deduplicate a list of terms case-insensitively, preserving first occurrence."""
+def _term_str(item) -> str:
+    """Return the term string from a str or v5 dict entry."""
+    return item if isinstance(item, str) else item["term"]
+
+
+def _term_is_active(item) -> bool:
+    """Return False only for v5 dict entries explicitly marked inactive."""
+    return not (isinstance(item, dict) and item.get("inactive"))
+
+
+def _term_sort_key(item) -> tuple:
+    """Sort key: manual(0) < correction(1) < auto(2); then use_count desc; then last_seen desc."""
+    if isinstance(item, str):
+        return (0, 0, "")
+    src_order = {"manual": 0, "correction": 1, "auto": 2}.get(item.get("source", "manual"), 3)
+    use_count = -(item.get("use_count") or 0)
+    last_seen = item.get("last_seen") or ""
+    return (src_order, use_count, last_seen)
+
+
+def deduplicate_prompt_terms(terms: list) -> list:
+    """Deduplicate terms case-insensitively, preserving first occurrence.
+
+    Accepts lists of str or v5 dict entries (or mixed); returns items of the same types.
+    """
     seen_lower: set[str] = set()
-    result: list[str] = []
-    for term in terms:
-        key = term.lower().strip()
+    result = []
+    for item in terms:
+        key = _term_str(item).lower().strip()
         if key and key not in seen_lower:
             seen_lower.add(key)
-            result.append(term)
+            result.append(item)
     return result
 
 
@@ -549,13 +646,15 @@ def build_initial_prompt(config: dict) -> str:
 
     user_terms: dict = config.get("user_terms") or {}
 
-    terms: list[str] = list(user_terms.get(primary, []))
+    # Collect active terms only; sort by priority (manual > correction > auto by use_count).
+    raw: list = [t for t in user_terms.get(primary, []) if _term_is_active(t)]
     for lang in additional:
         if lang != primary:
-            terms.extend(user_terms.get(lang, []))
-    terms = deduplicate_prompt_terms(terms)
+            raw.extend(t for t in user_terms.get(lang, []) if _term_is_active(t))
+    raw = sorted(raw, key=_term_sort_key)
+    terms: list[str] = [_term_str(t) for t in deduplicate_prompt_terms(raw)]
 
-    primary_has_terms = bool(user_terms.get(primary))
+    primary_has_terms = any(_term_is_active(t) for t in user_terms.get(primary, []))
 
     # Build the fixed prefix (lang hint + optional style sentence)
     if not terms:
@@ -628,7 +727,7 @@ def migrate_config_to_v2(config: dict) -> dict:
     config.setdefault("pending_suggestions", {})
     config.setdefault("skipped_terms", {})
     config.setdefault("prompt_update_mode", "suggest")
-    config.setdefault("auto_prompt_check_interval", 50)
+    config.setdefault("auto_prompt_check_interval", 20)
     config.setdefault("last_analysis_phrase_count", 0)
 
     # Remove all v1 keys.
@@ -701,6 +800,107 @@ def migrate_config_to_v4(config: dict) -> dict:
     config["schema_version"] = 4
     config["initial_prompt"] = build_initial_prompt(config)
     return config
+
+
+def migrate_config_to_v5(config: dict) -> dict:
+    """Add per-term metadata (source, added_at, last_seen, use_count) to user_terms.
+
+    Idempotent: returns unchanged dict when schema_version >= 5.
+    Legacy string entries are converted to dicts with source="manual" so they
+    are never touched by the decay algorithm.
+    """
+    if config.get("schema_version", 1) >= 5:
+        return config
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    new_user_terms: dict[str, list[dict]] = {}
+    for lang, terms in (config.get("user_terms") or {}).items():
+        new_list = []
+        for t in terms:
+            if isinstance(t, str):
+                new_list.append({
+                    "term": t,
+                    "source": "manual",
+                    "added_at": now_iso,
+                    "last_seen": now_iso,
+                    "use_count": 0,
+                })
+            elif isinstance(t, dict):
+                new_list.append(t)
+        new_user_terms[lang] = new_list
+
+    config["user_terms"] = new_user_terms
+    config["schema_version"] = 5
+    config.setdefault("last_decay_run_ts", None)
+    config.setdefault("max_dictionary_age_days", 60)
+    config["initial_prompt"] = build_initial_prompt(config)
+    return config
+
+
+def update_term_usage(config: dict, phrase: str) -> bool:
+    """Bump use_count and last_seen for any v5 dict terms found in *phrase*.
+
+    Single-word terms are matched via token set; multi-word terms via substring.
+    Returns True if at least one term was updated (dirty-flag hint for caller).
+    """
+    phrase_lower = phrase.lower()
+    tokens: set[str] = set(re.findall(r"[\w'-]+", phrase_lower))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    dirty = False
+    for lang, terms in (config.get("user_terms") or {}).items():
+        for item in terms:
+            if not isinstance(item, dict):
+                continue
+            term_lower = item["term"].lower()
+            if " " in term_lower:
+                found = term_lower in phrase_lower
+            else:
+                found = term_lower in tokens
+            if found:
+                item["last_seen"] = now_iso
+                item["use_count"] = item.get("use_count", 0) + 1
+                if item.get("inactive"):
+                    item.pop("inactive")
+                dirty = True
+    return dirty
+
+
+def apply_decay(config: dict, max_age_days: int | None = None) -> int:
+    """Mark stale auto/correction terms inactive in initial_prompt.
+
+    Terms are deactivated when ALL of the following hold:
+    - source != "manual"
+    - last_seen older than max_age_days
+    - use_count < 3
+
+    Returns number of terms deactivated. Manual terms are never touched.
+    """
+    if max_age_days is None:
+        max_age_days = int(config.get("max_dictionary_age_days", 60))
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_age_days)
+    deactivated = 0
+    for lang, terms in (config.get("user_terms") or {}).items():
+        for item in terms:
+            if not isinstance(item, dict):
+                continue
+            if item.get("source") == "manual":
+                continue
+            raw_ts = item.get("last_seen") or item.get("added_at")
+            if not raw_ts:
+                continue
+            try:
+                last_seen = datetime.fromisoformat(raw_ts)
+            except ValueError:
+                continue
+            # Make timezone-aware if naive
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            if last_seen < cutoff and item.get("use_count", 0) < 3:
+                if not item.get("inactive"):
+                    item["inactive"] = True
+                    deactivated += 1
+    return deactivated
 
 
 def _run_notification(script: str) -> None:
