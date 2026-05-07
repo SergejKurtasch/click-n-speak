@@ -154,6 +154,7 @@ from .permissions import (
 )
 from .autostart import is_launch_at_login_enabled, set_launch_at_login
 from .utils import (
+    _term_str,
     build_initial_prompt,
     copy_to_clipboard,
     deduplicate_prompt_terms,
@@ -632,6 +633,16 @@ class ClickNSpeakApp(rumps.App):
             except Exception as e:
                 log_error(f"Main thread job failed: {e}")
 
+    @rumps.timer(3600)
+    def _decay_tick(self, _) -> None:
+        """Hourly timer: runs apply_decay() at most once per 24 h."""
+        app = self.main_app
+        if app is not None and hasattr(app, "run_decay_if_due"):
+            try:
+                app.run_decay_if_due()
+            except Exception as exc:
+                log_error(f"Decay tick failed: {exc}")
+
     @rumps.timer(1.0)
     def _watch_prompt_file(self, _):
         """Watches initial_prompt_{lang}.txt for all active languages; updates user_terms on change."""
@@ -656,15 +667,39 @@ class ClickNSpeakApp(rumps.App):
 
                     user_terms = dict(self.config.get("user_terms") or {})
                     previous_terms = list(user_terms.get(lang, []))
-                    new_terms = deduplicate_prompt_terms(parse_prompt_terms(new_text))
+                    new_term_strings = deduplicate_prompt_terms(parse_prompt_terms(new_text))
 
-                    if previous_terms != new_terms:
+                    # Preserve v5 dict metadata for terms already present; new terms
+                    # that the user typed into the file become source="manual" entries.
+                    existing_dicts = {
+                        _term_str(t).lower(): t
+                        for t in previous_terms
+                        if isinstance(t, dict)
+                    }
+                    from datetime import datetime, timezone
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    new_terms_as_items = []
+                    for ts in new_term_strings:
+                        lower = ts.lower()
+                        if lower in existing_dicts:
+                            new_terms_as_items.append(existing_dicts[lower])
+                        else:
+                            new_terms_as_items.append({
+                                "term": ts,
+                                "source": "manual",
+                                "added_at": now_iso,
+                                "last_seen": now_iso,
+                                "use_count": 0,
+                            })
+
+                    prev_strs = [_term_str(t) for t in previous_terms]
+                    if prev_strs != new_term_strings:
                         if previous_terms:
                             snapshots = dict(self.config.get("prompt_snapshots", {}))
                             snapshots[lang] = previous_terms
                             self.config["prompt_snapshots"] = snapshots
 
-                        user_terms[lang] = new_terms
+                        user_terms[lang] = new_terms_as_items
                         self.config["user_terms"] = user_terms
                         self.config["initial_prompt"] = build_initial_prompt(self.config)
 
@@ -970,6 +1005,7 @@ class ClickNSpeakApp(rumps.App):
 
         self._suggest_item = rumps.MenuItem("Review Suggestions", callback=self._on_review_suggestions)
         self._prompt_menu_item.add(self._suggest_item)
+        self._prompt_menu_item.add(rumps.MenuItem("Manage Terms…", callback=self._on_manage_terms))
         self.menu.add(self._prompt_menu_item)
         self.update_suggest_menu_badge()
 
@@ -1656,7 +1692,7 @@ class ClickNSpeakApp(rumps.App):
             terms_list = user_terms.get(primary, [])
             prompt_path = self._get_prompt_path(primary)
             with prompt_path.open("w", encoding="utf-8") as f:
-                f.write(", ".join(terms_list))
+                f.write(", ".join(_term_str(t) for t in terms_list))
         except Exception as e:
             log_error(f"Failed to write prompt file for {primary}: {e}")
 
@@ -1770,7 +1806,7 @@ class ClickNSpeakApp(rumps.App):
         prompt_path = self._get_prompt_path(lang)
         try:
             with prompt_path.open("w", encoding="utf-8") as f:
-                f.write(", ".join(terms_list))
+                f.write(", ".join(_term_str(t) for t in terms_list))
             self._prompt_mtimes[lang] = prompt_path.stat().st_mtime
         except OSError as exc:
             log_error(f"Failed to sync prompt file for {lang}: {exc}")
@@ -1791,8 +1827,20 @@ class ClickNSpeakApp(rumps.App):
         user_terms = dict(self.config.get("user_terms") or {})
         current_terms = list(user_terms.get(lang, []))
 
-        user_terms[lang] = list(prev_terms)
+        # Snapshots may be list[str] (legacy) or list[dict] (v5); normalise to list[dict].
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if prev_terms and isinstance(prev_terms[0], str):
+            reverted_items = [
+                {"term": t, "source": "manual", "added_at": now_iso,
+                 "last_seen": now_iso, "use_count": 0}
+                for t in prev_terms
+            ]
+        else:
+            reverted_items = list(prev_terms)
+
         snapshots[lang] = current_terms
+        user_terms[lang] = reverted_items
 
         self.config["user_terms"] = user_terms
         self.config["prompt_snapshots"] = snapshots
@@ -1801,7 +1849,7 @@ class ClickNSpeakApp(rumps.App):
         prompt_path = self._get_prompt_path(lang)
         try:
             with prompt_path.open("w", encoding="utf-8") as f:
-                f.write(", ".join(prev_terms))
+                f.write(", ".join(_term_str(t) for t in reverted_items))
             self._prompt_mtimes[lang] = prompt_path.stat().st_mtime
         except Exception:
             pass
@@ -1809,6 +1857,66 @@ class ClickNSpeakApp(rumps.App):
         self.save_config()
         self.main_app.load_config_data(self.config)
         self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} восстановлена.")
+
+    def _on_manage_terms(self, _) -> None:
+        """Show NSAlert with term statistics and option to clear inactive terms."""
+        try:
+            from AppKit import NSAlert
+            user_terms = self.config.get("user_terms") or {}
+
+            total = 0
+            inactive_count = 0
+            by_source: dict[str, int] = {"manual": 0, "correction": 0, "auto": 0}
+            for terms in user_terms.values():
+                for t in terms:
+                    total += 1
+                    if isinstance(t, dict):
+                        if t.get("inactive"):
+                            inactive_count += 1
+                        src = t.get("source", "manual")
+                        by_source[src] = by_source.get(src, 0) + 1
+                    else:
+                        by_source["manual"] = by_source.get("manual", 0) + 1
+
+            lines = [
+                f"Всего терминов в словаре: {total}",
+                f"  • Ручные (manual): {by_source.get('manual', 0)}",
+                f"  • Авто-анализ (auto): {by_source.get('auto', 0)}",
+                f"  • Из правок (correction): {by_source.get('correction', 0)}",
+                "",
+                f"Неактивных (деактивировано decay): {inactive_count}",
+            ]
+            if inactive_count > 0:
+                lines.append("Неактивные термины исключены из Whisper-подсказки, но хранятся в config.")
+                lines.append("Они реактивируются автоматически при следующем употреблении.")
+
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Управление терминами словаря")
+            alert.setInformativeText_("\n".join(lines))
+            alert.addButtonWithTitle_("OK")
+            if inactive_count > 0:
+                alert.addButtonWithTitle_("Удалить неактивные")
+
+            result = alert.runModal()
+            if inactive_count > 0 and result == 1001:
+                self._clear_inactive_terms()
+        except Exception as exc:
+            log_exception(f"_on_manage_terms failed: {exc}")
+
+    def _clear_inactive_terms(self) -> None:
+        """Permanently remove all inactive terms from user_terms."""
+        user_terms = self.config.get("user_terms") or {}
+        removed = 0
+        for lang, terms in user_terms.items():
+            before = len(terms)
+            user_terms[lang] = [t for t in terms if not (isinstance(t, dict) and t.get("inactive"))]
+            removed += before - len(user_terms[lang])
+        self.config["user_terms"] = user_terms
+        self.config["initial_prompt"] = build_initial_prompt(self.config)
+        self.save_config()
+        self.main_app.load_config_data(self.config)
+        if removed > 0:
+            self.main_app.notify("Словарь", f"{removed} неактивных терминов удалено.")
 
     def _update_mode_submenu_state(self) -> None:
         """Sync Auto-update Mode checkmarks with current prompt_update_mode."""
