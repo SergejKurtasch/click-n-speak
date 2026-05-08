@@ -21,6 +21,8 @@ from AppKit import (
     NSTextAlignmentRight,
     NSView,
     NSViewHeightSizable,
+    NSViewMaxYMargin,
+    NSViewMinYMargin,
     NSViewWidthSizable,
     NSWindow,
     NSWindowStyleMaskClosable,
@@ -216,16 +218,19 @@ class SuggestionsPanel:
             NSRect(NSPoint(_MARGIN, label_y), NSSize(_WIN_W - 2 * _MARGIN, _LABEL_H)),
             font_size=12.0,
         )
+        desc.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
         content.addSubview_(desc)
 
         # "Select all" / "Deselect all" mini-buttons
         mini_w = 120
         sel_btn = self._make_button("Выбрать все", select_row_y, _MARGIN, mini_w, height=_SELECT_ROW_H)
+        sel_btn.setAutoresizingMask_(NSViewMinYMargin)
         sel_btn.setTarget_(self._delegate)
         sel_btn.setAction_("selectAll:")
         content.addSubview_(sel_btn)
 
         desel_btn = self._make_button("Снять все", select_row_y, _MARGIN + mini_w + 8, mini_w, height=_SELECT_ROW_H)
+        desel_btn.setAutoresizingMask_(NSViewMinYMargin)
         desel_btn.setTarget_(self._delegate)
         desel_btn.setAction_("deselectAll:")
         content.addSubview_(desel_btn)
@@ -276,6 +281,7 @@ class SuggestionsPanel:
             btn = NSButton.alloc().initWithFrame_(
                 NSRect(NSPoint(_MARGIN, show_more_y), NSSize(190, _SHOW_MORE_BTN_H))
             )
+            btn.setAutoresizingMask_(NSViewMaxYMargin)
             btn.setTitle_(f"Показать ещё {more_count}")
             btn.setTarget_(self._delegate)
             btn.setAction_("showMore:")
@@ -286,17 +292,20 @@ class SuggestionsPanel:
         col_w = (_WIN_W - 2 * _MARGIN - 16) // 3
 
         auto_btn = self._make_button("Авто-режим", btn_y, _MARGIN, col_w)
+        auto_btn.setAutoresizingMask_(NSViewMaxYMargin)
         auto_btn.setTarget_(self._delegate)
         auto_btn.setAction_("autoMode:")
         content.addSubview_(auto_btn)
 
         skip_btn = self._make_button("Напомнить позже", btn_y, _MARGIN + col_w + 8, col_w)
+        skip_btn.setAutoresizingMask_(NSViewMaxYMargin)
         skip_btn.setTarget_(self._delegate)
         skip_btn.setAction_("skip:")
         skip_btn.setKeyEquivalent_("\x1b")
         content.addSubview_(skip_btn)
 
         accept_btn = self._make_button("Добавить выбранные", btn_y, _MARGIN + 2 * (col_w + 8), col_w)
+        accept_btn.setAutoresizingMask_(NSViewMaxYMargin)
         accept_btn.setTarget_(self._delegate)
         accept_btn.setAction_("accept:")
         accept_btn.setKeyEquivalent_("\r")

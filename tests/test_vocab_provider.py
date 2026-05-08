@@ -39,6 +39,14 @@ def test_add_term_to_user_terms_dedupe_case_insensitive():
     assert len(cfg["user_terms"]["ru"]) == 1
 
 
+def test_add_term_to_user_terms_dedupe_trailing_punctuation():
+    cfg = _v5_config()
+    assert add_term_to_user_terms(cfg, "ru", "GitHub.") is True
+    assert add_term_to_user_terms(cfg, "ru", "GitHub") is False
+    assert len(cfg["user_terms"]["ru"]) == 1
+    assert cfg["user_terms"]["ru"][0]["term"] == "GitHub"
+
+
 def test_add_term_to_user_terms_v4_string_entry():
     cfg = _v4_config()
     added = add_term_to_user_terms(cfg, "ru", "  MLX  ")

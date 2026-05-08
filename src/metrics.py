@@ -15,6 +15,7 @@ from .utils import (
     _term_is_active,
     _term_str,
     build_initial_prompt,
+    canonical_term_key,
 )
 
 _TOKEN_RE = __import__("re").compile(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9+#._-]*")
@@ -119,7 +120,7 @@ def _dictionary_hit_rate(records: list[dict[str, Any]], config: dict) -> float |
         active_terms.extend(terms)
     if not active_terms:
         return 0.0
-    active_lowers = {t.lower() for t in active_terms}
+    active_lowers = {canonical_term_key(t) for t in active_terms}
     hits = 0
     valid = 0
     for row in records:

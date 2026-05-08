@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import string
 import subprocess
 import sys
 import threading
@@ -365,7 +366,7 @@ def existing_terms_union_for_script(
     out: set[str] = set()
     for lang_code, terms in (existing_lower_by_lang or {}).items():
         if get_language_script(lang_code) == script:
-            out |= terms
+            out |= {canonical_term_key(t) for t in terms if canonical_term_key(t)}
     return out
 
 
@@ -379,7 +380,10 @@ def skipped_phrases_merge_for_script(
         if get_language_script(lang_code) != script:
             continue
         for lower, cnt in sk.items():
-            merged[lower] = max(merged.get(lower, -1), int(cnt))
+            key = canonical_term_key(lower)
+            if not key:
+                continue
+            merged[key] = max(merged.get(key, -1), int(cnt))
     return merged
 
 
@@ -577,8 +581,56 @@ LANG_DEFAULT_CONTEXT: dict[str, str] = {
     "ar": "هذا هو اللغة المنطوقة مع المفردات المهنية والتقنية.",
 }
 
+# Boundary punctuation removed from terms (leading/trailing only).
+# Keep +/#/_/- because they can be meaningful in technical terms (C++, C#, x-y).
+_TERM_BOUNDARY_PUNCT: set[str] = (
+    (set(string.punctuation) - set("+#_-"))
+    | set("«»“”„‟‘’‚‛…—–·，。！？、：；（）【】《》「」『』")
+)
+_SEMANTIC_LEADING_PUNCT: set[str] = {".", "@"}
+
+
+def _is_semantic_leading_punct(text: str, idx: int) -> bool:
+    """True when boundary punctuation is part of a meaningful term prefix."""
+    if idx < 0 or idx >= len(text):
+        return False
+    ch = text[idx]
+    if ch not in _SEMANTIC_LEADING_PUNCT:
+        return False
+    if idx + 1 >= len(text):
+        return False
+    return text[idx + 1].isalnum()
+
+
+def canonicalize_term(term: str) -> str:
+    """Normalize a term for display/storage without touching inner symbols.
+
+    - trims surrounding whitespace
+    - removes only leading/trailing punctuation
+    - keeps inner punctuation/symbols (e.g. C++, node.js, v2.1)
+    """
+    text = " ".join(str(term or "").split())
+    if not text:
+        return ""
+    start = 0
+    end = len(text)
+    while start < end and text[start] in _TERM_BOUNDARY_PUNCT:
+        # Preserve semantic prefixes like ".NET" and "@mention".
+        if _is_semantic_leading_punct(text, start):
+            break
+        start += 1
+    while end > start and text[end - 1] in _TERM_BOUNDARY_PUNCT:
+        end -= 1
+    return text[start:end]
+
+
+def canonical_term_key(term: str) -> str:
+    """Return lowercase identity key for a term after boundary normalization."""
+    return canonicalize_term(term).lower()
+
+
 # Normalised set for filtering language-hint phrases during term parsing.
-_LANG_HINT_LOWER: set[str] = {v.lower().rstrip(". ") for v in LANG_PROMPTS.values()}
+_LANG_HINT_LOWER: set[str] = {canonical_term_key(v.rstrip(". ")) for v in LANG_PROMPTS.values()}
 
 # Whisper's hard prompt limit is 224 BPE tokens. We budget 200 tokens for the
 # vocab/hint portion (app.py reserves the rest for the per-chunk instruction).
@@ -625,10 +677,10 @@ def parse_prompt_terms(text: str) -> list[str]:
     result: list[str] = []
     seen_lower: set[str] = set()
     for part in re.split(r"[,\n]+", text):
-        t = part.strip(" .")
+        t = canonicalize_term(part)
         if not t:
             continue
-        key = t.lower()
+        key = canonical_term_key(t)
         if key in _LANG_HINT_LOWER:
             continue
         if key not in seen_lower:
@@ -665,7 +717,7 @@ def deduplicate_prompt_terms(terms: list) -> list:
     seen_lower: set[str] = set()
     result = []
     for item in terms:
-        key = _term_str(item).lower().strip()
+        key = canonical_term_key(_term_str(item))
         if key and key not in seen_lower:
             seen_lower.add(key)
             result.append(item)
@@ -893,7 +945,7 @@ def update_term_usage(config: dict, phrase: str) -> bool:
         for item in terms:
             if not isinstance(item, dict):
                 continue
-            term_lower = item["term"].lower()
+            term_lower = canonical_term_key(item["term"])
             if " " in term_lower:
                 found = term_lower in phrase_lower
             else:

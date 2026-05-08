@@ -5,6 +5,8 @@ from typing import Any
 from .utils import (
     _term_is_active,
     _term_str,
+    canonical_term_key,
+    canonicalize_term,
     get_corrections_file_path,
     get_language_script,
     get_primary_language,
@@ -18,7 +20,7 @@ _MISRECOGNITIONS_MIN_COUNT = 3
 def _sanitize_term(text: str) -> str:
     """Keep prompt payload single-line and quote-safe."""
     cleaned = (text or "").replace("\n", " ").replace("\r", " ").replace('"', "'").strip()
-    return " ".join(cleaned.split())
+    return canonicalize_term(" ".join(cleaned.split()))
 
 
 def add_term_to_user_terms(config: dict, lang: str, term: str, source: str = "manual") -> bool:
@@ -34,8 +36,8 @@ def add_term_to_user_terms(config: dict, lang: str, term: str, source: str = "ma
 
     user_terms = dict(config.get("user_terms") or {})
     current_items = list(user_terms.get(normalized_lang, []))
-    existing_lower = {_term_str(item).strip().lower() for item in current_items if _term_str(item).strip()}
-    if normalized_term.lower() in existing_lower:
+    existing_lower = {canonical_term_key(_term_str(item)) for item in current_items if _term_str(item).strip()}
+    if canonical_term_key(normalized_term) in existing_lower:
         return False
 
     schema_version = int(config.get("schema_version", 1) or 1)
@@ -90,7 +92,7 @@ def collect_known_terms(config: dict, languages: list[str] | None = None, cap: i
         sanitized = _sanitize_term(_term_str(item))
         if not sanitized:
             continue
-        lower = sanitized.lower()
+        lower = canonical_term_key(sanitized)
         if lower in seen:
             continue
         seen.add(lower)
@@ -151,7 +153,7 @@ def collect_misrecognitions(
         right = _sanitize_term(str(item.get("to", "")))
         if not left or not right:
             continue
-        key = (left.lower(), right.lower())
+        key = (canonical_term_key(left), canonical_term_key(right))
         if key in seen:
             continue
         seen.add(key)

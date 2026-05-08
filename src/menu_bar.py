@@ -156,6 +156,8 @@ from .autostart import is_launch_at_login_enabled, set_launch_at_login
 from .utils import (
     _term_str,
     build_initial_prompt,
+    canonical_term_key,
+    canonicalize_term,
     copy_to_clipboard,
     deduplicate_prompt_terms,
     get_config_path,
@@ -693,7 +695,7 @@ class ClickNSpeakApp(rumps.App):
                     # Preserve v5 dict metadata for terms already present; new terms
                     # that the user typed into the file become source="manual" entries.
                     existing_dicts = {
-                        _term_str(t).lower(): t
+                        canonical_term_key(_term_str(t)): t
                         for t in previous_terms
                         if isinstance(t, dict)
                     }
@@ -701,12 +703,15 @@ class ClickNSpeakApp(rumps.App):
                     now_iso = datetime.now(timezone.utc).isoformat()
                     new_terms_as_items = []
                     for ts in new_term_strings:
-                        lower = ts.lower()
+                        term = canonicalize_term(ts)
+                        if not term:
+                            continue
+                        lower = canonical_term_key(term)
                         if lower in existing_dicts:
                             new_terms_as_items.append(existing_dicts[lower])
                         else:
                             new_terms_as_items.append({
-                                "term": ts,
+                                "term": term,
                                 "source": "manual",
                                 "added_at": now_iso,
                                 "last_seen": now_iso,
@@ -2171,15 +2176,17 @@ class ClickNSpeakApp(rumps.App):
                 for item in rejected:
                     lang = item["lang"]
                     lang_skipped = dict(skipped_terms.get(lang, {}))
-                    lang_skipped[item["term"].lower()] = current_count
+                    key = canonical_term_key(item["term"])
+                    if key:
+                        lang_skipped[key] = current_count
                     skipped_terms[lang] = lang_skipped
                 self.config["skipped_terms"] = skipped_terms
 
             # Remove shown items from pending (items not yet shown remain pending).
-            shown_lower = {i["term"].lower() for i in accepted + rejected}
+            shown_lower = {canonical_term_key(i["term"]) for i in accepted + rejected}
             new_pending: dict[str, list[dict]] = {}
             for lang, items in pending.items():
-                remaining = [i for i in items if i["term"].lower() not in shown_lower]
+                remaining = [i for i in items if canonical_term_key(i["term"]) not in shown_lower]
                 if remaining:
                     new_pending[lang] = remaining
             self.config["pending_suggestions"] = new_pending

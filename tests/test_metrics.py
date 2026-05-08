@@ -84,6 +84,26 @@ def test_hit_rate_and_active_terms_health(tmp_path):
     assert out["inactive_terms_count"] == 1
 
 
+def test_hit_rate_matches_term_with_trailing_punctuation_in_dictionary(tmp_path):
+    dataset = tmp_path / "dataset.jsonl"
+    corrections = tmp_path / "corrections.json"
+    rows = [
+        {
+            "timestamp": "2026-05-07T12:00:00+00:00",
+            "raw_whisper": "github workflow",
+            "ai_edited": "github workflow",
+            "user_final": "github workflow",
+        }
+    ]
+    _write_jsonl(dataset, rows)
+    corrections.write_text(json.dumps({"replacement_pairs": {"latin": [], "cyrillic": []}}), encoding="utf-8")
+    cfg = _base_config()
+    cfg["user_terms"]["en"][0]["term"] = "GitHub."
+
+    out = compute_metrics(dataset, corrections, cfg, window_size=10)
+    assert out["hit_rate"] == 1.0
+
+
 def test_acceptance_rate_from_config():
     cfg = _base_config()
     dataset = Path("/tmp/does-not-exist.jsonl")

@@ -252,3 +252,18 @@ def test_no_double_count_on_punct_only_ai_edit(tmp_path):
     )
     out = update_corrections_index(dataset_path=dataset, index_path=index)
     assert out["inserted_terms"]["latin"].get("mlx", {}).get("count", 0) == 1
+
+
+def test_trailing_punctuation_uses_same_inserted_key(tmp_path):
+    dataset = tmp_path / "dataset.jsonl"
+    index = tmp_path / "corrections.json"
+    _write_jsonl(
+        dataset,
+        [
+            _base_record("2026-05-07T12:00:00+00:00", raw="hello", user="hello GitHub."),
+            _base_record("2026-05-07T12:01:00+00:00", raw="hello", user="hello GitHub"),
+        ],
+    )
+    out = update_corrections_index(dataset_path=dataset, index_path=index)
+    assert out["inserted_terms"]["latin"]["github"]["count"] == 2
+    assert out["inserted_terms"]["latin"]["github"]["term"] == "GitHub"

@@ -36,6 +36,8 @@ from .utils import (
     _term_str,
     apply_decay,
     build_initial_prompt,
+    canonical_term_key,
+    canonicalize_term,
     deduplicate_prompt_terms,
     get_allowed_languages,
     get_corrections_file_path,
@@ -92,19 +94,23 @@ def _apply_candidates_to_user_terms(config: dict, candidates: dict) -> None:
     user_terms = dict(config.get("user_terms") or {})
     for lang, items in candidates.items():
         current = list(user_terms.get(lang, []))
-        existing_lower = {_term_str(t).lower() for t in current}
+        existing_lower = {canonical_term_key(_term_str(t)) for t in current}
         for item in items:
-            if item["term"].lower() not in existing_lower:
+            clean_term = canonicalize_term(item["term"])
+            if not clean_term:
+                continue
+            term_key = canonical_term_key(clean_term)
+            if term_key not in existing_lower:
                 raw_source = item.get("source", "auto")
                 source = raw_source if raw_source in ("manual", "auto", "correction") else "auto"
                 current.append({
-                    "term": item["term"],
+                    "term": clean_term,
                     "source": source,
                     "added_at": now_iso,
                     "last_seen": now_iso,
                     "use_count": item.get("frequency_count", 0),
                 })
-                existing_lower.add(item["term"].lower())
+                existing_lower.add(term_key)
         user_terms[lang] = current
     config["user_terms"] = user_terms
 
@@ -120,21 +126,27 @@ def _merge_candidate_sources(
     for lang in all_langs:
         by_lower: dict[str, dict] = {}
         for item in correction_candidates.get(lang, []):
-            lower = item["term"].lower()
+            term = canonicalize_term(item["term"])
+            if not term:
+                continue
+            lower = canonical_term_key(term)
             by_lower[lower] = {
-                "term": item["term"],
+                "term": term,
                 "correction_count": int(item.get("correction_count", item.get("count", 0))),
                 "frequency_count": int(item.get("frequency_count", 0)),
                 "source": "correction",
             }
         for item in frequency_candidates.get(lang, []):
-            lower = item["term"].lower()
+            term = canonicalize_term(item["term"])
+            if not term:
+                continue
+            lower = canonical_term_key(term)
             if lower in by_lower:
                 by_lower[lower]["frequency_count"] = int(item.get("count", 0))
                 by_lower[lower]["source"] = "both"
             else:
                 by_lower[lower] = {
-                    "term": item["term"],
+                    "term": term,
                     "correction_count": 0,
                     "frequency_count": int(item.get("count", 0)),
                     "source": "frequency",
@@ -153,7 +165,7 @@ def _merge_candidate_sources(
                     "source": payload["source"],
                 }
             )
-        out.sort(key=lambda x: (-int(x["count"]), x["term"].lower()))
+        out.sort(key=lambda x: (-int(x["count"]), canonical_term_key(x["term"])))
         if out:
             merged[lang] = out[:max_per_lang]
     return merged
@@ -728,11 +740,11 @@ class SVoiceRecApp:
 
             existing: dict[str, set[str]] = {}
             for lang, terms in list((self.config.get("user_terms") or {}).items()):
-                existing.setdefault(lang, set()).update(_term_str(t).lower() for t in list(terms))
+                existing.setdefault(lang, set()).update(canonical_term_key(_term_str(t)) for t in list(terms))
 
             skipped_raw = self.config.get("skipped_terms") or {}
             skipped: dict[str, dict[str, int]] = {
-                lang: {t.lower(): cnt for t, cnt in terms.items()}
+                lang: {canonical_term_key(t): cnt for t, cnt in terms.items()}
                 for lang, terms in skipped_raw.items()
             }
 
@@ -792,11 +804,12 @@ class SVoiceRecApp:
                 else:
                     target = bucket if bucket in active_langs else primary_lang
                 existing_items = remapped.get(target, [])
-                seen_lower = {item["term"].lower() for item in existing_items}
+                seen_lower = {canonical_term_key(item["term"]) for item in existing_items}
                 for item in items:
-                    if item["term"].lower() not in seen_lower:
+                    key = canonical_term_key(item["term"])
+                    if key not in seen_lower:
                         existing_items.append(item)
-                        seen_lower.add(item["term"].lower())
+                        seen_lower.add(key)
                 remapped[target] = sorted(existing_items, key=lambda x: -x["count"])
             candidates = remapped
 
@@ -828,9 +841,16 @@ class SVoiceRecApp:
                     for lang in set(existing_pending) | set(candidates):
                         by_lower: dict[str, dict] = {}
                         for item in existing_pending.get(lang, []):
-                            by_lower[item["term"].lower()] = dict(item)
+                            key = canonical_term_key(item.get("term", ""))
+                            if key:
+                                existing_item = dict(item)
+                                existing_item["term"] = canonicalize_term(existing_item.get("term", ""))
+                                by_lower[key] = existing_item
                         for item in candidates.get(lang, []):
-                            lower = item["term"].lower()
+                            term = canonicalize_term(item.get("term", ""))
+                            if not term:
+                                continue
+                            lower = canonical_term_key(term)
                             if lower in by_lower:
                                 by_lower[lower]["count"] = max(by_lower[lower].get("count", 0), item["count"])
                                 by_lower[lower]["correction_count"] = max(
@@ -849,7 +869,9 @@ class SVoiceRecApp:
                                     else prev_source
                                 )
                             else:
-                                by_lower[lower] = dict(item)
+                                new_item = dict(item)
+                                new_item["term"] = term
+                                by_lower[lower] = new_item
                         merged[lang] = sorted(by_lower.values(), key=lambda x: -x.get("count", 0))
                     self.config["pending_suggestions"] = merged
                     save_config_to_disk(self.config)

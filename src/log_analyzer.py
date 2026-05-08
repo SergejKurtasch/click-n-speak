@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Callable, Iterable
 
 from .utils import (
+    canonical_term_key,
+    canonicalize_term,
     existing_terms_union_for_script,
     get_phrases_file_path,
     log_error,
@@ -224,8 +226,10 @@ def _collect_english_terms(
     for (_, text), sid in zip(records, session_ids):
         seen_lower_in_record: set[str] = set()
         for match in _TERM_PATTERN.finditer(text):
-            term = match.group(0)
-            lower = term.lower()
+            term = canonicalize_term(match.group(0))
+            if not term:
+                continue
+            lower = canonical_term_key(term)
             if lower in _TERM_STOPLIST or lower in blacklist:
                 continue
             if term.count("/") > 1 or term.count(".") > 1:
@@ -297,8 +301,10 @@ def _collect_raw_english_counts(
 
     for (_, text) in records:
         for match in _TERM_PATTERN.finditer(text):
-            term = match.group(0)
-            lower = term.lower()
+            term = canonicalize_term(match.group(0))
+            if not term:
+                continue
+            lower = canonical_term_key(term)
             if lower in _TERM_STOPLIST or lower in blacklist:
                 continue
             if term.count("/") > 1 or term.count(".") > 1:
@@ -382,7 +388,7 @@ def get_prompt_candidates(
     for term, count in latin_raw:
         if count < latin_min:
             continue  # sorted by score not count, so low-count items can appear anywhere
-        lower = term.lower()
+        lower = canonical_term_key(term)
         if lower in existing_latin:
             continue
         skipped_at = skipped_latin.get(lower, -1)
@@ -403,7 +409,7 @@ def get_prompt_candidates(
     ):
         if count < cyrillic_min:
             continue
-        lower = phrase.lower()
+        lower = canonical_term_key(phrase)
         if lower in existing_cyrillic:
             continue
         skipped_at = skipped_cyrillic.get(lower, -1)

@@ -7,6 +7,8 @@ from pathlib import Path
 from .dataset_logger import _DEFAULT_DATASET_PATH
 from .log_analyzer import RUS_FUNCTION_WORDS, TERM_STOPLIST, _whisper_token_count
 from .utils import (
+    canonical_term_key,
+    canonicalize_term,
     existing_terms_union_for_script,
     get_corrections_file_path,
     log_info,
@@ -51,9 +53,10 @@ def _lang_bucket(token: str) -> str | None:
 
 
 def _is_valid_term(token: str) -> bool:
+    token = canonicalize_term(token)
     if len(token) < 2:
         return False
-    lower = token.lower()
+    lower = canonical_term_key(token)
     if lower in TERM_STOPLIST or lower in RUS_FUNCTION_WORDS:
         return False
     if _DIGITS_ONLY_RE.match(token):
@@ -140,11 +143,12 @@ def _iter_new_records(dataset_path: Path, last_processed_ts: datetime | None) ->
 
 
 def _upsert_inserted(index: dict, token: str, ts: str, *, weight: float) -> None:
+    token = canonicalize_term(token)
     lang = _lang_bucket(token)
     if lang is None or not _is_valid_term(token):
         return
     bucket = index["inserted_terms"][lang]
-    key = token.lower()
+    key = canonical_term_key(token)
     existing = bucket.get(key)
     if not existing:
         bucket[key] = {
@@ -166,6 +170,10 @@ def _upsert_inserted(index: dict, token: str, ts: str, *, weight: float) -> None
 
 
 def _upsert_replacement_pair(index: dict, from_tokens: list[str], to_tokens: list[str], ts: str) -> None:
+    from_tokens = [canonicalize_term(t) for t in from_tokens]
+    to_tokens = [canonicalize_term(t) for t in to_tokens]
+    from_tokens = [t for t in from_tokens if t]
+    to_tokens = [t for t in to_tokens if t]
     if not from_tokens or not to_tokens:
         return
     if len(from_tokens) > 4 or len(to_tokens) > 4:
@@ -181,7 +189,9 @@ def _upsert_replacement_pair(index: dict, from_tokens: list[str], to_tokens: lis
     from_str = " ".join(from_tokens)
     pairs = index["replacement_pairs"][lang]
     for item in pairs:
-        if item.get("from", "").lower() == from_str.lower() and item.get("to", "").lower() == to_str.lower():
+        if canonical_term_key(item.get("from", "")) == canonical_term_key(from_str) and canonical_term_key(
+            item.get("to", "")
+        ) == canonical_term_key(to_str):
             item["count"] = int(item.get("count", 0)) + 1
             item["last_seen"] = ts
             return
@@ -269,9 +279,9 @@ def get_correction_candidates(
             count = int(payload.get("count", 0))
             if count < min_count:
                 continue
-            if lower in existing:
+            if canonical_term_key(lower) in existing:
                 continue
-            skipped_at = int(skipped.get(lower, -1))
+            skipped_at = int(skipped.get(canonical_term_key(lower), -1))
             if skipped_at >= 0 and current_phrase_count - skipped_at < cooldown_phrases:
                 continue
             seen_dt = _parse_iso(payload.get("last_seen"))
@@ -279,14 +289,14 @@ def get_correction_candidates(
                 continue
             items.append(
                 {
-                    "term": payload.get("term", lower),
+                    "term": canonicalize_term(payload.get("term", lower)),
                     "count": count,
                     "correction_count": count,
                     "frequency_count": 0,
                     "source": "correction",
                 }
             )
-        items.sort(key=lambda x: (-int(x.get("correction_count", 0)), x["term"].lower()))
+        items.sort(key=lambda x: (-int(x.get("correction_count", 0)), canonical_term_key(x["term"])))
         if items:
             result[lang] = items[:max_per_lang]
     return result

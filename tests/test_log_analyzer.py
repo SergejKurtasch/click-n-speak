@@ -184,6 +184,13 @@ class TestCollectEnglishTerms:
         terms = [t for t, _ in result]
         assert "123abc" not in terms
 
+    def test_trailing_punctuation_collapses_to_same_term(self):
+        records, sids = _records_with_sessions([(0, "GitHub."), (1, "GitHub")])
+        result = _collect_english_terms(records, sids)
+        terms = [t for t, _ in result]
+        assert "GitHub" in terms
+        assert "GitHub." not in terms
+
 
 # ---------------------------------------------------------------------------
 # _filter_near_duplicates
