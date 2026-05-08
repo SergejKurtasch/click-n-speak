@@ -163,6 +163,7 @@ from .utils import (
     get_menu_icon_path,
     get_menu_item_icon_path,
     get_menubar_icon_path,
+    get_metrics_history_path,
     get_primary_language,
     get_ui_strings,
     is_accessibility_trusted,
@@ -175,6 +176,7 @@ from .utils import (
     relaunch_app,
     save_config_to_disk,
     send_notification,
+    write_text_atomic,
 )
 
 
@@ -635,13 +637,23 @@ class ClickNSpeakApp(rumps.App):
 
     @rumps.timer(3600)
     def _decay_tick(self, _) -> None:
-        """Hourly timer: runs apply_decay() at most once per 24 h."""
+        """Hourly timer: runs daily maintenance tasks at most once per 24 h."""
         app = self.main_app
-        if app is not None and hasattr(app, "run_decay_if_due"):
+        if app is not None and hasattr(app, "run_daily_maintenance_if_due"):
             try:
-                app.run_decay_if_due()
+                app.run_daily_maintenance_if_due()
             except Exception as exc:
-                log_error(f"Decay tick failed: {exc}")
+                log_error(f"Daily maintenance tick failed: {exc}")
+
+    @rumps.timer(60)
+    def _flush_dirty_config_tick(self, _) -> None:
+        """Periodic flush of term-usage counters updated in the injection hot-path."""
+        app = self.main_app
+        if app is not None and hasattr(app, "flush_dirty_config_if_needed"):
+            try:
+                app.flush_dirty_config_if_needed()
+            except Exception as exc:
+                log_error(f"Flush dirty config tick failed: {exc}")
 
     @rumps.timer(1.0)
     def _watch_prompt_file(self, _):
@@ -665,7 +677,16 @@ class ClickNSpeakApp(rumps.App):
                     with prompt_path.open("r", encoding="utf-8") as f:
                         new_text = f.read().strip()
 
+                    # Guard against a partially-written file (e.g. crash during an
+                    # earlier non-atomic write): an empty file while terms exist in
+                    # config means the write never completed — skip this change.
                     user_terms = dict(self.config.get("user_terms") or {})
+                    if not new_text and user_terms.get(lang):
+                        log_info(
+                            f"_watch_prompt_file: ignoring empty {prompt_path.name} "
+                            f"(config has {len(user_terms[lang])} terms; likely corrupt write)"
+                        )
+                        continue
                     previous_terms = list(user_terms.get(lang, []))
                     new_term_strings = deduplicate_prompt_terms(parse_prompt_terms(new_text))
 
@@ -1006,6 +1027,7 @@ class ClickNSpeakApp(rumps.App):
         self._suggest_item = rumps.MenuItem("Review Suggestions", callback=self._on_review_suggestions)
         self._prompt_menu_item.add(self._suggest_item)
         self._prompt_menu_item.add(rumps.MenuItem("Manage Terms…", callback=self._on_manage_terms))
+        self._prompt_menu_item.add(rumps.MenuItem("Statistics…", callback=self._show_statistics_alert))
         self.menu.add(self._prompt_menu_item)
         self.update_suggest_menu_badge()
 
@@ -1691,9 +1713,8 @@ class ClickNSpeakApp(rumps.App):
         try:
             terms_list = user_terms.get(primary, [])
             prompt_path = self._get_prompt_path(primary)
-            with prompt_path.open("w", encoding="utf-8") as f:
-                f.write(", ".join(_term_str(t) for t in terms_list))
-        except Exception as e:
+            write_text_atomic(prompt_path, ", ".join(_term_str(t) for t in terms_list))
+        except OSError as e:
             log_error(f"Failed to write prompt file for {primary}: {e}")
 
     def _refresh_last_phrases_submenu(self) -> None:
@@ -1805,8 +1826,7 @@ class ClickNSpeakApp(rumps.App):
         terms_list = list(user_terms.get(lang, []))
         prompt_path = self._get_prompt_path(lang)
         try:
-            with prompt_path.open("w", encoding="utf-8") as f:
-                f.write(", ".join(_term_str(t) for t in terms_list))
+            write_text_atomic(prompt_path, ", ".join(_term_str(t) for t in terms_list))
             self._prompt_mtimes[lang] = prompt_path.stat().st_mtime
         except OSError as exc:
             log_error(f"Failed to sync prompt file for {lang}: {exc}")
@@ -1848,11 +1868,10 @@ class ClickNSpeakApp(rumps.App):
 
         prompt_path = self._get_prompt_path(lang)
         try:
-            with prompt_path.open("w", encoding="utf-8") as f:
-                f.write(", ".join(_term_str(t) for t in reverted_items))
+            write_text_atomic(prompt_path, ", ".join(_term_str(t) for t in reverted_items))
             self._prompt_mtimes[lang] = prompt_path.stat().st_mtime
-        except Exception:
-            pass
+        except OSError as exc:
+            log_error(f"Failed to write reverted prompt file for {lang}: {exc}")
 
         self.save_config()
         self.main_app.load_config_data(self.config)
@@ -1902,6 +1921,75 @@ class ClickNSpeakApp(rumps.App):
                 self._clear_inactive_terms()
         except Exception as exc:
             log_exception(f"_on_manage_terms failed: {exc}")
+
+    def _show_statistics_alert(self, _) -> None:
+        """Show compact dictionary/quality metrics in an NSAlert."""
+        try:
+            from AppKit import NSAlert
+
+            snapshot = None
+            app = self.main_app
+            if app is not None and hasattr(app, "get_metrics_snapshot"):
+                snapshot = app.get_metrics_snapshot(force=True)
+            if not snapshot:
+                self.main_app.notify("Statistics", "Недостаточно данных для метрик.")
+                return
+
+            def _fmt_pct(value: float | None) -> str:
+                if not isinstance(value, (int, float)):
+                    return "n/a"
+                return f"{value * 100:.1f}%"
+
+            def _fmt_delta(delta: float | None, positive_good: bool) -> str:
+                if not isinstance(delta, (int, float)):
+                    return "n/a"
+                sign = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+                quality = "good" if (delta > 0 and positive_good) or (delta < 0 and not positive_good) else "bad"
+                if abs(delta) < 1e-9:
+                    quality = "neutral"
+                return f"{sign} {delta * 100:+.1f}pp ({quality})"
+
+            edit = snapshot.get("edit_score_avg")
+            hit = snapshot.get("hit_rate")
+            edit_delta = (snapshot.get("edit_score_trend") or {}).get("delta")
+            hit_delta = (snapshot.get("hit_rate_trend") or {}).get("delta")
+
+            lines = [
+                f"Recent dictionary performance (last {snapshot.get('window_size', 100)} phrases)",
+                "",
+                f"Edit corrections per phrase    {_fmt_pct(edit)}   {_fmt_delta(edit_delta, positive_good=False)}",
+                f"Dictionary hit rate            {_fmt_pct(hit)}   {_fmt_delta(hit_delta, positive_good=True)}",
+                (
+                    "Active terms                   "
+                    f"{snapshot.get('active_terms_count', 0)} "
+                    f"({snapshot.get('manual_terms_count', 0)} manual / "
+                    f"{snapshot.get('auto_terms_count', 0)} auto / "
+                    f"{snapshot.get('correction_terms_count', 0)} correction)"
+                ),
+                (
+                    "Acceptance rate                "
+                    f"{_fmt_pct(snapshot.get('acceptance_rate'))} "
+                    f"(accepted={snapshot.get('accepted_total', 0)}, rejected={snapshot.get('rejected_total', 0)})"
+                ),
+                (
+                    "Prompt utilisation             "
+                    f"{_fmt_pct(snapshot.get('prompt_utilisation'))} "
+                    f"({snapshot.get('prompt_tokens_used', 0)} of {snapshot.get('prompt_tokens_max', 0)} tokens)"
+                ),
+                "",
+                f"Inactive terms ready to clean: {snapshot.get('inactive_terms_count', 0)}",
+            ]
+
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Statistics")
+            alert.setInformativeText_("\n".join(lines))
+            alert.addButtonWithTitle_("OK")
+            alert.addButtonWithTitle_("Open metrics history")
+            result = alert.runModal()
+            if result == 1001:
+                subprocess.run(["open", str(get_metrics_history_path())], check=False)
+        except Exception as exc:
+            log_exception(f"_show_statistics_alert failed: {exc}")
 
     def _clear_inactive_terms(self) -> None:
         """Permanently remove all inactive terms from user_terms."""

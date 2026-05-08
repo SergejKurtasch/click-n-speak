@@ -16,10 +16,15 @@ from AppKit import (
     NSRect,
     NSScreen,
     NSSize,
+    NSScrollView,
     NSTextField,
     NSTextAlignmentRight,
+    NSView,
+    NSViewHeightSizable,
+    NSViewWidthSizable,
     NSWindow,
     NSWindowStyleMaskClosable,
+    NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
 )
 from Foundation import NSObject
@@ -34,6 +39,8 @@ _ROW_H = 28
 _LABEL_H = 36
 _SHOW_MORE_BTN_H = 26
 _SELECT_ROW_H = 26
+_MIN_LIST_H = 140
+_MAX_SCREEN_H_RATIO = 0.85
 
 
 class _PanelDelegate(NSObject):
@@ -71,6 +78,13 @@ class _PanelDelegate(NSObject):
     def deselectAll_(self, sender):
         if self._owner:
             self._owner._do_deselect_all()
+
+
+class _FlippedView(NSView):
+    """Top-left coordinate system for predictable list rendering in scroll view."""
+
+    def isFlipped(self):
+        return True
 
 
 class SuggestionsPanel:
@@ -156,41 +170,43 @@ class SuggestionsPanel:
         n = min(self._visible_count, len(self._items))
         has_more = len(self._items) > self._visible_count
 
-        # Calculate window height (bottom → top):
-        # MARGIN | BTN(30) | MARGIN | [show_more(26) | GAP(8)] | rows(n×28) | GAP(8)
-        #        | select_row(26) | GAP(6) | label(36) | MARGIN
-        y = _MARGIN
-        btn_y = y
-        y += _BTN_H + _MARGIN
-
-        show_more_y = 0
-        if has_more:
-            show_more_y = y
-            y += _SHOW_MORE_BTN_H + 8
-
-        rows_start_y = y
-        y += n * _ROW_H + 8
-
-        select_row_y = y
-        y += _SELECT_ROW_H + 6
-
-        label_y = y
-        y += _LABEL_H + _MARGIN
-        window_h = y
-
         # Center on screen.
         screen = NSScreen.mainScreen()
         sf = screen.visibleFrame()
+
+        fixed_h = (
+            _MARGIN
+            + _BTN_H
+            + _MARGIN
+            + (_SHOW_MORE_BTN_H + 8 if has_more else 0)
+            + 8
+            + _SELECT_ROW_H
+            + 6
+            + _LABEL_H
+            + _MARGIN
+        )
+        desired_h = fixed_h + (n * _ROW_H)
+        max_h = max(_MIN_LIST_H + fixed_h, sf.size.height * _MAX_SCREEN_H_RATIO)
+        window_h = min(desired_h, max_h)
+        list_h = max(_MIN_LIST_H, window_h - fixed_h)
+
+        btn_y = _MARGIN
+        show_more_y = btn_y + _BTN_H + _MARGIN
+        list_y = show_more_y + (_SHOW_MORE_BTN_H + 8 if has_more else 0)
+        select_row_y = list_y + list_h + 8
+        label_y = select_row_y + _SELECT_ROW_H + 6
+
         wx = sf.origin.x + (sf.size.width - _WIN_W) / 2
         wy = sf.origin.y + (sf.size.height - window_h) / 2
 
         rect = NSRect(NSPoint(wx, wy), NSSize(_WIN_W, window_h))
-        mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+        mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
         self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, mask, NSBackingStoreBuffered, False
         )
         self._window.setTitle_("Новые термины для словаря")
         self._window.setReleasedWhenClosed_(False)
+        self._window.setMinSize_(NSSize(_WIN_W, fixed_h + _MIN_LIST_H))
 
         content = self._window.contentView()
 
@@ -214,28 +230,44 @@ class SuggestionsPanel:
         desel_btn.setAction_("deselectAll:")
         content.addSubview_(desel_btn)
 
-        # Checkboxes with count badges — restore saved states on rebuild
+        # Scrollable list area with checkboxes + count badges.
+        list_w = _WIN_W - 2 * _MARGIN
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSRect(NSPoint(_MARGIN, list_y), NSSize(list_w, list_h))
+        )
+        scroll.setHasVerticalScroller_(True)
+        scroll.setHasHorizontalScroller_(False)
+        scroll.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        scroll.setBorderType_(1)  # NSBezelBorder
+
+        doc_h = max(int(list_h), n * _ROW_H)
+        doc = _FlippedView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(list_w, doc_h)))
+
+        # Checkboxes with count badges — restore saved states on rebuild.
         for i, item in enumerate(self._items[:n]):
-            row_y = rows_start_y + i * _ROW_H
+            row_y = i * _ROW_H
             checkbox = NSButton.alloc().initWithFrame_(
-                NSRect(NSPoint(_MARGIN, row_y), NSSize(_WIN_W - 2 * _MARGIN - 90, _ROW_H - 4))
+                NSRect(NSPoint(8, row_y), NSSize(list_w - 95, _ROW_H - 4))
             )
             checkbox.setButtonType_(NSButtonTypeSwitch)
             checkbox.setTitle_(item["term"])
             checkbox.setFont_(NSFont.systemFontOfSize_(13.0))
             saved = self._checkbox_states.get(item["term"], True)
             checkbox.setState_(NSControlStateValueOn if saved else NSControlStateValueOff)
-            content.addSubview_(checkbox)
+            doc.addSubview_(checkbox)
             item["checkbox"] = checkbox
 
             badge = self._make_label(
                 f"{item['count']}× / {item['lang'].upper()}",
-                NSRect(NSPoint(_WIN_W - _MARGIN - 85, row_y), NSSize(80, _ROW_H - 4)),
+                NSRect(NSPoint(list_w - 85, row_y), NSSize(80, _ROW_H - 4)),
                 font_size=11.0,
                 secondary=True,
                 align_right=True,
             )
-            content.addSubview_(badge)
+            doc.addSubview_(badge)
+
+        scroll.setDocumentView_(doc)
+        content.addSubview_(scroll)
 
         # "Show more" button
         if has_more:

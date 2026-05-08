@@ -5,7 +5,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from .dataset_logger import _DEFAULT_DATASET_PATH
-from .log_analyzer import RUS_FUNCTION_WORDS, TERM_STOPLIST
+from .log_analyzer import RUS_FUNCTION_WORDS, TERM_STOPLIST, _whisper_token_count
 from .utils import (
     existing_terms_union_for_script,
     get_corrections_file_path,
@@ -18,6 +18,7 @@ _TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9+#._-]*")
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _DIGITS_ONLY_RE = re.compile(r"^\d+$")
+_PUNCT_STRIP_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _DEFAULT_INDEX_PATH = get_corrections_file_path()
 _SCHEMA_VERSION = 2
 
@@ -36,7 +37,7 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _norm_cmp(text: str) -> str:
-    return (text or "").strip().lower()
+    return " ".join(_PUNCT_STRIP_RE.sub("", (text or "").lower()).split())
 
 
 def _lang_bucket(token: str) -> str | None:
@@ -57,7 +58,14 @@ def _is_valid_term(token: str) -> bool:
         return False
     if _DIGITS_ONLY_RE.match(token):
         return False
-    return _lang_bucket(token) is not None
+    lang = _lang_bucket(token)
+    if lang is None:
+        return False
+    # Cyrillic words Whisper already handles perfectly (1–2 BPE tokens) add no
+    # value to the initial_prompt and mostly produce noise suggestions.
+    if lang == "cyrillic" and _whisper_token_count(token) < 3:
+        return False
+    return True
 
 
 def _default_index() -> dict:
@@ -233,23 +241,33 @@ def get_correction_candidates(
     existing_lower_by_lang: dict[str, set[str]],
     skipped_lower_by_lang: dict[str, dict[str, int]],
     current_phrase_count: int,
-    min_correction_count: int = 2,
+    min_correction_count: dict[str, int] | int = 2,
     cooldown_phrases: int = 100,
     max_per_lang: int = 20,
     max_age_days: int = 60,
 ) -> dict[str, list[dict]]:
-    """Build prompt candidates from the corrections index."""
+    """Build prompt candidates from the corrections index.
+
+    min_correction_count may be a dict {"latin": N, "cyrillic": M} for per-script
+    thresholds, or a single int applied to both scripts.
+    """
+    if isinstance(min_correction_count, dict):
+        min_by_script: dict[str, int] = min_correction_count
+    else:
+        min_by_script = {"latin": min_correction_count, "cyrillic": min_correction_count}
+
     result: dict[str, list[dict]] = {}
     now = datetime.now(UTC)
     age_limit = now - timedelta(days=max_age_days)
     for lang in ("latin", "cyrillic"):
+        min_count = int(min_by_script.get(lang, 2))
         existing = existing_terms_union_for_script(existing_lower_by_lang, lang)
         skipped = skipped_phrases_merge_for_script(skipped_lower_by_lang, lang)
         terms = index.get("inserted_terms", {}).get(lang, {})
         items: list[dict] = []
         for lower, payload in terms.items():
             count = int(payload.get("count", 0))
-            if count < min_correction_count:
+            if count < min_count:
                 continue
             if lower in existing:
                 continue
@@ -279,11 +297,17 @@ def has_fresh_strong_correction_signal(
     current_phrase_count: int,
     recent_phrase_window: int = 10,
     min_count: int = 2,
+    already_processed_rows: int = 0,
 ) -> bool:
-    """Check if any repeated inserted term was seen in the recent window."""
+    """Check if any repeated inserted term was seen in the recent window.
+
+    already_processed_rows: processed_rows value from the last fast-path trigger.
+    If the index has not grown since then, returns False (prevents re-triggering
+    on the same data).
+    """
     _ = current_phrase_count  # Reserved for future exact phrase-number tracking.
     latest_row = int(index.get("processed_rows", 0))
-    if latest_row <= 0:
+    if latest_row <= 0 or latest_row <= already_processed_rows:
         return False
     for lang in ("latin", "cyrillic"):
         for payload in index.get("inserted_terms", {}).get(lang, {}).values():

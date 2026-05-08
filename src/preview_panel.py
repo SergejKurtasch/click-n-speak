@@ -1,5 +1,7 @@
 import threading
 import time
+from collections.abc import Callable, Iterator
+from queue import Queue
 import objc
 from AppKit import (
     NSPanel,
@@ -23,10 +25,13 @@ from AppKit import (
     NSApplication,
     NSScrollView,
     NSTextView,
+    NSMenuItem,
     NSForegroundColorAttributeName,
     NSFontAttributeName,
+    NSEventModifierFlagCommand,
 )
 from Foundation import NSAttributedString
+from .log_analyzer import TERM_STOPLIST
 from .utils import get_menu_icon_path, log_exception, log_info
 
 class KeyablePanel(NSPanel):
@@ -59,10 +64,102 @@ class TextViewDelegate(NSObject):
             return True
         return False
 
+
+class DictionaryAwareTextView(NSTextView):
+    """NSTextView with Add-to-dictionary context menu item."""
+
+    def menuForEvent_(self, event):
+        menu = objc.super(DictionaryAwareTextView, self).menuForEvent_(event)
+        if menu is None:
+            return None
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Add to Dictionary",
+            "addToDictionary:",
+            "d",
+        )
+        item.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
+        item.setTarget_(self)
+        menu.insertItem_atIndex_(item, 0)
+        menu.insertItem_atIndex_(NSMenuItem.separatorItem(), 1)
+        return menu
+
+    @objc.typedSelector(b'v@:@')
+    def addToDictionary_(self, _sender):
+        panel_ref = getattr(self, "_panel_ref", None)
+        queue_ref = getattr(self, "_queue_ref", None)
+        if panel_ref is not None and queue_ref is not None:
+            panel_ref._add_selection_to_dictionary(queue_ref)
+
+
 _NSKeyDownMask = 1 << 10   # NSEventMaskKeyDown
 _KEY_RETURN  = 36
 _KEY_ENTER   = 76  # numpad Enter
 _KEY_ESCAPE  = 53
+
+
+def _is_term_start_char(char: str) -> bool:
+    return bool(char) and char.isalpha()
+
+
+def _is_term_char(char: str) -> bool:
+    return bool(char) and (char.isalnum() or char in "+#._-")
+
+
+def _iter_term_spans(text: str) -> Iterator[tuple[int, int]]:
+    """Yield [start, end) spans for term-like tokens in text."""
+    i = 0
+    n = len(text)
+    while i < n:
+        if not _is_term_start_char(text[i]):
+            i += 1
+            continue
+        start = i
+        i += 1
+        while i < n and _is_term_char(text[i]):
+            i += 1
+        yield start, i
+
+
+def _word_at_offset(text: str, offset: int) -> str:
+    """Return term-like token containing caret offset, or nearest token."""
+    if not text:
+        return ""
+    safe_offset = max(0, min(int(offset), len(text)))
+    best = ""
+    best_dist = None
+    for start, end in _iter_term_spans(text):
+        if start <= safe_offset < end:
+            return text[start:end]
+        if safe_offset == end and start < end:
+            return text[start:end]
+        if safe_offset < start:
+            dist = start - safe_offset
+        else:
+            dist = safe_offset - end
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best = text[start:end]
+    return best
+
+
+def _is_valid_term(word: str) -> bool:
+    candidate = " ".join((word or "").split()).strip()
+    if len(candidate) < 2 or len(candidate) > 30:
+        return False
+    if " " in candidate:
+        return False
+    if candidate.isdigit():
+        return False
+    if not any(ch.isalpha() for ch in candidate):
+        return False
+    if not _is_term_start_char(candidate[0]):
+        return False
+    if not all(_is_term_char(ch) for ch in candidate):
+        return False
+    if candidate.lower() in TERM_STOPLIST:
+        return False
+    return True
+
 
 class TranscriptionPreviewPanel:
     def __init__(self):
@@ -79,6 +176,11 @@ class TranscriptionPreviewPanel:
         # Prevents both confirm and cancel from firing for the same keypress
         # (e.g. local + global monitor both deliver the event simultaneously).
         self._handler_lock = threading.Lock()
+        self._on_add_to_dictionary = None
+        self._toast_added_template = "Added: {term}"
+        self._toast_invalid_term = "Not a valid term"
+        self._toast_exists = "Already in dictionary"
+        self._canonical_title: str = ""
 
     def _update_position(self, center=False):
         """Position the panel.
@@ -230,7 +332,7 @@ class TranscriptionPreviewPanel:
 
             content_size = self.scroll_view.contentSize()
             tv_rect = NSRect(NSPoint(0, 0), NSSize(content_size.width, content_size.height))
-            self.text_view = NSTextView.alloc().initWithFrame_(tv_rect)
+            self.text_view = DictionaryAwareTextView.alloc().initWithFrame_(tv_rect)
             self.text_view.setMinSize_(NSSize(content_size.width, content_size.height))
             self.text_view.setMaxSize_(NSSize(content_size.width, 1e7))
             self.text_view.setVerticallyResizable_(True)
@@ -311,7 +413,78 @@ class TranscriptionPreviewPanel:
             NSEvent.removeMonitor_(self._global_monitor)
             self._global_monitor = None
 
-    def show_interactive(self, text, queue, on_confirm, on_cancel=None, title="Редактируй и нажми Enter"):
+    def _flash_toast(self, queue: Queue, message: str, duration: float = 1.5) -> None:
+        if not self.title_field:
+            return
+
+        canonical = self._canonical_title
+
+        def _apply_toast():
+            if not self.title_field:
+                return
+            self.title_field.setStringValue_(message)
+            self.title_field.setTextColor_(NSColor.systemGreenColor())
+
+        def _apply_restore():
+            if not self.title_field:
+                return
+            self.title_field.setStringValue_(canonical)
+            self.title_field.setTextColor_(NSColor.whiteColor())
+
+        queue.put((_apply_toast, (), {}))
+
+        def _restore_later():
+            time.sleep(duration)
+            queue.put((_apply_restore, (), {}))
+
+        threading.Thread(target=_restore_later, daemon=True).start()
+
+    def _add_selection_to_dictionary(self, queue: Queue) -> None:
+        if not self.text_view:
+            return
+
+        full_text = str(self.text_view.string() or "")
+        selected = self.text_view.selectedRange()
+        location = max(0, int(selected.location))
+        length = max(0, int(selected.length))
+
+        if length > 0 and location < len(full_text):
+            candidate = full_text[location: location + length].strip()
+        else:
+            candidate = _word_at_offset(full_text, location).strip()
+
+        if not _is_valid_term(candidate):
+            self._flash_toast(queue, self._toast_invalid_term)
+            return
+
+        if not self._on_add_to_dictionary:
+            self._flash_toast(queue, self._toast_invalid_term)
+            return
+
+        try:
+            added = bool(self._on_add_to_dictionary(candidate))
+        except Exception as e:
+            log_exception(f"[preview_panel] on_add_to_dictionary error: {e}")
+            self._flash_toast(queue, self._toast_invalid_term)
+            return
+
+        if added:
+            self._flash_toast(queue, self._toast_added_template.format(term=candidate))
+        else:
+            self._flash_toast(queue, self._toast_exists)
+
+    def show_interactive(
+        self,
+        text: str,
+        queue: Queue,
+        on_confirm: Callable[[str], None],
+        on_cancel: Callable[[], None] | None = None,
+        title: str = "Редактируй и нажми Enter",
+        on_add_to_dictionary: Callable[[str], bool] | None = None,
+        toast_added_template: str = "Added: {term}",
+        toast_invalid_term: str = "Not a valid term",
+        toast_exists: str = "Already in dictionary",
+    ) -> None:
         """Shows the panel in interactive mode near the cursor."""
         def _handle_confirm(new_text):
             # _handler_lock ensures only one handler (confirm or cancel) runs to
@@ -363,7 +536,14 @@ class TranscriptionPreviewPanel:
                 self._update_position(center=False)
                 self._delegate.on_confirm = _handle_confirm
                 self._delegate.on_cancel = _handle_cancel
+                self._on_add_to_dictionary = on_add_to_dictionary
+                self._toast_added_template = toast_added_template
+                self._toast_invalid_term = toast_invalid_term
+                self._toast_exists = toast_exists
+                self.text_view._panel_ref = self
+                self.text_view._queue_ref = queue
 
+                self._canonical_title = title
                 self.title_field.setStringValue_(title)
                 self._set_text_view_text(text)
 
@@ -401,6 +581,11 @@ class TranscriptionPreviewPanel:
                     if kc == _KEY_ESCAPE:
                         _handle_cancel()
                         return None  # consume
+                    if int(event.modifierFlags()) & int(NSEventModifierFlagCommand):
+                        chars = str(event.charactersIgnoringModifiers() or "").lower()
+                        if chars == "d":
+                            self._add_selection_to_dictionary(queue)
+                            return None  # consume
                     return event
 
                 self._local_monitor = None

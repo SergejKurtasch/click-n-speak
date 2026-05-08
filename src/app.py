@@ -16,19 +16,30 @@ except ImportError:
     NSRunningApplication = None
 
 from .dataset_logger import append_to_dataset
-from .ai_editor import AiEditor, DEFAULT_MODEL_NAME, GeminiEditor, DEFAULT_GEMINI_MODEL
+from .dataset_logger import _DEFAULT_DATASET_PATH
+from .metrics import append_metrics_history, compute_metrics, load_metrics_history
+from .ai_editor import (
+    AiEditor,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_GEMINI_MODEL,
+    ExternalApiEditor,
+    GeminiEditor,
+)
 from .correction_analyzer import (
     has_fresh_strong_correction_signal,
     update_corrections_index,
     get_correction_candidates,
 )
 from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS, FileTranscriptionError
+from .vocab_provider import add_term_to_user_terms, collect_known_terms, collect_misrecognitions
 from .utils import (
     _term_str,
     apply_decay,
     build_initial_prompt,
     deduplicate_prompt_terms,
     get_allowed_languages,
+    get_corrections_file_path,
+    get_metrics_history_path,
     get_language_script,
     get_primary_language,
     get_ui_strings,
@@ -91,7 +102,7 @@ def _apply_candidates_to_user_terms(config: dict, candidates: dict) -> None:
                     "source": source,
                     "added_at": now_iso,
                     "last_seen": now_iso,
-                    "use_count": item.get("count", 0),
+                    "use_count": item.get("frequency_count", 0),
                 })
                 existing_lower.add(item["term"].lower())
         user_terms[lang] = current
@@ -231,6 +242,10 @@ class SVoiceRecApp:
         # Dirty flag: True when update_term_usage() bumped counters but config
         # has not been flushed to disk yet. Cleared on next save_config_to_disk call.
         self._config_usage_dirty: bool = False
+        self._latest_metrics_snapshot: dict | None = None
+        # Last processed_rows value of corrections index when fast-path analysis fired.
+        # Fast-path only triggers again when the index has new rows (P4 cooldown).
+        self._last_fast_path_processed_rows: int = 0
 
     def _ensure_preview_panel(self):
         if self._preview_panel is None:
@@ -385,6 +400,9 @@ class SVoiceRecApp:
         data = migrate_config_to_v4(data)
         data = migrate_config_to_v5(data)
         self.config = data
+        self.config.setdefault("last_metrics_snapshot_ts", None)
+        self.config.setdefault("notify_on_metrics", True)
+        self.config.setdefault("last_metrics_notification_ts", None)
         # Invalidate the cached prompt so process_chunk() rebuilds it on the next chunk.
         if hasattr(self, "_initial_prompt_dirty"):
             self._initial_prompt_dirty = True
@@ -512,6 +530,7 @@ class SVoiceRecApp:
         log_info("Finish cleanup done. Ready for next recording session.")
         self._completed_sessions += 1
         if self._completed_sessions % TRANSCRIBER_RESTART_AFTER_SESSIONS == 0:
+            self.flush_dirty_config_if_needed()
             threading.Thread(target=self._restart_transcriber_for_memory, daemon=True).start()
 
     def _do_error_cleanup(self) -> None:
@@ -552,8 +571,7 @@ class SVoiceRecApp:
                     if user_text:
                         append_phrase(user_text)
                         log_info("_run_injection: phrase appended")
-                        if update_term_usage(self.config, user_text):
-                            self._config_usage_dirty = True
+                        self._submit_for_main_thread(self._apply_term_usage_on_main, user_text)
                         self._maybe_trigger_prompt_analysis()
                         mb = self.menu_bar
                         if mb is not None and hasattr(mb, "refresh_last_phrases_submenu"):
@@ -593,7 +611,28 @@ class SVoiceRecApp:
         def _on_cancel():
             log_info("User cancelled edit popup (Escape). Nothing injected.")
 
-        return _on_confirm, _on_cancel
+        def _on_add_to_dictionary(term: str) -> bool:
+            primary = get_primary_language(self.config)
+            additional = list(self.config.get("additional_languages") or [])
+            term_script = "cyrillic" if any(0x0400 <= ord(ch) <= 0x052F for ch in term) else "latin"
+            target_lang = target_lang_for_script_bucket(term_script, primary, additional)
+            added = add_term_to_user_terms(self.config, target_lang, term, source="manual")
+            if not added:
+                return False
+
+            self.config["initial_prompt"] = build_initial_prompt(self.config)
+            self._cached_initial_prompt = self.config["initial_prompt"]
+            self._initial_prompt_dirty = False
+            save_config_to_disk(self.config)
+            self._config_usage_dirty = False
+
+            mb = self.menu_bar
+            if mb is not None and hasattr(mb, "_sync_prompt_file"):
+                mb._sync_prompt_file(target_lang)
+            log_info(f"Added term to dictionary via popup: {term} -> {target_lang}")
+            return True
+
+        return _on_confirm, _on_cancel, _on_add_to_dictionary
 
     # ------------------------------------------------------------------
     # Automatic prompt analysis
@@ -612,14 +651,26 @@ class SVoiceRecApp:
         except Exception:
             return
         # Fast-path: if correction signal became strong recently, run analysis now.
+        # P3: pass the already-read index to _run_prompt_analysis to avoid a second call.
+        # P4: only fire when the index contains rows newer than the last fast-path trigger.
         try:
             corrections_index = update_corrections_index()
-            if has_fresh_strong_correction_signal(corrections_index, current_phrase_count=current):
+            if has_fresh_strong_correction_signal(
+                corrections_index,
+                current_phrase_count=current,
+                already_processed_rows=self._last_fast_path_processed_rows,
+            ):
                 if not self._analysis_lock.acquire(blocking=False):
                     return
+                self._last_fast_path_processed_rows = int(
+                    corrections_index.get("processed_rows", 0)
+                )
                 threading.Thread(
                     target=self._run_prompt_analysis,
-                    kwargs={"current_phrase_count": current},
+                    kwargs={
+                        "current_phrase_count": current,
+                        "corrections_index": corrections_index,
+                    },
                     daemon=True,
                 ).start()
                 return
@@ -660,12 +711,14 @@ class SVoiceRecApp:
         on_demand: bool = False,
         on_complete: Callable[[], None] | None = None,
         current_phrase_count: int | None = None,
+        corrections_index: dict | None = None,
     ) -> None:
         """Background thread: analyse phrase history, update user_terms or pending_suggestions.
 
         on_demand=True uses softer parameters and skips the interval counter update.
         on_complete is called on the main thread after analysis finishes (success or empty).
         current_phrase_count, if provided, avoids a redundant file scan (already done by caller).
+        corrections_index, if provided (fast-path), avoids a second update_corrections_index() call.
         """
         try:
             from .log_analyzer import get_prompt_candidates
@@ -674,8 +727,8 @@ class SVoiceRecApp:
             current_count = current_phrase_count if current_phrase_count is not None else count_phrases()
 
             existing: dict[str, set[str]] = {}
-            for lang, terms in (self.config.get("user_terms") or {}).items():
-                existing.setdefault(lang, set()).update(_term_str(t).lower() for t in terms)
+            for lang, terms in list((self.config.get("user_terms") or {}).items()):
+                existing.setdefault(lang, set()).update(_term_str(t).lower() for t in list(terms))
 
             skipped_raw = self.config.get("skipped_terms") or {}
             skipped: dict[str, dict[str, int]] = {
@@ -693,30 +746,30 @@ class SVoiceRecApp:
                 min_count_by_script = {"latin": 5, "cyrillic": 5}
             else:
                 lookback = int(self.config.get("auto_prompt_lookback", 300))
-                primary_min = int(self.config.get("auto_prompt_check_min_count_primary", 5))
-                additional_min = int(self.config.get("auto_prompt_check_min_count_additional", 8))
+                primary_min = int(self.config.get("auto_prompt_check_min_count_primary", 10))
+                additional_min = int(self.config.get("auto_prompt_check_min_count_additional", 5))
                 min_count_by_script = {
                     primary_script: primary_min,
                     non_primary_script: additional_min,
                 }
 
-            correction_index = update_corrections_index()
+            correction_index = corrections_index if corrections_index is not None else update_corrections_index()
             correction_candidates = get_correction_candidates(
                 correction_index,
                 existing_lower_by_lang=existing,
                 skipped_lower_by_lang=skipped,
                 current_phrase_count=current_count,
-                min_correction_count=2,
+                min_correction_count=min_count_by_script,
                 cooldown_phrases=150,
                 max_per_lang=15,
             )
 
-            non_primary_inserted = set(
-                correction_index.get("inserted_terms", {}).get(non_primary_script, {}).keys()
-            )
+            all_inserted: set[str] = set()
+            for script_terms in correction_index.get("inserted_terms", {}).values():
+                all_inserted.update(script_terms.keys())
 
             def _term_has_correction_signal(lower: str) -> bool:
-                return lower in non_primary_inserted
+                return lower in all_inserted
 
             frequency_candidates = get_prompt_candidates(
                 lookback=lookback,
@@ -752,60 +805,66 @@ class SVoiceRecApp:
             mode = self.config.get("prompt_update_mode", "suggest")
 
             if mode == "auto" and candidates:
-                _apply_candidates_to_user_terms(self.config, candidates)
-                self.config["initial_prompt"] = build_initial_prompt(self.config)
-                save_config_to_disk(self.config)
-                self._config_usage_dirty = False
-                # load_config_data and prompt-file sync must run on the main thread.
-                self._submit_for_main_thread(self.load_config_data, self.config)
-                mb = self.menu_bar
-                if mb is not None and hasattr(mb, "_sync_prompt_file"):
-                    for lang in candidates:
-                        self._submit_for_main_thread(mb._sync_prompt_file, lang)
-                total = sum(len(v) for v in candidates.values())
-                log_info(f"Auto-applied {total} prompt candidates to user_terms.")
+                def _commit_auto(candidates=candidates, on_complete=on_complete):
+                    _apply_candidates_to_user_terms(self.config, candidates)
+                    self.config["initial_prompt"] = build_initial_prompt(self.config)
+                    save_config_to_disk(self.config)
+                    self._config_usage_dirty = False
+                    self.load_config_data(self.config)
+                    mb = self.menu_bar
+                    if mb is not None and hasattr(mb, "_sync_prompt_file"):
+                        for lang in candidates:
+                            mb._sync_prompt_file(lang)
+                    total = sum(len(v) for v in candidates.values())
+                    log_info(f"Auto-applied {total} prompt candidates to user_terms.")
+                    if on_complete is not None:
+                        on_complete()
+                self._submit_for_main_thread(_commit_auto)
             elif mode == "suggest" and candidates:
-                # Merge with existing pending: update count for known terms, add new ones.
-                existing_pending = dict(self.config.get("pending_suggestions") or {})
-                merged: dict[str, list[dict]] = {}
-                for lang in set(existing_pending) | set(candidates):
-                    by_lower: dict[str, dict] = {}
-                    for item in existing_pending.get(lang, []):
-                        by_lower[item["term"].lower()] = dict(item)
-                    for item in candidates.get(lang, []):
-                        lower = item["term"].lower()
-                        if lower in by_lower:
-                            by_lower[lower]["count"] = max(by_lower[lower].get("count", 0), item["count"])
-                            by_lower[lower]["correction_count"] = max(
-                                by_lower[lower].get("correction_count", 0),
-                                item.get("correction_count", 0),
-                            )
-                            by_lower[lower]["frequency_count"] = max(
-                                by_lower[lower].get("frequency_count", 0),
-                                item.get("frequency_count", 0),
-                            )
-                            prev_source = by_lower[lower].get("source", "frequency")
-                            new_source = item.get("source", "frequency")
-                            by_lower[lower]["source"] = (
-                                "both"
-                                if prev_source != new_source
-                                else prev_source
-                            )
-                        else:
-                            by_lower[lower] = dict(item)
-                    merged[lang] = sorted(by_lower.values(), key=lambda x: -x.get("count", 0))
-                self.config["pending_suggestions"] = merged
-                save_config_to_disk(self.config)
-                self._config_usage_dirty = False
-                mb = self.menu_bar
-                if mb is not None and hasattr(mb, "update_suggest_menu_badge"):
-                    self._submit_for_main_thread(mb.update_suggest_menu_badge)
+                def _commit_suggest(candidates=candidates, on_complete=on_complete):
+                    # Merge with existing pending: update count for known terms, add new ones.
+                    existing_pending = dict(self.config.get("pending_suggestions") or {})
+                    merged: dict[str, list[dict]] = {}
+                    for lang in set(existing_pending) | set(candidates):
+                        by_lower: dict[str, dict] = {}
+                        for item in existing_pending.get(lang, []):
+                            by_lower[item["term"].lower()] = dict(item)
+                        for item in candidates.get(lang, []):
+                            lower = item["term"].lower()
+                            if lower in by_lower:
+                                by_lower[lower]["count"] = max(by_lower[lower].get("count", 0), item["count"])
+                                by_lower[lower]["correction_count"] = max(
+                                    by_lower[lower].get("correction_count", 0),
+                                    item.get("correction_count", 0),
+                                )
+                                by_lower[lower]["frequency_count"] = max(
+                                    by_lower[lower].get("frequency_count", 0),
+                                    item.get("frequency_count", 0),
+                                )
+                                prev_source = by_lower[lower].get("source", "frequency")
+                                new_source = item.get("source", "frequency")
+                                by_lower[lower]["source"] = (
+                                    "both"
+                                    if prev_source != new_source
+                                    else prev_source
+                                )
+                            else:
+                                by_lower[lower] = dict(item)
+                        merged[lang] = sorted(by_lower.values(), key=lambda x: -x.get("count", 0))
+                    self.config["pending_suggestions"] = merged
+                    save_config_to_disk(self.config)
+                    self._config_usage_dirty = False
+                    mb = self.menu_bar
+                    if mb is not None and hasattr(mb, "update_suggest_menu_badge"):
+                        mb.update_suggest_menu_badge()
+                    if on_complete is not None:
+                        on_complete()
+                self._submit_for_main_thread(_commit_suggest)
             else:
                 save_config_to_disk(self.config)
                 self._config_usage_dirty = False
-
-            if on_complete is not None:
-                self._submit_for_main_thread(on_complete)
+                if on_complete is not None:
+                    self._submit_for_main_thread(on_complete)
 
         except Exception as exc:
             log_exception(f"Prompt analysis failed: {exc}")
@@ -830,11 +889,114 @@ class SVoiceRecApp:
         self.config["last_decay_run_ts"] = now.isoformat()
         if n > 0:
             self.config["initial_prompt"] = build_initial_prompt(self.config)
+            self._cached_initial_prompt = self.config["initial_prompt"]
+            self._initial_prompt_dirty = False
             log_info(f"Decay: {n} stale term(s) deactivated.")
         save_config_to_disk(self.config)
         self._config_usage_dirty = False
         if n > 0:
             self.notify("Click-n-speak", f"{n} устаревших терминов деактивировано. Откройте «Manage Terms» для просмотра.")
+
+    def run_metrics_if_due(self, force: bool = False) -> dict | None:
+        """Compute and persist metrics snapshot at most once per 24 h."""
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        last_run = self.config.get("last_metrics_snapshot_ts")
+        if not force and last_run:
+            try:
+                elapsed = now - datetime.fromisoformat(last_run)
+                if elapsed < timedelta(hours=24):
+                    return self._latest_metrics_snapshot
+            except ValueError:
+                pass
+
+        snapshot = compute_metrics(
+            dataset_path=Path(_DEFAULT_DATASET_PATH),
+            corrections_path=get_corrections_file_path(),
+            config=self.config,
+            window_size=100,
+        )
+        self._maybe_notify_metrics_degradation(snapshot)
+        append_metrics_history(get_metrics_history_path(), snapshot)
+        self.config["last_metrics_snapshot_ts"] = now.isoformat()
+        self._latest_metrics_snapshot = snapshot
+        save_config_to_disk(self.config)
+        self._config_usage_dirty = False
+
+        edit_cur = snapshot.get("edit_score_avg")
+        edit_prev = snapshot.get("edit_score_prev_avg")
+        hit_cur = snapshot.get("hit_rate")
+        hit_prev = snapshot.get("hit_rate_prev")
+        active = snapshot.get("active_terms_count")
+        acceptance = snapshot.get("acceptance_rate")
+        if isinstance(edit_cur, (int, float)) and isinstance(edit_prev, (int, float)):
+            edit_part = f"edit={edit_cur:.3f} ({(edit_cur - edit_prev):+.3f})"
+        else:
+            edit_part = f"edit={edit_cur}"
+        if isinstance(hit_cur, (int, float)) and isinstance(hit_prev, (int, float)):
+            hit_part = f"hit={hit_cur:.3f} ({(hit_cur - hit_prev):+.3f})"
+        else:
+            hit_part = f"hit={hit_cur}"
+        log_info(f"Daily metrics: {edit_part} {hit_part} active={active}, acceptance={acceptance}")
+        return snapshot
+
+    def _maybe_notify_metrics_degradation(self, snapshot: dict) -> None:
+        """Monthly-throttled hint when edit-score degrades sharply."""
+        if not self.config.get("notify_on_metrics", True):
+            return
+        from datetime import datetime, timezone, timedelta
+
+        current = snapshot.get("edit_score_avg")
+        if not isinstance(current, (int, float)):
+            return
+        history = load_metrics_history(get_metrics_history_path())
+        cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+        quarter = []
+        for item in history:
+            ts = item.get("ts")
+            if not isinstance(ts, str):
+                continue
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if dt >= cutoff and isinstance(item.get("edit_score_avg"), (int, float)):
+                quarter.append(float(item["edit_score_avg"]))
+        if len(quarter) < 5:
+            return
+        baseline = min(quarter)
+        if baseline <= 0:
+            return
+        if current < baseline * 1.5:
+            return
+
+        last_notify = self.config.get("last_metrics_notification_ts")
+        if isinstance(last_notify, str):
+            try:
+                elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last_notify)
+                if elapsed < timedelta(days=30):
+                    return
+            except ValueError:
+                pass
+        send_notification(
+            "Click-n-speak",
+            "Dictionary may need attention.",
+            "Open Statistics for details.",
+        )
+        self.config["last_metrics_notification_ts"] = datetime.now(timezone.utc).isoformat()
+        save_config_to_disk(self.config)
+
+    def get_metrics_snapshot(self, force: bool = False) -> dict | None:
+        """Return cached metrics snapshot or compute one on demand."""
+        if force or self._latest_metrics_snapshot is None:
+            return self.run_metrics_if_due(force=True)
+        return self._latest_metrics_snapshot
+
+    def run_daily_maintenance_if_due(self) -> None:
+        """Run daily background maintenance tasks (decay + metrics)."""
+        self.run_decay_if_due()
+        threading.Thread(target=self.run_metrics_if_due, daemon=True).start()
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
@@ -1087,8 +1249,8 @@ class SVoiceRecApp:
                         )
                     )
                     if _active_editor is not None and self.config.get("ai_editor_enabled", False):
-                        is_gemini = isinstance(_active_editor, GeminiEditor)
-                        if not is_gemini and self._is_memory_pressure_high():
+                        is_external_api_editor = isinstance(_active_editor, ExternalApiEditor)
+                        if not is_external_api_editor and self._is_memory_pressure_high():
                             # Under memory pressure Qwen's GPU thread blocks and can't be
                             # interrupted cleanly, causing 8.5s + 2s stuck-thread delays.
                             # Skip refinement entirely and notify the user.
@@ -1100,10 +1262,21 @@ class SVoiceRecApp:
                             word_count = len(full_text.split())
                             if word_count <= 3:
                                 log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
-                            elif not is_gemini and self.ai_editor.is_hallucination(full_text):
+                            elif not is_external_api_editor and self.ai_editor.is_hallucination(full_text):
                                 log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
                             else:
-                                refined = _active_editor.refine(full_text, languages=get_allowed_languages(self.config))
+                                languages = get_allowed_languages(self.config)
+                                known_terms = None
+                                misrecognitions = None
+                                if is_external_api_editor:
+                                    known_terms = collect_known_terms(self.config, languages)
+                                    misrecognitions = collect_misrecognitions(languages)
+                                refined = _active_editor.refine(
+                                    full_text,
+                                    languages=languages,
+                                    known_terms=known_terms,
+                                    misrecognitions=misrecognitions,
+                                )
                                 # Always capture what the AI produced and its status so the
                                 # dataset record distinguishes "AI ran but unchanged" from
                                 # "AI was disabled / skipped / timed out".
@@ -1125,7 +1298,7 @@ class SVoiceRecApp:
                                 self._delayed_transcribing_timer = None
                     self._submit_for_main_thread(_cancel_delayed_timer)
 
-                    _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                    _on_confirm, _on_cancel, _on_add_to_dictionary = self._build_confirm_cancel_callbacks()
 
                     s_ui = get_ui_strings(get_primary_language(self.config))
                     log_info(
@@ -1146,7 +1319,11 @@ class SVoiceRecApp:
                                 self._main_thread_queue,
                                 on_confirm=_on_confirm,
                                 on_cancel=_on_cancel,
-                                title=s_ui["edit_confirm_title"],
+                                title=s_ui["popup_title_with_hotkey"],
+                                on_add_to_dictionary=_on_add_to_dictionary,
+                                toast_added_template=s_ui["toast_added"],
+                                toast_invalid_term=s_ui["toast_invalid_term"],
+                                toast_exists=s_ui["toast_exists"],
                             )
                             log_info("process_chunk: show_interactive queued on main thread")
                     elif self._preview_panel:
@@ -1175,7 +1352,7 @@ class SVoiceRecApp:
                                 f"process_chunk: appended buffered partials to popup, len={len(full_text)}"
                             )
                         else:
-                            _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                            _on_confirm, _on_cancel, _on_add_to_dictionary = self._build_confirm_cancel_callbacks()
                             self._append_to_popup = False
                             log_info(
                                 f"process_chunk: final chunk empty but {len(self.transcribed_parts)} "
@@ -1186,7 +1363,11 @@ class SVoiceRecApp:
                                 self._main_thread_queue,
                                 on_confirm=_on_confirm,
                                 on_cancel=_on_cancel,
-                                title=s_ui["edit_confirm_title"],
+                                title=s_ui["popup_title_with_hotkey"],
+                                on_add_to_dictionary=_on_add_to_dictionary,
+                                toast_added_template=s_ui["toast_added"],
+                                toast_invalid_term=s_ui["toast_invalid_term"],
+                                toast_exists=s_ui["toast_exists"],
                             )
                             log_info("process_chunk: show_interactive queued (final chunk empty, using buffered partials)")
         except Exception as e:
@@ -1323,14 +1504,18 @@ class SVoiceRecApp:
                             f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
                             f"buffered partial chunk(s). full_text_len={len(full_text)}"
                         )
-                        _on_confirm, _on_cancel = self._build_confirm_cancel_callbacks()
+                        _on_confirm, _on_cancel, _on_add_to_dictionary = self._build_confirm_cancel_callbacks()
                         self._append_to_popup = False
                         self._preview_panel.show_interactive(
                             full_text,
                             self._main_thread_queue,
                             on_confirm=_on_confirm,
                             on_cancel=_on_cancel,
-                            title=s_ui["edit_confirm_title"],
+                            title=s_ui["popup_title_with_hotkey"],
+                            on_add_to_dictionary=_on_add_to_dictionary,
+                            toast_added_template=s_ui["toast_added"],
+                            toast_invalid_term=s_ui["toast_invalid_term"],
+                            toast_exists=s_ui["toast_exists"],
                         )
                         log_info("Buffered finalization: show_interactive queued on main thread")
                     # Cleanup submitted here, AFTER show_interactive, so is_processing
@@ -1405,16 +1590,26 @@ class SVoiceRecApp:
 
             if text and self.config.get("ai_editor_enabled", False):
                 backend = self.config.get("ai_editor_backend", "local")
-                is_gemini = backend == "gemini"
+                is_gemini_backend = backend == "gemini"
                 active_editor = (
                     self.gemini_editor
-                    if is_gemini and self.gemini_editor and self.gemini_editor.is_ready()
+                    if is_gemini_backend and self.gemini_editor and self.gemini_editor.is_ready()
                     else self.ai_editor
-                    if not is_gemini and self.ai_editor and self.ai_editor.is_ready()
+                    if not is_gemini_backend and self.ai_editor and self.ai_editor.is_ready()
                     else None
                 )
                 if active_editor is not None:
-                    text = active_editor.refine_file_text(text, languages=allowed_languages)
+                    known_terms = None
+                    misrecognitions = None
+                    if isinstance(active_editor, ExternalApiEditor):
+                        known_terms = collect_known_terms(self.config, allowed_languages)
+                        misrecognitions = collect_misrecognitions(allowed_languages)
+                    text = active_editor.refine_file_text(
+                        text,
+                        languages=allowed_languages,
+                        known_terms=known_terms,
+                        misrecognitions=misrecognitions,
+                    )
 
             if text:
                 log_info(f"File transcription successful, {len(text)} chars.")
@@ -1456,7 +1651,21 @@ class SVoiceRecApp:
 
         self._submit_for_main_thread(self._do_finish_cleanup)
 
+    def flush_dirty_config_if_needed(self) -> None:
+        """Persist term-usage counters if they were updated since the last save."""
+        if self._config_usage_dirty:
+            save_config_to_disk(self.config)
+            self._config_usage_dirty = False
+
+    def _apply_term_usage_on_main(self, phrase: str) -> None:
+        """Main-thread handler: update term-usage counters (owns user_terms)."""
+        if update_term_usage(self.config, phrase):
+            self._config_usage_dirty = True
+
     def stop(self):
+        # Flush after any pending _apply_term_usage_on_main calls by posting
+        # to the same queue — FIFO ordering guarantees the flush runs last.
+        self._submit_for_main_thread(self.flush_dirty_config_if_needed)
         self.stop_worker.set()
 
         # Stop the audio stream first — otherwise the recorder callback keeps

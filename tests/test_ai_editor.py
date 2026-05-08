@@ -19,6 +19,7 @@ Integration smoke test (skipped if mlx-lm is missing):
 
 import sys
 import threading
+import tempfile
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -30,7 +31,14 @@ from unittest.mock import MagicMock, patch
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.ai_editor import AiEditor, _REFINE_TIMEOUT_SECONDS
+from src.ai_editor import (
+    AiEditor,
+    ExternalApiEditor,
+    _REFINE_TIMEOUT_SECONDS,
+    _build_api_editor_system_prompt,
+    _build_system_prompt,
+)
+from src.vocab_provider import collect_known_terms, collect_misrecognitions
 
 
 class TestAiEditorFallbacks(unittest.TestCase):
@@ -179,6 +187,111 @@ class TestAiEditorFallbacks(unittest.TestCase):
         finally:
             editor._lock.release()
 
+
+class _DummyApiEditor(ExternalApiEditor):
+    def __init__(self):
+        super().__init__(model_name="dummy/model")
+
+    def load(self) -> None:
+        self._ready = True
+
+    def is_ready(self) -> bool:
+        return self._ready
+
+    def refine(self, text: str, languages=None, known_terms=None, misrecognitions=None) -> str:
+        _ = self._get_system_prompt(languages, known_terms, misrecognitions)
+        return text
+
+    def refine_file_text(self, text: str, languages=None, known_terms=None, misrecognitions=None) -> str:
+        _ = self._get_system_prompt(languages, known_terms, misrecognitions)
+        return text
+
+
+class TestExternalApiEditorPrompts(unittest.TestCase):
+    def test_api_prompt_without_dict_matches_base_prompt(self):
+        self.assertEqual(
+            _build_api_editor_system_prompt(["ru", "en"]),
+            _build_system_prompt(["ru", "en"]),
+        )
+
+    def test_api_prompt_with_known_terms(self):
+        prompt = _build_api_editor_system_prompt(["en"], known_terms=["GitHub", "PCA"])
+        self.assertIn("KNOWN TERMS", prompt)
+        self.assertIn("GitHub, PCA", prompt)
+
+    def test_api_prompt_with_misrecognitions(self):
+        prompt = _build_api_editor_system_prompt(
+            ["en"], misrecognitions=[("git hub", "GitHub"), ("piton", "Python")]
+        )
+        self.assertIn("COMMON MISRECOGNITIONS", prompt)
+        self.assertIn('"git hub" -> "GitHub"', prompt)
+        self.assertIn('"piton" -> "Python"', prompt)
+
+    def test_external_api_editor_cannot_be_instantiated(self):
+        with self.assertRaises(TypeError):
+            ExternalApiEditor("model")  # type: ignore[abstract]
+
+    def test_prompt_cache_reused_for_same_inputs(self):
+        editor = _DummyApiEditor()
+        with patch("src.ai_editor._build_api_editor_system_prompt", wraps=_build_api_editor_system_prompt) as mocked:
+            editor._get_system_prompt(["en"], ["GitHub"], [("piton", "Python")])
+            editor._get_system_prompt(["en"], ["GitHub"], [("piton", "Python")])
+            self.assertEqual(mocked.call_count, 1)
+
+    def test_prompt_cache_invalidates_when_inputs_change(self):
+        editor = _DummyApiEditor()
+        with patch("src.ai_editor._build_api_editor_system_prompt", wraps=_build_api_editor_system_prompt) as mocked:
+            editor._get_system_prompt(["en"], ["GitHub"], [("piton", "Python")])
+            editor._get_system_prompt(["en"], ["GitHub", "MLX"], [("piton", "Python")])
+            self.assertEqual(mocked.call_count, 2)
+
+    def test_qwen_path_accepts_interface_args_without_dictionary_effect(self):
+        editor = AiEditor(model_name="fake/model")
+        editor._ready = True
+        editor._model = MagicMock()
+        editor._tokenizer = MagicMock()
+        editor._call_llm = lambda text, **kwargs: "Qwen output"
+        result = editor.refine(
+            "input text",
+            languages=["en"],
+            known_terms=["GitHub"],
+            misrecognitions=[("piton", "Python")],
+        )
+        self.assertEqual(result, "Qwen output")
+
+
+class TestVocabProvider(unittest.TestCase):
+    def test_known_terms_capped_at_50_with_priority(self):
+        manual = [{"term": f"Manual{i}", "source": "manual", "use_count": 1} for i in range(30)]
+        auto = [{"term": f"Auto{i}", "source": "auto", "use_count": 100 - i} for i in range(80)]
+        config = {"primary_language": "en", "user_terms": {"en": manual + auto}}
+        terms = collect_known_terms(config, ["en"])
+        self.assertEqual(len(terms), 50)
+        self.assertTrue(all(term.startswith("Manual") for term in terms[:30]))
+
+    def test_term_sanitization(self):
+        config = {
+            "primary_language": "en",
+            "user_terms": {"en": [{"term": "Git\n\"Hub\"", "source": "manual", "use_count": 1}]},
+        }
+        terms = collect_known_terms(config, ["en"])
+        self.assertEqual(terms, ["Git 'Hub'"])
+
+    def test_misrecognitions_capped_at_30_and_min_count(self):
+        pairs = [
+            {"from": f"old {i}", "to": f"new {i}", "count": 3 + (40 - i)}
+            for i in range(40)
+        ]
+        index_payload = {"replacement_pairs": {"latin": pairs, "cyrillic": []}}
+        with tempfile.TemporaryDirectory() as tmp:
+            idx_path = os.path.join(tmp, "corrections.json")
+            with open(idx_path, "w", encoding="utf-8") as f:
+                import json
+
+                json.dump(index_payload, f)
+            with patch("src.vocab_provider.get_corrections_file_path", return_value=__import__("pathlib").Path(idx_path)):
+                result = collect_misrecognitions(["en"])
+        self.assertEqual(len(result), 30)
 
 # ---------------------------------------------------------------------------
 # Integration smoke-test (only runs if mlx-lm is installed)

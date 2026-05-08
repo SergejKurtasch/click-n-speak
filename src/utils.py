@@ -173,6 +173,15 @@ def get_corrections_file_path() -> Path:
     return support_dir / "corrections.json"
 
 
+def get_metrics_history_path() -> Path:
+    """Return path to metrics_history.jsonl (dev root or Application Support)."""
+    if not _get_app_bundle():
+        return ROOT / "metrics_history.jsonl"
+    support_dir = APPLICATION_SUPPORT_DIR
+    support_dir.mkdir(parents=True, exist_ok=True)
+    return support_dir / "metrics_history.jsonl"
+
+
 # UI strings for notifications and menu bar, keyed by primary language (ru, en, de, es, fr).
 # Fallback: en if key or lang missing.
 UI_STRINGS: dict[str, dict[str, str]] = {
@@ -199,6 +208,10 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "menu_recording": "● ЗАПИСЬ",
         "menu_processing": "● РАСПОЗН.",
         "edit_confirm_title": "Редактируй и нажми Enter",
+        "popup_title_with_hotkey": "Редактируй · Enter подтвердить · ⌘D добавить термин",
+        "toast_added": "Добавлено: {term}",
+        "toast_invalid_term": "Невалидный термин",
+        "toast_exists": "Уже в словаре",
     },
     "en": {
         "transcription_instruction": "Add punctuation. Capitalize sentences. ",
@@ -223,6 +236,10 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "menu_recording": "● RECORDING",
         "menu_processing": "● RECOGNIZING",
         "edit_confirm_title": "Edit and press Enter",
+        "popup_title_with_hotkey": "Edit · Enter to confirm · ⌘D to add term",
+        "toast_added": "Added: {term}",
+        "toast_invalid_term": "Not a valid term",
+        "toast_exists": "Already in dictionary",
     },
     "de": {
         "transcription_instruction": "Satzzeichen setzen. Sätze groß schreiben. ",
@@ -481,7 +498,32 @@ def write_json_atomic(path: Path, payload: object, *, indent: int | None = None)
                 f.flush()
                 os.fsync(f.fileno())
         except Exception:
-            os.close(fd)
+            raise
+        os.replace(tmp_path, path)
+    except OSError:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Atomically write *text* to *path* using temp file + os.replace + fsync."""
+    import tempfile
+
+    tmp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
             raise
         os.replace(tmp_path, path)
     except OSError:

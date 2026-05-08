@@ -238,3 +238,17 @@ def test_atomic_write_failure_keeps_previous_file(tmp_path, monkeypatch):
     # File still contains valid JSON (previous snapshot, not partial content).
     data = json.loads(index.read_text(encoding="utf-8"))
     assert data["schema_version"] == 1
+
+
+def test_no_double_count_on_punct_only_ai_edit(tmp_path):
+    """When ai_edited differs from raw_whisper only in punctuation/casing, MLX is counted once."""
+    dataset = tmp_path / "dataset.jsonl"
+    index = tmp_path / "corrections.json"
+    # raw = "hello" (no punct), ai_edited = "Hello." (added capitalisation + period only)
+    # user added "MLX" — it should be counted once, not twice.
+    _write_jsonl(
+        dataset,
+        [_base_record("2026-05-07T12:00:00+00:00", raw="hello", ai="Hello.", user="Hello. MLX")],
+    )
+    out = update_corrections_index(dataset_path=dataset, index_path=index)
+    assert out["inserted_terms"]["latin"].get("mlx", {}).get("count", 0) == 1
