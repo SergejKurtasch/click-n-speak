@@ -353,6 +353,7 @@ class TestGetFrequentTerms:
 class TestLanguageScriptHelpers:
     def test_get_language_script(self):
         assert get_language_script("ru") == "cyrillic"
+        assert get_language_script("uk") == "cyrillic"
         assert get_language_script("ua") == "cyrillic"
         assert get_language_script("de") == "latin"
         assert get_language_script("en") == "latin"

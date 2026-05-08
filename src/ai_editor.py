@@ -36,13 +36,13 @@ DEFAULT_MODEL_NAME = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 _LANG_NAMES: dict[str, str] = {
     "ru": "Russian", "en": "English", "de": "German", "fr": "French",
     "es": "Spanish", "it": "Italian", "zh": "Chinese", "ja": "Japanese",
-    "pt": "Portuguese", "nl": "Dutch", "pl": "Polish", "ua": "Ukrainian",
+    "pt": "Portuguese", "nl": "Dutch", "pl": "Polish", "uk": "Ukrainian",
     "tr": "Turkish", "ko": "Korean", "ar": "Arabic",
 }
 
 _FILLER_WORDS: dict[str, list[str]] = {
     "ru": ["э", "эм", "ну", "типа", "короче", "как бы", "значит", "вот", "это самое"],
-    "ua": ["е", "ем", "ну", "типу", "значить", "от", "це саме"],
+    "uk": ["е", "ем", "ну", "типу", "значить", "от", "це саме"],
     "en": ["uh", "um", "like", "you know", "so", "right", "basically", "I mean", "kind of", "sort of"],
     "de": ["äh", "ähm", "halt", "irgendwie", "sozusagen", "quasi", "also"],
     "fr": ["euh", "ben", "genre", "bref", "du coup", "voilà"],
@@ -917,7 +917,7 @@ class GeminiEditor(ExternalApiEditor):
           Unknown/mixed ≈ 2.5  (safe default)
         """
         CJK = {"zh", "ja", "ko"}
-        CYRILLIC = {"ru", "ua"}
+        CYRILLIC = {"ru", "uk"}
         langs = set(languages or [])
 
         if langs & CJK:

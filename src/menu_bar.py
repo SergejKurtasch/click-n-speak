@@ -173,6 +173,7 @@ from .utils import (
     log_error,
     log_exception,
     log_info,
+    normalize_lang_code,
     open_accessibility_settings,
     parse_prompt_terms,
     relaunch_app,
@@ -186,7 +187,7 @@ from .utils import (
 # Language Selection Panel (NSPanel — stays open across multiple clicks)
 # ---------------------------------------------------------------------------
 
-LANGS = ["ru", "en", "de", "es", "fr", "it", "pt", "nl", "pl", "ua", "tr", "zh", "ja", "ko", "ar"]
+LANGS = ["ru", "en", "de", "es", "fr", "it", "pt", "nl", "pl", "uk", "tr", "zh", "ja", "ko", "ar"]
 LANG_LABELS = {
     "ru": "RU — Russian",
     "en": "EN — English",
@@ -197,7 +198,7 @@ LANG_LABELS = {
     "pt": "PT — Portuguese",
     "nl": "NL — Dutch",
     "pl": "PL — Polish",
-    "ua": "UA — Ukrainian",
+    "uk": "UA — Ukrainian",
     "tr": "TR — Turkish",
     "zh": "ZH — Chinese",
     "ja": "JA — Japanese",
@@ -618,7 +619,13 @@ class ClickNSpeakApp(rumps.App):
         """Returns the absolute path to initial_prompt_{lang}.txt."""
         if not lang:
             lang = get_primary_language(self.config)
+        lang = normalize_lang_code(lang)
         return get_config_path().parent / f"initial_prompt_{lang}.txt"
+
+    @staticmethod
+    def _get_legacy_ua_prompt_path():
+        """Legacy fallback path kept for backward compatibility with old configs."""
+        return get_config_path().parent / "initial_prompt_ua.txt"
 
     @rumps.timer(0.3)
     def _drain_main_thread_queue(self, _):
@@ -666,17 +673,25 @@ class ClickNSpeakApp(rumps.App):
 
         for lang in all_langs:
             prompt_path = self._get_prompt_path(lang)
-            if not prompt_path.exists():
+            source_path = prompt_path
+            legacy_path = self._get_legacy_ua_prompt_path()
+            if (
+                normalize_lang_code(lang) == "uk"
+                and not prompt_path.exists()
+                and legacy_path.exists()
+            ):
+                source_path = legacy_path
+            if not source_path.exists():
                 continue
             try:
-                mtime = prompt_path.stat().st_mtime
+                mtime = source_path.stat().st_mtime
                 if self._prompt_mtimes.get(lang, 0.0) == 0.0:
                     self._prompt_mtimes[lang] = mtime
                     continue
 
                 if mtime > self._prompt_mtimes[lang]:
                     self._prompt_mtimes[lang] = mtime
-                    with prompt_path.open("r", encoding="utf-8") as f:
+                    with source_path.open("r", encoding="utf-8") as f:
                         new_text = f.read().strip()
 
                     # Guard against a partially-written file (e.g. crash during an
@@ -731,6 +746,9 @@ class ClickNSpeakApp(rumps.App):
 
                         self.save_config()
                         self.main_app.load_config_data(self.config)
+                        if source_path != prompt_path:
+                            # Legacy ua-file was edited; mirror content to canonical uk-file.
+                            self._sync_prompt_file(lang)
                         log_info(f"Initial prompt updated manually for {lang.upper()}.")
                         self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} обновлена!")
             except Exception as e:
@@ -1804,6 +1822,7 @@ class ClickNSpeakApp(rumps.App):
 
     def _edit_prompt_for_lang(self, lang: str) -> None:
         """Write user_terms[lang] to its .txt file and open it in the default editor."""
+        lang = normalize_lang_code(lang)
         self._sync_prompt_file(lang)
         prompt_path = str(self._get_prompt_path(lang))
         try:
@@ -1827,6 +1846,7 @@ class ClickNSpeakApp(rumps.App):
 
     def _sync_prompt_file(self, lang: str) -> None:
         """Write current user_terms[lang] to its .txt file and update the mtime tracker."""
+        lang = normalize_lang_code(lang)
         user_terms = self.config.get("user_terms") or {}
         terms_list = list(user_terms.get(lang, []))
         prompt_path = self._get_prompt_path(lang)
@@ -1842,6 +1862,7 @@ class ClickNSpeakApp(rumps.App):
 
     def _revert_for_lang(self, lang: str) -> None:
         """Swap user_terms[lang] with prompt_snapshots[lang] (one-step undo)."""
+        lang = normalize_lang_code(lang)
         snapshots = dict(self.config.get("prompt_snapshots", {}))
         prev_terms = snapshots.get(lang)
 

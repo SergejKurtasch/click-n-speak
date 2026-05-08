@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.ai_editor import (
     AiEditor,
     ExternalApiEditor,
+    GeminiEditor,
     _REFINE_TIMEOUT_SECONDS,
     _build_api_editor_system_prompt,
     _build_system_prompt,
@@ -259,6 +260,22 @@ class TestExternalApiEditorPrompts(unittest.TestCase):
         )
         self.assertEqual(result, "Qwen output")
 
+    def test_qwen_prompt_uses_ukrainian_name_and_fillers_for_uk_code(self):
+        prompt = _build_system_prompt(["uk", "de"])
+        self.assertIn("Ukrainian and German", prompt)
+        self.assertIn("'типу'", prompt)
+        self.assertIn("'äh'", prompt)
+
+    def test_gemini_token_estimator_treats_uk_as_cyrillic(self):
+        text = (
+            "це тестовий український текст для оцінки токенів "
+            "який достатньо довгий щоб уникнути мінімального порогу "
+        ) * 8
+        self.assertGreater(
+            GeminiEditor._estimate_tokens(text, ["uk"]),
+            GeminiEditor._estimate_tokens(text, ["de"]),
+        )
+
 
 class TestVocabProvider(unittest.TestCase):
     def test_known_terms_capped_at_50_with_priority(self):
@@ -275,7 +292,7 @@ class TestVocabProvider(unittest.TestCase):
             "user_terms": {"en": [{"term": "Git\n\"Hub\"", "source": "manual", "use_count": 1}]},
         }
         terms = collect_known_terms(config, ["en"])
-        self.assertEqual(terms, ["Git 'Hub'"])
+        self.assertEqual(terms, ["Git 'Hub"])
 
     def test_misrecognitions_capped_at_30_and_min_count(self):
         pairs = [

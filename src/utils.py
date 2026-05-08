@@ -321,11 +321,39 @@ def get_primary_language(config: dict) -> str:
     """Return the primary UI/recognition language from config (e.g. 'ru', 'en'). Default 'ru'."""
     primary = config.get("primary_language")
     if primary and isinstance(primary, str):
-        return str(primary).lower().strip()
+        return normalize_lang_code(primary)
     lang_list = config.get("languages")
     if isinstance(lang_list, list) and len(lang_list) > 0:
-        return str(lang_list[0]).lower().strip()
+        return normalize_lang_code(lang_list[0])
     return "ru"
+
+
+def normalize_lang_code(lang_code: str) -> str:
+    """Canonicalise language code for internal use.
+
+    The app historically used "ua" for Ukrainian in UI/config. Internally we
+    now use ISO 639-1 "uk" everywhere while keeping UI labels as "UA".
+    """
+    code = str(lang_code or "").lower().strip()
+    return "uk" if code == "ua" else code
+
+
+def _dedupe_lang_list(languages: list[str], *, primary: str | None = None) -> list[str]:
+    """Return language codes with stable order and no duplicates."""
+    out: list[str] = []
+    seen: set[str] = set()
+    primary_code = normalize_lang_code(primary) if primary else None
+    for lang in languages:
+        code = normalize_lang_code(lang)
+        if not code:
+            continue
+        if primary_code and code == primary_code:
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out
 
 
 def get_language_script(lang_code: str) -> str:
@@ -335,7 +363,7 @@ def get_language_script(lang_code: str) -> str:
     Cyrillic: ru, uk/ua, be, bg, mk, sr. Everything else is treated as latin.
     """
     cyrillic_langs = {"ru", "uk", "ua", "be", "bg", "mk", "sr"}
-    return "cyrillic" if str(lang_code).lower().strip() in cyrillic_langs else "latin"
+    return "cyrillic" if normalize_lang_code(lang_code) in cyrillic_langs else "latin"
 
 
 def target_lang_for_script_bucket(
@@ -387,14 +415,14 @@ def skipped_phrases_merge_for_script(
     return merged
 
 
-# Maps app-internal language codes to ISO 639-1 codes that Whisper recognises.
-# "ua" (country code) is used in the UI for Ukrainian; Whisper requires "uk".
+# Maps config language codes to Whisper ISO-639-1 codes.
+# Keep the legacy ua->uk alias for backward compatibility with old configs.
 _WHISPER_LANG_CODE: dict[str, str] = {"ua": "uk"}
 
 
 def get_allowed_languages(config: dict) -> list[str]:
     """Return the list of languages allowed for recognition: primary + additional (no duplicates)."""
-    primary = get_primary_language(config)
+    primary = normalize_lang_code(get_primary_language(config))
     additional = config.get("additional_languages")
     if not isinstance(additional, list):
         additional = []
@@ -402,11 +430,11 @@ def get_allowed_languages(config: dict) -> list[str]:
     if not additional:
         lang_list = config.get("languages")
         if isinstance(lang_list, list) and len(lang_list) > 1:
-            additional = [str(x).lower().strip() for x in lang_list[1:] if x]
+            additional = [normalize_lang_code(x) for x in lang_list[1:] if x]
+    additional = _dedupe_lang_list(additional, primary=primary)
     seen = {primary}
     result = [_WHISPER_LANG_CODE.get(primary, primary)]
-    for lang in additional:
-        code = str(lang).lower().strip()
+    for code in additional:
         if code and code not in seen:
             seen.add(code)
             result.append(_WHISPER_LANG_CODE.get(code, code))
@@ -551,7 +579,7 @@ LANG_PROMPTS: dict[str, str] = {
     "pt": "Texto em português.",
     "nl": "Nederlandse tekst.",
     "pl": "Tekst po polsku.",
-    "ua": "Українська мова.",
+    "uk": "Українська мова.",
     "tr": "Türkçe metin.",
     "zh": "中文文本。",
     "ja": "日本語テキスト。",
@@ -573,7 +601,7 @@ LANG_DEFAULT_CONTEXT: dict[str, str] = {
     "pt": "Esta é linguagem falada com vocabulário profissional e técnico.",
     "nl": "Dit is gesproken taal met professionele en technische woordenschat.",
     "pl": "To jest mowa potoczna z profesjonalnym słownictwem technicznym.",
-    "ua": "Це розмовна мова з використанням професійних термінів і абревіатур.",
+    "uk": "Це розмовна мова з використанням професійних термінів і абревіатур.",
     "tr": "Bu, profesyonel ve teknik kelime hazinesiyle konuşma dilidir.",
     "zh": "这是口语，使用专业和技术词汇。",
     "ja": "これは専門的・技術的な語彙を使った話し言葉です。",
@@ -928,6 +956,61 @@ def migrate_config_to_v5(config: dict) -> dict:
     config.setdefault("last_decay_run_ts", None)
     config.setdefault("max_dictionary_age_days", 60)
     config["initial_prompt"] = build_initial_prompt(config)
+    return config
+
+
+def normalize_ukrainian_lang_codes(config: dict) -> dict:
+    """Normalize legacy 'ua' codes to canonical internal 'uk'.
+
+    Applies to top-level language fields and language-keyed maps while preserving
+    data. Dictionary-like sections are merged deterministically when both `ua`
+    and `uk` entries exist.
+    """
+    primary = config.get("primary_language")
+    if isinstance(primary, str):
+        config["primary_language"] = normalize_lang_code(primary)
+
+    additional = config.get("additional_languages")
+    if isinstance(additional, list):
+        config["additional_languages"] = _dedupe_lang_list(additional, primary=config.get("primary_language"))
+
+    # Legacy v1 field support.
+    legacy_langs = config.get("languages")
+    if isinstance(legacy_langs, list):
+        config["languages"] = _dedupe_lang_list(legacy_langs)
+
+    def _merge_lang_lists(section: str) -> None:
+        raw = config.get(section)
+        if not isinstance(raw, dict):
+            return
+        merged: dict[str, list] = {}
+        for lang, values in raw.items():
+            if not isinstance(values, list):
+                continue
+            key = normalize_lang_code(lang)
+            current = list(merged.get(key, []))
+            merged[key] = deduplicate_prompt_terms(current + list(values))
+        config[section] = merged
+
+    _merge_lang_lists("user_terms")
+    _merge_lang_lists("pending_suggestions")
+    _merge_lang_lists("prompt_snapshots")
+
+    skipped_raw = config.get("skipped_terms")
+    if isinstance(skipped_raw, dict):
+        merged_skipped: dict[str, dict[str, int]] = {}
+        for lang, terms in skipped_raw.items():
+            if not isinstance(terms, dict):
+                continue
+            key = normalize_lang_code(lang)
+            bucket = merged_skipped.setdefault(key, {})
+            for term, cnt in terms.items():
+                canonical = canonical_term_key(term)
+                if not canonical:
+                    continue
+                bucket[canonical] = max(bucket.get(canonical, -1), int(cnt))
+        config["skipped_terms"] = merged_skipped
+
     return config
 
 
