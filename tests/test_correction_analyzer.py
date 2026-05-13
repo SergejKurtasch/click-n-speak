@@ -216,7 +216,7 @@ def test_migrate_v1_to_v2(tmp_path):
         encoding="utf-8",
     )
     out = update_corrections_index(dataset_path=dataset, index_path=index)
-    assert out["schema_version"] == 2
+    assert out["schema_version"] == 3
     assert out["inserted_terms"]["latin"]["pca"]["term"] == "PCA"
     assert "en" not in out["inserted_terms"]
     assert out["replacement_pairs"]["cyrillic"][0]["from"] == "питон"

@@ -3,6 +3,7 @@ import queue
 import subprocess
 import sys
 import threading
+from datetime import datetime, timezone
 
 import rumps
 
@@ -153,6 +154,9 @@ from .permissions import (
     open_microphone_settings,
 )
 from .autostart import is_launch_at_login_enabled, set_launch_at_login
+from .correction_analyzer import remove_replacement_pair_from_index
+from .replacements_panel import ReplacementsPanel
+from .vocab_provider import list_replacement_rows_for_ui, normalize_replacement_side
 from .utils import (
     _term_str,
     build_initial_prompt,
@@ -160,6 +164,7 @@ from .utils import (
     canonicalize_term,
     copy_to_clipboard,
     deduplicate_prompt_terms,
+    get_allowed_languages,
     get_config_path,
     get_log_file_path,
     get_menu_icon_path,
@@ -167,9 +172,7 @@ from .utils import (
     get_menubar_icon_path,
     get_metrics_history_path,
     get_primary_language,
-    get_ui_strings,
     is_accessibility_trusted,
-    LANG_PROMPTS,
     log_error,
     log_exception,
     log_info,
@@ -548,6 +551,49 @@ except Exception:
     _HAVE_MENU_DELEGATE = False
 
 
+try:
+    import objc as _objc_prompt_terms  # type: ignore
+    from AppKit import NSObject as _NSObjectPromptTerms  # type: ignore
+
+    class _PromptTermsPanelDelegate(_NSObjectPromptTerms):
+        """Save/Cancel targets + window close cleanup for the prompt-terms editor panel."""
+
+        _owner = None
+        _lang = None
+
+        @_objc_prompt_terms.python_method
+        def configure(self, owner: "ClickNSpeakApp", lang: str) -> "_PromptTermsPanelDelegate":
+            self._owner = owner
+            self._lang = lang
+            return self
+
+        def saveClicked_(self, sender) -> None:
+            owner = self._owner
+            lang = self._lang
+            if owner is not None and lang is not None:
+                owner._prompt_terms_editor_save(lang)
+
+        def cancelClicked_(self, sender) -> None:
+            owner = self._owner
+            if owner is not None:
+                owner._prompt_terms_editor_cancel()
+
+        def deleteInactiveClicked_(self, sender) -> None:
+            owner = self._owner
+            if owner is not None:
+                owner._prompt_terms_editor_delete_inactive()
+
+        def windowWillClose_(self, notification) -> None:
+            owner = self._owner
+            if owner is not None:
+                owner._prompt_terms_editor_closed()
+
+    _HAVE_PROMPT_TERMS_PANEL = True
+except Exception:
+    _PromptTermsPanelDelegate = None  # type: ignore
+    _HAVE_PROMPT_TERMS_PANEL = False
+
+
 def _prompt_restart(reason: str) -> None:
     """Show a modal asking the user to relaunch the app. Relaunches on OK."""
     try:
@@ -606,6 +652,12 @@ class ClickNSpeakApp(rumps.App):
         self._download_panel = None   # ModelDownloadPanel instance (at most one active)
         self._downloader = None       # ModelDownloader instance (at most one active)
         self._model_row_refs: dict[str, dict] = {}  # model_id → {ns_item, icon_view, label, trash_btn, delegate}
+        self._prompt_terms_panel = None
+        self._prompt_terms_text_view = None
+        self._prompt_terms_delegate = None
+        self._prompt_terms_stats_label = None
+        self._prompt_terms_delete_btn = None
+        self._replacements_panel: "ReplacementsPanel | None" = None
 
         # Build Menu
         self.setup_menu()
@@ -664,6 +716,69 @@ class ClickNSpeakApp(rumps.App):
             except Exception as exc:
                 log_error(f"Flush dirty config tick failed: {exc}")
 
+    def _merge_prompt_terms_text_for_lang(
+        self,
+        lang: str,
+        new_text: str,
+        *,
+        allow_empty: bool = False,
+    ) -> bool:
+        """Parse comma/newline term text into ``user_terms[lang]``. Returns True if config changed.
+
+        When ``allow_empty`` is False, an empty string while terms already exist is ignored
+        (guards against a truncated write when syncing from ``initial_prompt_*.txt``).
+        """
+        lang = normalize_lang_code(lang)
+        user_terms = dict(self.config.get("user_terms") or {})
+        previous_terms = list(user_terms.get(lang, []))
+        stripped = (new_text or "").strip()
+
+        if not stripped and previous_terms and not allow_empty:
+            log_info(
+                f"_merge_prompt_terms_text_for_lang: ignoring empty edit for {lang} "
+                f"({len(previous_terms)} terms in config; partial-write guard)"
+            )
+            return False
+
+        new_term_strings = deduplicate_prompt_terms(parse_prompt_terms(stripped))
+
+        existing_dicts = {
+            canonical_term_key(_term_str(t)): t
+            for t in previous_terms
+            if isinstance(t, dict)
+        }
+        now_iso = datetime.now(timezone.utc).isoformat()
+        new_terms_as_items = []
+        for ts in new_term_strings:
+            term = canonicalize_term(ts)
+            if not term:
+                continue
+            lower = canonical_term_key(term)
+            if lower in existing_dicts:
+                new_terms_as_items.append(existing_dicts[lower])
+            else:
+                new_terms_as_items.append({
+                    "term": term,
+                    "source": "manual",
+                    "added_at": now_iso,
+                    "last_seen": now_iso,
+                    "use_count": 0,
+                })
+
+        prev_strs = [_term_str(t) for t in previous_terms]
+        if prev_strs == new_term_strings:
+            return False
+
+        if previous_terms:
+            snapshots = dict(self.config.get("prompt_snapshots", {}))
+            snapshots[lang] = previous_terms
+            self.config["prompt_snapshots"] = snapshots
+
+        user_terms[lang] = new_terms_as_items
+        self.config["user_terms"] = user_terms
+        self.config["initial_prompt"] = build_initial_prompt(self.config)
+        return True
+
     @rumps.timer(1.0)
     def _watch_prompt_file(self, _):
         """Watches initial_prompt_{lang}.txt for all active languages; updates user_terms on change."""
@@ -704,46 +819,7 @@ class ClickNSpeakApp(rumps.App):
                             f"(config has {len(user_terms[lang])} terms; likely corrupt write)"
                         )
                         continue
-                    previous_terms = list(user_terms.get(lang, []))
-                    new_term_strings = deduplicate_prompt_terms(parse_prompt_terms(new_text))
-
-                    # Preserve v5 dict metadata for terms already present; new terms
-                    # that the user typed into the file become source="manual" entries.
-                    existing_dicts = {
-                        canonical_term_key(_term_str(t)): t
-                        for t in previous_terms
-                        if isinstance(t, dict)
-                    }
-                    from datetime import datetime, timezone
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    new_terms_as_items = []
-                    for ts in new_term_strings:
-                        term = canonicalize_term(ts)
-                        if not term:
-                            continue
-                        lower = canonical_term_key(term)
-                        if lower in existing_dicts:
-                            new_terms_as_items.append(existing_dicts[lower])
-                        else:
-                            new_terms_as_items.append({
-                                "term": term,
-                                "source": "manual",
-                                "added_at": now_iso,
-                                "last_seen": now_iso,
-                                "use_count": 0,
-                            })
-
-                    prev_strs = [_term_str(t) for t in previous_terms]
-                    if prev_strs != new_term_strings:
-                        if previous_terms:
-                            snapshots = dict(self.config.get("prompt_snapshots", {}))
-                            snapshots[lang] = previous_terms
-                            self.config["prompt_snapshots"] = snapshots
-
-                        user_terms[lang] = new_terms_as_items
-                        self.config["user_terms"] = user_terms
-                        self.config["initial_prompt"] = build_initial_prompt(self.config)
-
+                    if self._merge_prompt_terms_text_for_lang(lang, new_text, allow_empty=False):
                         self.save_config()
                         self.main_app.load_config_data(self.config)
                         if source_path != prompt_path:
@@ -1024,8 +1100,8 @@ class ClickNSpeakApp(rumps.App):
 
         # Initial Prompt submenu
         self._prompt_menu_item = rumps.MenuItem("Initial Prompt", **_icon("initial-prompt"))
-        self._prompt_menu_item.add(rumps.MenuItem("Edit Initial Prompt", callback=self.edit_initial_prompt))
-        self._prompt_menu_item.add(rumps.MenuItem("Revert Initial Prompt", callback=self.revert_initial_prompt))
+        self._prompt_menu_item.add(rumps.MenuItem("Edit Terms…", callback=self._on_manage_terms))
+        self._prompt_menu_item.add(rumps.MenuItem("Revert Terms…", callback=self.revert_initial_prompt))
         self._prompt_menu_item.add(None)
 
         # Auto-update Mode submenu (Suggest / Auto / Disabled)
@@ -1049,7 +1125,7 @@ class ClickNSpeakApp(rumps.App):
 
         self._suggest_item = rumps.MenuItem("Review Suggestions", callback=self._on_review_suggestions)
         self._prompt_menu_item.add(self._suggest_item)
-        self._prompt_menu_item.add(rumps.MenuItem("Manage Terms…", callback=self._on_manage_terms))
+        self._prompt_menu_item.add(rumps.MenuItem("Edit Replacements…", callback=self._on_edit_replacements))
         self._prompt_menu_item.add(rumps.MenuItem("Statistics…", callback=self._show_statistics_alert))
         self.menu.add(self._prompt_menu_item)
         self.update_suggest_menu_badge()
@@ -1573,7 +1649,7 @@ class ClickNSpeakApp(rumps.App):
         # If resuming a partial download, initialise the panel at the saved progress position.
         if initial_bytes > 0 and total_size > 0:
             panel.update_progress(initial_bytes, total_size)
-        log_info(f"_start_whisper_model_download: panel shown, starting downloader")
+        log_info("_start_whisper_model_download: panel shown, starting downloader")
         downloader.start(model_id, total_size, on_progress, on_done, on_error, on_cancelled)
         log_info(f"Whisper model download started internally: {model_id}")
 
@@ -1816,20 +1892,21 @@ class ClickNSpeakApp(rumps.App):
         self.menu.clear()
         self.setup_menu()
 
-    def edit_initial_prompt(self, _: rumps.MenuItem) -> None:
-        """Open primary-language user_terms in a text editor."""
-        self._edit_prompt_for_lang(get_primary_language(self.config))
+    def _schedule_prompt_terms_editor(self, lang: str) -> None:
+        """Show the terms editor on the main thread (never from an NSMenu tracking loop)."""
+        lang = normalize_lang_code(lang)
+        if hasattr(self.main_app, "_main_thread_queue"):
+            self.main_app._main_thread_queue.put_nowait((self._open_prompt_terms_editor, [lang], {}))
+        else:
+            self._open_prompt_terms_editor(lang)
 
-    def _edit_prompt_for_lang(self, lang: str) -> None:
-        """Write user_terms[lang] to its .txt file and open it in the default editor."""
+    def _edit_prompt_for_lang_external(self, lang: str) -> None:
+        """Write ``user_terms[lang]`` to its ``.txt`` file and open it in the default editor."""
         lang = normalize_lang_code(lang)
         self._sync_prompt_file(lang)
         prompt_path = str(self._get_prompt_path(lang))
         try:
             subprocess.run(["open", "-t", prompt_path], check=False)
-            # Raise the editor's window to front. Needed when the editor was already
-            # running: the new document window can open behind existing ones.
-            # AXRaise is called after a short delay to let the editor finish loading.
             applescript = (
                 "delay 0.8\n"
                 "tell application \"System Events\"\n"
@@ -1843,6 +1920,226 @@ class ClickNSpeakApp(rumps.App):
             subprocess.Popen(["osascript", "-e", applescript])
         except OSError as e:
             log_error(f"Failed to open initial prompt for {lang}: {e}")
+
+    def _open_prompt_terms_editor(self, lang: str) -> None:
+        """NSPanel with editable term list (same parsing as ``initial_prompt_{lang}.txt``)."""
+        if not _HAVE_PROMPT_TERMS_PANEL or _PromptTermsPanelDelegate is None:
+            log_error("Prompt terms panel unavailable — opening external editor.")
+            self._edit_prompt_for_lang_external(lang)
+            return
+
+        from Foundation import NSRect, NSPoint, NSSize  # type: ignore
+        from AppKit import (  # type: ignore
+            NSBackingStoreBuffered,
+            NSButton,
+            NSFont,
+            NSMakeRect,
+            NSPanel,
+            NSScrollView,
+            NSTextField,
+            NSTextView,
+            NSViewHeightSizable,
+            NSViewMaxYMargin,
+            NSViewMinYMargin,
+            NSViewWidthSizable,
+            NSWindowStyleMaskClosable,
+            NSWindowStyleMaskResizable,
+            NSWindowStyleMaskTitled,
+            NSScreen,
+            NSViewMaxXMargin,
+        )
+
+        lang = normalize_lang_code(lang)
+
+        if self._prompt_terms_panel is not None:
+            try:
+                self._prompt_terms_panel.close()
+            except Exception:
+                pass
+            self._prompt_terms_editor_closed()
+
+        user_terms = self.config.get("user_terms") or {}
+        terms_list = list(user_terms.get(lang, []))
+        initial_text = ", ".join(_term_str(t) for t in terms_list)
+        inactive_count = sum(1 for t in terms_list if isinstance(t, dict) and t.get("inactive"))
+
+        W, H = 520.0, 440.0
+        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(80.0, 80.0, W, H),
+            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable,
+            NSBackingStoreBuffered,
+            False,
+        )
+        panel.setTitle_(f"Whisper prompt terms — {lang.upper()}")
+
+        delegate = _PromptTermsPanelDelegate.alloc().init().configure(self, lang)
+        panel.setDelegate_(delegate)
+
+        content = panel.contentView()
+        bounds = content.bounds()
+        cw = bounds.size.width
+        ch = bounds.size.height
+
+        hint = NSTextField.wrappingLabelWithString_(
+            "Terms merged into the Whisper initial prompt for this language. "
+            "Separate with commas or new lines. "
+            "Inactive terms stay listed here but are omitted from Whisper until used again."
+        )
+        hint.setFrame_(NSMakeRect(12.0, ch - 12.0 - 52.0, cw - 24.0, 52.0))
+        hint.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
+        content.addSubview_(hint)
+
+        scroll_bottom = 70.0
+        scroll_top_gap = 12.0 + 52.0 + 8.0
+        scroll_h = max(120.0, ch - scroll_bottom - scroll_top_gap)
+        scroll_y = scroll_bottom
+        scroll_w = cw - 24.0
+
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(12.0, scroll_y, scroll_w, scroll_h)
+        )
+        scroll.setHasVerticalScroller_(True)
+        scroll.setHasHorizontalScroller_(False)
+        scroll.setAutohidesScrollers_(False)
+        scroll.setBorderType_(2)  # NSBezelBorder
+        scroll.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable | NSViewMaxYMargin)
+        content_size = scroll.contentSize()
+        tv_rect = NSRect(NSPoint(0, 0), NSSize(content_size.width, content_size.height))
+        text_view = NSTextView.alloc().initWithFrame_(tv_rect)
+        text_view.setMinSize_(NSSize(content_size.width, content_size.height))
+        text_view.setMaxSize_(NSSize(1e7, 1e7))
+        text_view.setVerticallyResizable_(True)
+        text_view.setHorizontallyResizable_(False)
+        text_view.textContainer().setWidthTracksTextView_(True)
+        text_view.textContainer().setContainerSize_(NSSize(content_size.width, 1e7))
+        text_view.setFont_(NSFont.monospacedSystemFontOfSize_weight_(13.0, 0.0))
+        text_view.setEditable_(True)
+        text_view.setSelectable_(True)
+        text_view.setRichText_(False)
+        text_view.setAutomaticQuoteSubstitutionEnabled_(False)
+        text_view.setAutomaticDashSubstitutionEnabled_(False)
+        text_view.setString_(initial_text)
+        scroll.setDocumentView_(text_view)
+        content.addSubview_(scroll)
+
+        btn_y = 10.0
+        btn_w = 88.0
+        btn_h = 28.0
+        cancel_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(cw - 12.0 - btn_w, btn_y, btn_w, btn_h)
+        )
+        cancel_btn.setTitle_("Cancel")
+        cancel_btn.setTarget_(delegate)
+        cancel_btn.setAction_("cancelClicked:")
+        cancel_btn.setAutoresizingMask_(NSViewMinYMargin | NSViewMaxXMargin)
+        content.addSubview_(cancel_btn)
+
+        save_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(cw - 12.0 - btn_w - 8.0 - btn_w, btn_y, btn_w, btn_h)
+        )
+        save_btn.setTitle_("Save")
+        save_btn.setKeyEquivalent_("\r")
+        save_btn.setTarget_(delegate)
+        save_btn.setAction_("saveClicked:")
+        save_btn.setAutoresizingMask_(NSViewMinYMargin | NSViewMaxXMargin)
+        content.addSubview_(save_btn)
+
+        del_btn_w = 140.0
+        delete_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(12.0, btn_y, del_btn_w, btn_h)
+        )
+        delete_btn.setTitle_("Delete Inactive")
+        delete_btn.setTarget_(delegate)
+        delete_btn.setAction_("deleteInactiveClicked:")
+        delete_btn.setAutoresizingMask_(NSViewMinYMargin | NSViewMaxXMargin)
+        delete_btn.setHidden_(inactive_count == 0)
+        content.addSubview_(delete_btn)
+
+        stats_label = NSTextField.labelWithString_(self._terms_stats_text(lang))
+        stats_label.setFrame_(NSMakeRect(12.0, btn_y + btn_h + 4.0, cw - 24.0, 18.0))
+        stats_label.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
+        from AppKit import NSFont as _NSFont  # type: ignore
+        stats_label.setFont_(_NSFont.systemFontOfSize_(11.0))
+        content.addSubview_(stats_label)
+
+        vf = NSScreen.mainScreen().visibleFrame()
+        pf = panel.frame()
+        cx = vf.origin.x + max(0.0, (vf.size.width - pf.size.width) / 2.0)
+        cy = vf.origin.y + max(0.0, (vf.size.height - pf.size.height) / 2.0)
+        panel.setFrameOrigin_((cx, cy))
+
+        self._prompt_terms_panel = panel
+        self._prompt_terms_text_view = text_view
+        self._prompt_terms_delegate = delegate
+        self._prompt_terms_stats_label = stats_label
+        self._prompt_terms_delete_btn = delete_btn
+        panel.orderFrontRegardless()
+
+    def _prompt_terms_editor_save(self, lang: str) -> None:
+        tv = self._prompt_terms_text_view
+        if tv is None:
+            return
+        raw = tv.string()
+        if not isinstance(raw, str):
+            raw = str(raw)
+        lang = normalize_lang_code(lang)
+        changed = self._merge_prompt_terms_text_for_lang(lang, raw, allow_empty=True)
+        if changed:
+            self.save_config()
+            self.main_app.load_config_data(self.config)
+            log_info(f"Initial prompt terms updated from in-app editor for {lang.upper()}.")
+            self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} обновлена.")
+        self._sync_prompt_file(lang)
+        prompt_path = self._get_prompt_path(lang)
+        try:
+            self._prompt_mtimes[lang] = prompt_path.stat().st_mtime
+        except OSError:
+            pass
+        if self._prompt_terms_panel is not None:
+            self._prompt_terms_panel.close()
+
+    def _prompt_terms_editor_cancel(self) -> None:
+        if self._prompt_terms_panel is not None:
+            self._prompt_terms_panel.close()
+
+    def _prompt_terms_editor_delete_inactive(self) -> None:
+        lang = self._prompt_terms_delegate._lang if self._prompt_terms_delegate else None
+        if not lang:
+            return
+        self._clear_inactive_terms()
+        lang_norm = normalize_lang_code(lang)
+        if self._prompt_terms_text_view is not None:
+            user_terms = self.config.get("user_terms") or {}
+            terms_list = list(user_terms.get(lang_norm, []))
+            self._prompt_terms_text_view.setString_(", ".join(_term_str(t) for t in terms_list))
+        if self._prompt_terms_stats_label is not None:
+            self._prompt_terms_stats_label.setStringValue_(self._terms_stats_text(lang_norm))
+        if self._prompt_terms_delete_btn is not None:
+            self._prompt_terms_delete_btn.setHidden_(True)
+
+    def _terms_stats_text(self, lang: str) -> str:
+        user_terms = self.config.get("user_terms") or {}
+        terms_list = list(user_terms.get(normalize_lang_code(lang), []))
+        total = len(terms_list)
+        inactive = sum(1 for t in terms_list if isinstance(t, dict) and t.get("inactive"))
+        by_src: dict[str, int] = {}
+        for t in terms_list:
+            src = t.get("source", "manual") if isinstance(t, dict) else "manual"
+            by_src[src] = by_src.get(src, 0) + 1
+        parts = [f"{total} terms"]
+        details = [f"{by_src[k]} {k}" for k in ("manual", "correction", "auto") if by_src.get(k)]
+        if inactive:
+            details.append(f"{inactive} inactive")
+        if details:
+            parts.append("(" + " · ".join(details) + ")")
+        return " ".join(parts)
+
+    def _prompt_terms_editor_closed(self) -> None:
+        self._prompt_terms_panel = None
+        self._prompt_terms_text_view = None
+        self._prompt_terms_delegate = None
+        self._prompt_terms_stats_label = None
+        self._prompt_terms_delete_btn = None
 
     def _sync_prompt_file(self, lang: str) -> None:
         """Write current user_terms[lang] to its .txt file and update the mtime tracker."""
@@ -1904,49 +2201,76 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} восстановлена.")
 
     def _on_manage_terms(self, _) -> None:
-        """Show NSAlert with term statistics and option to clear inactive terms."""
+        """Open the term editor panel; show a language picker first when multiple languages are active."""
         try:
+            langs = get_allowed_languages(self.config)
+            if len(langs) <= 1:
+                lang = langs[0] if langs else get_primary_language(self.config)
+                self._schedule_prompt_terms_editor(lang)
+                return
             from AppKit import NSAlert
-            user_terms = self.config.get("user_terms") or {}
-
-            total = 0
-            inactive_count = 0
-            by_source: dict[str, int] = {"manual": 0, "correction": 0, "auto": 0}
-            for terms in user_terms.values():
-                for t in terms:
-                    total += 1
-                    if isinstance(t, dict):
-                        if t.get("inactive"):
-                            inactive_count += 1
-                        src = t.get("source", "manual")
-                        by_source[src] = by_source.get(src, 0) + 1
-                    else:
-                        by_source["manual"] = by_source.get("manual", 0) + 1
-
-            lines = [
-                f"Всего терминов в словаре: {total}",
-                f"  • Ручные (manual): {by_source.get('manual', 0)}",
-                f"  • Авто-анализ (auto): {by_source.get('auto', 0)}",
-                f"  • Из правок (correction): {by_source.get('correction', 0)}",
-                "",
-                f"Неактивных (деактивировано decay): {inactive_count}",
-            ]
-            if inactive_count > 0:
-                lines.append("Неактивные термины исключены из Whisper-подсказки, но хранятся в config.")
-                lines.append("Они реактивируются автоматически при следующем употреблении.")
-
             alert = NSAlert.alloc().init()
-            alert.setMessageText_("Управление терминами словаря")
-            alert.setInformativeText_("\n".join(lines))
-            alert.addButtonWithTitle_("OK")
-            if inactive_count > 0:
-                alert.addButtonWithTitle_("Удалить неактивные")
-
+            alert.setMessageText_("Edit Terms")
+            alert.setInformativeText_("Choose a language to edit:")
+            for lang in langs:
+                alert.addButtonWithTitle_(lang.upper())
+            alert.addButtonWithTitle_("Cancel")
             result = alert.runModal()
-            if inactive_count > 0 and result == 1001:
-                self._clear_inactive_terms()
+            idx = result - 1000
+            if 0 <= idx < len(langs):
+                self._schedule_prompt_terms_editor(langs[idx])
         except Exception as exc:
             log_exception(f"_on_manage_terms failed: {exc}")
+
+    def _on_edit_replacements(self, _) -> None:
+        """Open panel to edit manual pairs and remove auto pairs from corrections index."""
+        try:
+            langs = get_allowed_languages(self.config)
+            rows = list_replacement_rows_for_ui(self.config, langs)
+            initial_auto = {
+                (r["bucket"], r["from"], r["to"])
+                for r in rows
+                if r.get("source") == "auto" and r.get("bucket") in ("latin", "cyrillic")
+            }
+
+            def commit(final_rows: list[dict]) -> None:
+                final_auto = {
+                    (r["bucket"], r["from"], r["to"])
+                    for r in final_rows
+                    if r.get("source") == "auto" and r.get("bucket") in ("latin", "cyrillic")
+                }
+                for bucket, fr, to in initial_auto - final_auto:
+                    remove_replacement_pair_from_index(str(bucket), fr, to)
+                now_iso = datetime.now(timezone.utc).isoformat()
+                manual_out: list[dict] = []
+                seen_m: set[tuple[str, str]] = set()
+                for r in final_rows:
+                    if r.get("source") != "manual":
+                        continue
+                    left = normalize_replacement_side(str(r.get("from", "")))
+                    right = normalize_replacement_side(str(r.get("to", "")))
+                    if not left or not right:
+                        continue
+                    fk = (canonical_term_key(left), canonical_term_key(right))
+                    if fk in seen_m:
+                        continue
+                    seen_m.add(fk)
+                    at = r.get("added_at")
+                    entry = {"from": left, "to": right}
+                    if isinstance(at, str) and at.strip():
+                        entry["added_at"] = at.strip()
+                    else:
+                        entry["added_at"] = now_iso
+                    manual_out.append(entry)
+                self.config["manual_replacements"] = manual_out
+                self.save_config()
+                self.main_app.load_config_data(self.config)
+                self.main_app.notify("Настройки", "Пары автозамены сохранены.")
+
+            self._replacements_panel = ReplacementsPanel()
+            self._replacements_panel.show(rows, commit)
+        except Exception as exc:
+            log_exception(f"_on_edit_replacements failed: {exc}")
 
     def _show_statistics_alert(self, _) -> None:
         """Show compact dictionary/quality metrics in an NSAlert."""
@@ -2122,7 +2446,7 @@ class ClickNSpeakApp(rumps.App):
 
             result = alert.runModal()  # 1000=first, 1001=second, 1002=third
             if result == 1000:
-                self._open_suggestions_panel()
+                self._schedule_open_suggestions_panel()
             elif result == 1002:
                 self._apply_all_pending_suggestions()
                 self.config["prompt_update_mode"] = "auto"
@@ -2139,7 +2463,7 @@ class ClickNSpeakApp(rumps.App):
         pending = self.config.get("pending_suggestions") or {}
         total = sum(len(v) for v in pending.values())
         if total > 0:
-            self._open_suggestions_panel()
+            self._schedule_open_suggestions_panel()
             return
 
         try:
@@ -2164,19 +2488,28 @@ class ClickNSpeakApp(rumps.App):
         pending = self.config.get("pending_suggestions") or {}
         total = sum(len(v) for v in pending.values())
         if total > 0:
-            self._open_suggestions_panel()
+            self._schedule_open_suggestions_panel()
         else:
             self.main_app.notify(
                 "Настройки",
                 "В истории не найдено терминов, достаточно часто повторяющихся для добавления в словарь.",
             )
 
+    def _schedule_open_suggestions_panel(self) -> None:
+        """Open suggestions after the current modal/menu event has unwound."""
+        if hasattr(self.main_app, "_main_thread_queue"):
+            self.main_app._main_thread_queue.put_nowait((self._open_suggestions_panel, [], {}))
+        else:
+            self._open_suggestions_panel()
+
     def _open_suggestions_panel(self) -> None:
         """Open the SuggestionsPanel for reviewing candidates."""
         if self._suggestions_panel is None:
+            log_error("SuggestionsPanel is unavailable; cannot open pending suggestions.")
             return
         pending = self.config.get("pending_suggestions") or {}
         if not pending:
+            log_info("_open_suggestions_panel: no pending suggestions.")
             return
 
         def on_accept(accepted: list[dict], rejected: list[dict]) -> None:

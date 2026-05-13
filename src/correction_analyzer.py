@@ -21,8 +21,10 @@ _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _DIGITS_ONLY_RE = re.compile(r"^\d+$")
 _PUNCT_STRIP_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_HALLUCINATION_REPEAT_RE = re.compile(r"(.{2,4})\1{7,}")
+_MAX_PAIR_TOKEN_LEN = 30
 _DEFAULT_INDEX_PATH = get_corrections_file_path()
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -81,6 +83,17 @@ def _default_index() -> dict:
     }
 
 
+def _is_hallucination_pair(from_str: str, to_str: str) -> bool:
+    """True when either side is a repetitive-pattern hallucination or an overlong token."""
+    for s in (from_str, to_str):
+        for token in s.split():
+            if len(token) > _MAX_PAIR_TOKEN_LEN:
+                return True
+            if _HALLUCINATION_REPEAT_RE.search(token):
+                return True
+    return False
+
+
 def _migrate_corrections_index_to_v2(data: dict) -> dict:
     """Rename legacy script keys 'en'/'ru' → 'latin'/'cyrillic'. Idempotent for v2+."""
     ver = int(data.get("schema_version", 1))
@@ -98,6 +111,41 @@ def _migrate_corrections_index_to_v2(data: dict) -> dict:
     return data
 
 
+def _migrate_corrections_index_to_v3(data: dict) -> dict:
+    """Clean replacement_pairs: remove self-replace, hallucinations, merge duplicates."""
+    ver = int(data.get("schema_version", 1))
+    if ver >= 3:
+        return data
+    rp = data.get("replacement_pairs") or {}
+    for bucket in ("latin", "cyrillic"):
+        pairs = rp.get(bucket) or []
+        merged: dict[tuple[str, str], dict] = {}
+        for item in pairs:
+            left = canonicalize_term(str(item.get("from", "")))
+            right = canonicalize_term(str(item.get("to", "")))
+            if not left or not right:
+                continue
+            if canonical_term_key(left) == canonical_term_key(right):
+                continue
+            if _is_hallucination_pair(left, right):
+                continue
+            key = (canonical_term_key(left), canonical_term_key(right))
+            count = int(item.get("count", 1) or 1)
+            last_seen = str(item.get("last_seen") or "")
+            if key in merged:
+                merged[key]["count"] += count
+                if last_seen > merged[key].get("last_seen", ""):
+                    merged[key]["last_seen"] = last_seen
+            else:
+                merged[key] = {"from": left, "to": right, "count": count, "last_seen": last_seen}
+        cleaned = sorted(merged.values(), key=lambda x: -int(x.get("count", 0)))
+        rp[bucket] = cleaned
+    data["replacement_pairs"] = rp
+    data["schema_version"] = 3
+    log_info("correction_analyzer: migrated replacement_pairs to v3 (removed self-replace + hallucinations)")
+    return data
+
+
 def _read_index(path: Path) -> dict:
     if not path.exists():
         return _default_index()
@@ -106,15 +154,22 @@ def _read_index(path: Path) -> dict:
     except Exception:
         return _default_index()
     data = _migrate_corrections_index_to_v2(data)
+    data = _migrate_corrections_index_to_v3(data)
     if int(data.get("schema_version", 0)) != _SCHEMA_VERSION:
         return _default_index()
     data.setdefault("processed_rows", 0)
-    data.setdefault("inserted_terms", {"latin": {}, "cyrillic": {}})
-    data.setdefault("replacement_pairs", {"latin": [], "cyrillic": []})
-    data["inserted_terms"].setdefault("latin", {})
-    data["inserted_terms"].setdefault("cyrillic", {})
-    data["replacement_pairs"].setdefault("latin", [])
-    data["replacement_pairs"].setdefault("cyrillic", [])
+    ins = data.get("inserted_terms")
+    if not isinstance(ins, dict):
+        ins = {"latin": {}, "cyrillic": {}}
+        data["inserted_terms"] = ins
+    ins.setdefault("latin", {})
+    ins.setdefault("cyrillic", {})
+    rp = data.get("replacement_pairs")
+    if not isinstance(rp, dict):
+        rp = {"latin": [], "cyrillic": []}
+        data["replacement_pairs"] = rp
+    rp.setdefault("latin", [])
+    rp.setdefault("cyrillic", [])
     return data
 
 
@@ -187,6 +242,12 @@ def _upsert_replacement_pair(index: dict, from_tokens: list[str], to_tokens: lis
         return
     to_str = " ".join(to_tokens)
     from_str = " ".join(from_tokens)
+    # Drop self-replace (only punctuation/case changed — not a meaningful correction).
+    if canonical_term_key(from_str) == canonical_term_key(to_str):
+        return
+    # Drop hallucination tokens.
+    if _is_hallucination_pair(from_str, to_str):
+        return
     pairs = index["replacement_pairs"][lang]
     for item in pairs:
         if canonical_term_key(item.get("from", "")) == canonical_term_key(from_str) and canonical_term_key(
@@ -244,6 +305,45 @@ def update_corrections_index(
 
     write_json_atomic(index_path, index, indent=2)
     return index
+
+
+def remove_replacement_pair_from_index(
+    bucket: str,
+    from_text: str,
+    to_text: str,
+    index_path: Path | None = None,
+) -> bool:
+    """Remove one replacement pair from *replacement_pairs* (by canonical keys).
+
+    Returns True if the index file was updated.
+    """
+    if bucket not in ("latin", "cyrillic"):
+        return False
+    path = index_path or _DEFAULT_INDEX_PATH
+    index = _read_index(path)
+    fk = canonical_term_key(canonicalize_term(from_text))
+    tk = canonical_term_key(canonicalize_term(to_text))
+    rp = index["replacement_pairs"]
+    pairs = list(rp.get(bucket, []) or [])
+    new_pairs: list[dict] = []
+    removed = False
+    for item in pairs:
+        if canonical_term_key(canonicalize_term(str(item.get("from", "")))) == fk and canonical_term_key(
+            canonicalize_term(str(item.get("to", "")))
+        ) == tk:
+            removed = True
+            continue
+        new_pairs.append(item)
+    if not removed:
+        log_info(
+            "correction_analyzer: remove_replacement_pair_from_index — no matching pair "
+            f"in bucket={bucket!r} for {from_text!r} -> {to_text!r}"
+        )
+        return False
+    rp[bucket] = new_pairs
+    index["replacement_pairs"] = rp
+    write_json_atomic(path, index, indent=2)
+    return True
 
 
 def get_correction_candidates(

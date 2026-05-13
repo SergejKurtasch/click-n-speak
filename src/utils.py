@@ -959,6 +959,36 @@ def migrate_config_to_v5(config: dict) -> dict:
     return config
 
 
+def migrate_config_to_v6(config: dict) -> dict:
+    """Add manual replacement pairs for misrecognition hints and direct fallback replace.
+
+    Idempotent when schema_version >= 6.
+    """
+    if config.get("schema_version", 1) >= 6:
+        config.setdefault("manual_replacements", [])
+        return config
+
+    raw = config.get("manual_replacements")
+    cleaned: list[dict] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            fr = str(item.get("from", "")).strip()
+            to = str(item.get("to", "")).strip()
+            if not fr or not to:
+                continue
+            entry = {"from": fr, "to": to}
+            added_at = item.get("added_at")
+            if isinstance(added_at, str) and added_at.strip():
+                entry["added_at"] = added_at.strip()
+            cleaned.append(entry)
+
+    config["manual_replacements"] = cleaned
+    config["schema_version"] = 6
+    return config
+
+
 def normalize_ukrainian_lang_codes(config: dict) -> dict:
     """Normalize legacy 'ua' codes to canonical internal 'uk'.
 

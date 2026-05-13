@@ -313,6 +313,9 @@ class SuggestionsPanel:
 
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         self._window.makeKeyAndOrderFront_(None)
+        # Belt-and-suspenders: force window to front even if another app
+        # grabbed focus after activateIgnoringOtherApps_ (common after modal).
+        self._window.orderFrontRegardless()
 
     # ------------------------------------------------------------------
     # Button actions (called by _PanelDelegate)

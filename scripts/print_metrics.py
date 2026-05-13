@@ -13,6 +13,7 @@ from src.utils import (
     migrate_config_to_v3,
     migrate_config_to_v4,
     migrate_config_to_v5,
+    migrate_config_to_v6,
 )
 
 
@@ -27,6 +28,7 @@ def _load_config(path: Path) -> dict:
     data = migrate_config_to_v3(data)
     data = migrate_config_to_v4(data)
     data = migrate_config_to_v5(data)
+    data = migrate_config_to_v6(data)
     return data
 
 

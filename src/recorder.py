@@ -183,6 +183,11 @@ class AudioRecorder:
                     "Previous audio stream close did not complete after 5s. "
                     "Force-resetting recorder state to allow new recording."
                 )
+                send_notification(
+                    "Сбой аудиосистемы macOS",
+                    "Микрофон завис.",
+                    "Пожалуйста, перезапустите Click-n-speak.",
+                )
                 self.stream = None
                 self._close_thread = None
             else:

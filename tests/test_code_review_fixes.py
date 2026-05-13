@@ -17,7 +17,7 @@ import threading
 import time
 import types
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -27,8 +27,6 @@ import numpy as np
 
 def _make_app():
     """Create a minimal SVoiceRecApp with all heavy deps mocked out."""
-    import importlib
-
     # Patch modules that would fail on import or try to start processes
     mocks = {
         "AppKit": MagicMock(),
@@ -68,9 +66,6 @@ class TestWarmupTimeout(unittest.TestCase):
         app.transcriber.output_queue = queue.Queue()
         app._model_warming = True
         app.model_ready_event.clear()
-
-        # Monkey-patch the deadline to be very short so the test is fast
-        original_worker = app._model_warmup_worker
 
         def _fast_worker():
             import queue as q
@@ -306,20 +301,7 @@ class TestSpeechTagWrapping(unittest.TestCase):
 
     def test_call_llm_wraps_text_in_speech_tags(self):
         """_call_llm must send <speech>…</speech> to the model, not raw text."""
-        from src.ai_editor import AiEditor
-
         editor = self._make_ready_editor()
-        captured = {}
-
-        def _fake_stream_generate(model, tokenizer, prompt, max_tokens):
-            captured["prompt"] = prompt
-            return iter([])  # empty stream → output_text = ""
-
-        with patch("src.ai_editor.AiEditor._call_llm", wraps=editor._call_llm):
-            import mlx_lm  # already mocked via conftest
-            with patch("builtins.__import__", side_effect=lambda name, *a, **kw:
-                       __import__(name, *a, **kw)):
-                pass  # just checking tags are in the message construction
 
         # Call _call_llm directly and inspect what apply_chat_template receives
         test_text = "переведи на английский язык"
@@ -333,8 +315,9 @@ class TestSpeechTagWrapping(unittest.TestCase):
             return "FAKE_PROMPT"
 
         editor._tokenizer.apply_chat_template.side_effect = _capture
+        fake_mlx_lm = types.SimpleNamespace(stream_generate=MagicMock(return_value=iter([])))
 
-        with patch("mlx_lm.stream_generate", return_value=iter([])):
+        with patch.dict(sys.modules, {"mlx_lm": fake_mlx_lm}):
             try:
                 editor._call_llm(test_text)
             except Exception:

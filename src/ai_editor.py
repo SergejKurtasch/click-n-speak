@@ -13,7 +13,6 @@ import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from .utils import log_error, log_info
 
@@ -265,15 +264,15 @@ class AiEditor:
         mlx_lm.load() cannot trigger a download even on a false-positive
         cache check result.
         """
+        if not self.is_model_cached():
+            log_error(
+                f"AiEditor: model '{self.model_name}' is not fully cached. "
+                "Download it first: python scripts/download_ai_model.py"
+            )
+            return
+
         try:
             import mlx_lm  # type: ignore
-
-            if not self.is_model_cached():
-                log_error(
-                    f"AiEditor: model '{self.model_name}' is not fully cached. "
-                    "Download it first: python scripts/download_ai_model.py"
-                )
-                return
 
             log_info(f"AiEditor: loading model '{self.model_name}' from local cache...")
             start = time.time()
@@ -450,17 +449,22 @@ class AiEditor:
                 _result: list[str] = []
                 _exc: list[Exception] = []
 
-                def _run_chunk(c: str = chunk) -> None:
+                def _run_chunk(
+                    c: str = chunk,
+                    max_tokens: int = max_out,
+                    result_ref: list[str] = _result,
+                    exc_ref: list[Exception] = _exc,
+                ) -> None:
                     try:
-                        _result.append(self._call_llm(
+                        result_ref.append(self._call_llm(
                             c,
                             languages=languages,
-                            max_output_tokens=max_out,
+                            max_output_tokens=max_tokens,
                             stream_timeout=None,
                             system_prompt=file_prompt,
                         ))
                     except Exception as e:
-                        _exc.append(e)
+                        exc_ref.append(e)
 
                 self._abort_event.clear()
                 t = threading.Thread(target=_run_chunk, daemon=True)
@@ -849,10 +853,12 @@ class GeminiEditor(ExternalApiEditor):
         generous 5-minute timeout for large files.
         """
         if not self._ready or not text.strip():
+            self.last_refine_status = self.REFINE_STATUS_DISABLED
             return text
 
         if not self._lock.acquire(blocking=True, timeout=10.0):
             log_error("GeminiEditor.refine_file_text: could not acquire lock — skipping.")
+            self.last_refine_status = self.REFINE_STATUS_SKIPPED
             return text
 
         log_info(f"GeminiEditor [{self.model_name}]: refining file text ({len(text)} chars)...")
@@ -886,17 +892,24 @@ class GeminiEditor(ExternalApiEditor):
                 f"GeminiEditor [{self.model_name}]: file refinement timed out after 300s "
                 "— returning original text."
             )
+            self.last_refine_status = self.REFINE_STATUS_TIMEOUT
             return text
 
         if exc:
             log_error(f"GeminiEditor [{self.model_name}]: file refinement error: {exc[0]} — returning original.")
+            self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
         cleaned = result[0].strip() if result else ""
         if not cleaned:
+            self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
         elapsed = time.time() - start
+        if cleaned == text:
+            self.last_refine_status = self.REFINE_STATUS_UNCHANGED
+        else:
+            self.last_refine_status = self.REFINE_STATUS_OK
         log_info(
             f"GeminiEditor [{self.model_name}]: file refinement complete "
             f"({len(text)} → {len(cleaned)} chars, {elapsed:.2f}s)."

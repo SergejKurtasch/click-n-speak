@@ -31,14 +31,19 @@ from .correction_analyzer import (
     get_correction_candidates,
 )
 from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS, FileTranscriptionError
-from .vocab_provider import add_term_to_user_terms, collect_known_terms, collect_misrecognitions
+from .vocab_provider import (
+    add_term_to_user_terms,
+    apply_replacements,
+    collect_known_terms,
+    collect_misrecognitions,
+    collect_replacement_pairs_for_apply,
+)
 from .utils import (
     _term_str,
     apply_decay,
     build_initial_prompt,
     canonical_term_key,
     canonicalize_term,
-    deduplicate_prompt_terms,
     get_allowed_languages,
     get_corrections_file_path,
     get_metrics_history_path,
@@ -52,6 +57,7 @@ from .utils import (
     migrate_config_to_v3,
     migrate_config_to_v4,
     migrate_config_to_v5,
+    migrate_config_to_v6,
     normalize_ukrainian_lang_codes,
     save_config_to_disk,
     send_notification,
@@ -170,8 +176,35 @@ def _merge_candidate_sources(
         if out:
             merged[lang] = out[:max_per_lang]
     return merged
+
+
+def _should_apply_direct_replacements_after_refine(status: str, *, hints_in_prompt: bool) -> bool:
+    """Return True if mechanical replacement pairs should still be applied after refine().
+
+    External editors (Gemini) receive misrecognition hints in the system prompt; when they finish
+    with OK or UNCHANGED we skip mechanical replace to avoid overriding the model.
+
+    Local MLX refine ignores those hints; UNCHANGED means mechanical pairs may still help, so we
+    only skip after OK (model actually rewrote the text).
+    """
+    if status in (
+        AiEditor.REFINE_STATUS_DISABLED,
+        AiEditor.REFINE_STATUS_SKIPPED,
+        AiEditor.REFINE_STATUS_TIMEOUT,
+        AiEditor.REFINE_STATUS_ERROR,
+        AiEditor.REFINE_STATUS_MEMORY_PRESSURE,
+    ):
+        return True
+    if hints_in_prompt:
+        return status not in (
+            AiEditor.REFINE_STATUS_OK,
+            AiEditor.REFINE_STATUS_UNCHANGED,
+        )
+    return status != AiEditor.REFINE_STATUS_OK
+
+
 # Memory pressure threshold (%) above which keep-alive is disabled
-MEMORY_PRESSURE_THRESHOLD_PERCENT = 75
+MEMORY_PRESSURE_THRESHOLD_PERCENT = 85
 
 
 class SVoiceRecApp:
@@ -247,6 +280,8 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
         self._ai_edited_text = None
         self._ai_editor_status: Optional[str] = None
+        self._needs_buffered_finalization: bool = False
+        self._buffered_final_text: Optional[str] = None
 
         # Cached result of build_initial_prompt(). Invalidated by load_config_data()
         # so process_chunk() avoids rebuilding (dedup+join+truncate) on every chunk.
@@ -412,6 +447,7 @@ class SVoiceRecApp:
         data = migrate_config_to_v3(data)
         data = migrate_config_to_v4(data)
         data = migrate_config_to_v5(data)
+        data = migrate_config_to_v6(data)
         data = normalize_ukrainian_lang_codes(data)
         self.config = data
         self.config.setdefault("last_metrics_snapshot_ts", None)
@@ -1057,6 +1093,8 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []
         self._ai_edited_text = None
         self._ai_editor_status = None
+        self._needs_buffered_finalization = False
+        self._buffered_final_text = None
         self.stop_worker.clear()
         self._session_id += 1  # Invalidate any lingering worker from previous session
 
@@ -1151,12 +1189,117 @@ class SVoiceRecApp:
             except Exception as e:
                 log_exception(f"Error in chunk worker loop: {e}")
         log_info("Chunk worker stopped (queue empty, ready for next session).")
-        # Primary cleanup path for normal and timeout flows.
-        # Buffered-finalization path submits cleanup inline in stop_recording_and_process
-        # (after show_interactive) so is_processing stays True until the popup appears.
-        # For normal and timeout flows this is the only cleanup submission.
         if self._session_id == my_session_id:
+            if self._needs_buffered_finalization:
+                # Run AI editor + replacements on the worker thread before handing off to main.
+                self._apply_ai_and_replacements_for_buffered(my_session_id)
+            else:
+                self._submit_for_main_thread(self._do_finish_cleanup)
+
+    def _apply_ai_and_replacements_for_buffered(self, session_id: int) -> None:
+        """Apply AI editor + replacements to buffered partial chunks on the worker thread.
+
+        Mirrors the final-chunk post-processing in process_chunk() so the buffered
+        finalization path produces the same quality output as the normal path.
+        Stores the result in self._buffered_final_text before posting to the main thread.
+        """
+        full_text = _join_chunks(self.transcribed_parts)
+        if full_text:
+            _active_editor = (
+                self.gemini_editor if (
+                    self.config.get("ai_editor_backend", "local") == "gemini"
+                    and self.gemini_editor is not None
+                    and self.gemini_editor.is_ready()
+                ) else (
+                    self.ai_editor if (
+                        self.ai_editor is not None
+                        and self.ai_editor.is_ready()
+                    ) else None
+                )
+            )
+            apply_direct_replacements = True
+            if _active_editor is not None and self.config.get("ai_editor_enabled", False):
+                is_external_api_editor = isinstance(_active_editor, ExternalApiEditor)
+                if not is_external_api_editor and self._is_memory_pressure_high():
+                    self._ai_editor_status = AiEditor.REFINE_STATUS_MEMORY_PRESSURE
+                    self._ai_edited_text = full_text
+                    self._submit_for_main_thread(self._send_memory_pressure_notification)
+                elif len(full_text.split()) > 3:
+                    use_editor = is_external_api_editor or not self.ai_editor.is_hallucination(full_text)
+                    if use_editor:
+                        languages = get_allowed_languages(self.config)
+                        known_terms = None
+                        misrecognitions = None
+                        if is_external_api_editor:
+                            known_terms = collect_known_terms(self.config, languages)
+                            misrecognitions = collect_misrecognitions(languages, config=self.config)
+                        refined = _active_editor.refine(
+                            full_text,
+                            languages=languages,
+                            known_terms=known_terms,
+                            misrecognitions=misrecognitions,
+                        )
+                        self._ai_edited_text = refined
+                        self._ai_editor_status = _active_editor.last_refine_status
+                        apply_direct_replacements = _should_apply_direct_replacements_after_refine(
+                            _active_editor.last_refine_status,
+                            hints_in_prompt=is_external_api_editor,
+                        )
+                        if refined and refined != full_text:
+                            full_text = refined
+            if apply_direct_replacements:
+                langs = get_allowed_languages(self.config)
+                rpairs = collect_replacement_pairs_for_apply(self.config, langs)
+                full_text = apply_replacements(full_text, rpairs)
+        self._buffered_final_text = full_text
+        self._submit_for_main_thread(
+            self._finalize_buffered_transcription_on_main,
+            session_id,
+        )
+
+    def _finalize_buffered_transcription_on_main(self, session_id: int) -> bool:
+        """Show buffered partial chunks when stop produced no final chunk."""
+        if self._session_id != session_id:
+            return False
+        if not self._needs_buffered_finalization:
+            return False
+        self._needs_buffered_finalization = False
+
+        self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
+        full_text = self._buffered_final_text or _join_chunks(self.transcribed_parts)
+        self._buffered_final_text = None
+        if not full_text or self._preview_panel is None:
+            self.notify("Нет речи", "Не удалось записать звук. Попробуйте ещё раз.", delay=3.0)
             self._submit_for_main_thread(self._do_finish_cleanup)
+            return False
+
+        s_ui = get_ui_strings(get_primary_language(self.config))
+        if self._append_to_popup and self._preview_panel._is_interactive:
+            self._preview_panel.append_text(full_text, self._main_thread_queue)
+            self._append_to_popup = False
+            log_info(f"Buffered finalization: appended to existing popup, len={len(full_text)}")
+        else:
+            log_info(
+                f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
+                f"buffered partial chunk(s). full_text_len={len(full_text)}"
+            )
+            _on_confirm, _on_cancel, _on_add_to_dictionary = self._build_confirm_cancel_callbacks()
+            self._append_to_popup = False
+            self._preview_panel.show_interactive(
+                full_text,
+                self._main_thread_queue,
+                on_confirm=_on_confirm,
+                on_cancel=_on_cancel,
+                title=s_ui["popup_title_with_hotkey"],
+                on_add_to_dictionary=_on_add_to_dictionary,
+                toast_added_template=s_ui["toast_added"],
+                toast_invalid_term=s_ui["toast_invalid_term"],
+                toast_exists=s_ui["toast_exists"],
+            )
+            log_info("Buffered finalization: show_interactive queued on main thread")
+
+        self._submit_for_main_thread(self._do_finish_cleanup)
+        return True
 
     def process_chunk(self, audio_chunk, is_final_chunk: bool = False, session_id: int = 0):
         """Transcribe a single audio chunk, accumulate result, and show popup on final chunk."""
@@ -1231,7 +1374,6 @@ class SVoiceRecApp:
 
             if text:
                 log_info(f"Partial Transcription (raw): {text}")
-                is_ai_edited = False
 
                 # Session guard: check BEFORE mutating shared state so a stale worker
                 # from a previous session never pollutes transcribed_parts of the new one.
@@ -1272,6 +1414,7 @@ class SVoiceRecApp:
                             ) else None
                         )
                     )
+                    apply_direct_replacements = True
                     if _active_editor is not None and self.config.get("ai_editor_enabled", False):
                         is_external_api_editor = isinstance(_active_editor, ExternalApiEditor)
                         if not is_external_api_editor and self._is_memory_pressure_high():
@@ -1294,7 +1437,9 @@ class SVoiceRecApp:
                                 misrecognitions = None
                                 if is_external_api_editor:
                                     known_terms = collect_known_terms(self.config, languages)
-                                    misrecognitions = collect_misrecognitions(languages)
+                                    misrecognitions = collect_misrecognitions(
+                                        languages, config=self.config
+                                    )
                                 refined = _active_editor.refine(
                                     full_text,
                                     languages=languages,
@@ -1306,9 +1451,16 @@ class SVoiceRecApp:
                                 # "AI was disabled / skipped / timed out".
                                 self._ai_edited_text = refined
                                 self._ai_editor_status = _active_editor.last_refine_status
+                                apply_direct_replacements = _should_apply_direct_replacements_after_refine(
+                                    _active_editor.last_refine_status,
+                                    hints_in_prompt=is_external_api_editor,
+                                )
                                 if refined and refined != full_text:
-                                    is_ai_edited = True
                                     full_text = refined
+                    if apply_direct_replacements:
+                        langs = get_allowed_languages(self.config)
+                        rpairs = collect_replacement_pairs_for_apply(self.config, langs)
+                        full_text = apply_replacements(full_text, rpairs)
                     # -------------------------------------------
 
                     # Cancel the delayed "still working" timer under the lock.
@@ -1435,6 +1587,10 @@ class SVoiceRecApp:
                     )
                 except Exception:
                     log_error("Chunk queue full — final audio chunk dropped.")
+                    if self._session_id == my_session_id:
+                        self._needs_buffered_finalization = True
+            elif self._session_id == my_session_id:
+                self._needs_buffered_finalization = True
 
             # Signal worker to finish and wait for it (long timeout so "Finish" only after real completion)
             self.stop_worker.set()
@@ -1469,7 +1625,6 @@ class SVoiceRecApp:
                 self._delayed_transcribing_timer.daemon = True
                 self._delayed_transcribing_timer.start()
 
-            worker_timed_out = False
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
                 try:
@@ -1488,7 +1643,6 @@ class SVoiceRecApp:
                     # The session is only invalidated when the user starts a new
                     # recording (via start_recording → _session_id += 1).
                     self.is_processing = False
-                    worker_timed_out = True
                     # Keep showing "still working" — chunk_worker will submit
                     # _do_finish_cleanup when it actually completes.
                     if self._preview_panel:
@@ -1502,49 +1656,23 @@ class SVoiceRecApp:
                         "Submitting finish cleanup to main thread."
                     )
 
-            # If Recorder.stop() returned no final audio chunk (e.g. the last
-            # chunk was too short and discarded) but the worker already buffered
-            # one or more partial transcriptions, finalise them now so the text
-            # is not silently lost.
+            # Safety-net: if the worker already exited *before* we joined it (race
+            # window between chunk_worker posting and our is_alive() check), it already
+            # posted _finalize_buffered_transcription_on_main via
+            # _apply_ai_and_replacements_for_buffered. This second post is a no-op in
+            # that case because _finalize_buffered_transcription_on_main clears the flag
+            # on first execution; a second call returns False immediately. We only reach
+            # here when last_audio is None (queue-full path sets the flag too).
             if (
                 last_audio is None
-                and self.transcribed_parts
                 and self._session_id == my_session_id
-                and self._preview_panel is not None
+                and self._needs_buffered_finalization
                 and not (self.worker_thread is not None and self.worker_thread.is_alive())
             ):
-                self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
-                full_text = _join_chunks(self.transcribed_parts)
-                if full_text:
-                    s_ui = get_ui_strings(get_primary_language(self.config))
-                    if self._append_to_popup and self._preview_panel._is_interactive:
-                        self._preview_panel.append_text(full_text, self._main_thread_queue)
-                        self._append_to_popup = False
-                        log_info(
-                            f"Buffered finalization: appended to existing popup, len={len(full_text)}"
-                        )
-                    else:
-                        log_info(
-                            f"No final audio chunk; finalizing {len(self.transcribed_parts)} "
-                            f"buffered partial chunk(s). full_text_len={len(full_text)}"
-                        )
-                        _on_confirm, _on_cancel, _on_add_to_dictionary = self._build_confirm_cancel_callbacks()
-                        self._append_to_popup = False
-                        self._preview_panel.show_interactive(
-                            full_text,
-                            self._main_thread_queue,
-                            on_confirm=_on_confirm,
-                            on_cancel=_on_cancel,
-                            title=s_ui["popup_title_with_hotkey"],
-                            on_add_to_dictionary=_on_add_to_dictionary,
-                            toast_added_template=s_ui["toast_added"],
-                            toast_invalid_term=s_ui["toast_invalid_term"],
-                            toast_exists=s_ui["toast_exists"],
-                        )
-                        log_info("Buffered finalization: show_interactive queued on main thread")
-                    # Cleanup submitted here, AFTER show_interactive, so is_processing
-                    # stays True until the popup is actually visible.
-                    self._submit_for_main_thread(self._do_finish_cleanup)
+                self._submit_for_main_thread(
+                    self._finalize_buffered_transcription_on_main,
+                    my_session_id,
+                )
 
             # Cleanup responsibility by path:
             #   normal  — chunk_worker submits _do_finish_cleanup when its loop exits
@@ -1612,6 +1740,7 @@ class SVoiceRecApp:
 
             self._last_transcription_time = time.time()
 
+            apply_direct_replacements = True
             if text and self.config.get("ai_editor_enabled", False):
                 backend = self.config.get("ai_editor_backend", "local")
                 is_gemini_backend = backend == "gemini"
@@ -1627,13 +1756,23 @@ class SVoiceRecApp:
                     misrecognitions = None
                     if isinstance(active_editor, ExternalApiEditor):
                         known_terms = collect_known_terms(self.config, allowed_languages)
-                        misrecognitions = collect_misrecognitions(allowed_languages)
+                        misrecognitions = collect_misrecognitions(
+                            allowed_languages, config=self.config
+                        )
                     text = active_editor.refine_file_text(
                         text,
                         languages=allowed_languages,
                         known_terms=known_terms,
                         misrecognitions=misrecognitions,
                     )
+                    apply_direct_replacements = _should_apply_direct_replacements_after_refine(
+                        active_editor.last_refine_status,
+                        hints_in_prompt=isinstance(active_editor, ExternalApiEditor),
+                    )
+
+            if text and apply_direct_replacements:
+                rpairs = collect_replacement_pairs_for_apply(self.config, allowed_languages)
+                text = apply_replacements(text, rpairs)
 
             if text:
                 log_info(f"File transcription successful, {len(text)} chars.")
@@ -1848,7 +1987,6 @@ class SVoiceRecApp:
         """Subscribe to macOS NSWorkspaceDidWakeNotification to warmup model after sleep."""
         try:
             from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification, NSObject
-            import objc
 
             app_ref = self  # Capture reference for the observer callback
 
