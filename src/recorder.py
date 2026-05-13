@@ -183,6 +183,11 @@ class AudioRecorder:
                     "Previous audio stream close did not complete after 5s. "
                     "Force-resetting recorder state to allow new recording."
                 )
+                send_notification(
+                    "Сбой аудиосистемы macOS",
+                    "Микрофон завис.",
+                    "Пожалуйста, перезапустите Click-n-speak.",
+                )
                 self.stream = None
                 self._close_thread = None
             else:
@@ -239,15 +244,17 @@ class AudioRecorder:
         self.recording = False
         if self.stream:
             self._stop_stream_with_timeout()
-            # self.stream is already set to None inside _stop_stream_with_timeout
+            log_info("Stream abort/close dispatched.")
 
         play_sound(SOUND_RECORDING_STOP)
 
         if not self.audio_data:
+            log_info("No audio_data accumulated; returning None.")
             return None
 
         # Concatenate all blocks and return as a single numpy array
         result = np.concatenate(self.audio_data, axis=0).flatten()
+        log_info(f"Final audio assembled: {len(result)} samples ({len(result)/self.sample_rate:.2f}s).")
 
         # Filter out very short final chunks (< 0.3s) that are almost always
         # post-speech silence causing Whisper to hallucinate for 10-43 seconds.
@@ -264,10 +271,10 @@ class AudioRecorder:
     def _stop_stream_with_timeout(self) -> None:
         """Stop and close the audio stream without blocking the caller.
 
-        abort() is called synchronously — Pa_AbortStream is fast and merely
-        signals PortAudio to stop; it never hangs.  close() (Pa_CloseStream)
-        can hang indefinitely on macOS when Core Audio delivers synchronous
-        notifications to registered listeners, so it runs in a daemon thread.
+        Both abort() and close() run in a daemon thread so neither can block
+        the stop_recording_and_process thread.  self.recording is already False
+        when this is called, so the callback returns early and audio_data is
+        not mutated after we return.
 
         self._close_thread tracks the thread so that start() can wait for it
         (up to 5 s) before opening a new stream and avoid a PortAudio deadlock.
@@ -275,13 +282,11 @@ class AudioRecorder:
         old_stream = self.stream
         self.stream = None  # Release reference immediately; start() won't see it
 
-        # abort() stops callbacks and flushes buffers — always fast.
-        try:
-            old_stream.abort()
-        except Exception:
-            pass
-
         def _do_close():
+            try:
+                old_stream.abort()
+            except Exception:
+                pass
             try:
                 old_stream.close()
                 log_info("Recorder.stop() stream closed successfully.")

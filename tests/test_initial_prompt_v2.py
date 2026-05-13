@@ -5,8 +5,10 @@ import pytest
 from src.utils import (
     build_initial_prompt,
     deduplicate_prompt_terms,
+    get_allowed_languages,
     LANG_PROMPTS,
     migrate_config_to_v2,
+    normalize_ukrainian_lang_codes,
     parse_prompt_terms,
 )
 
@@ -129,6 +131,11 @@ class TestBuildInitialPrompt:
         assert result.startswith(LANG_PROMPTS["ru"])
         assert len(result) > len(LANG_PROMPTS["ru"])
 
+    def test_ukrainian_prompt_hint_uses_uk_code(self):
+        cfg = self._cfg(primary_language="uk")
+        result = build_initial_prompt(cfg)
+        assert result.startswith(LANG_PROMPTS["uk"])
+
 
 # ---------------------------------------------------------------------------
 # migrate_config_to_v2
@@ -205,3 +212,27 @@ class TestMigrateConfigToV2:
         prompt = cfg["initial_prompt"]
         assert "Русский язык." in prompt
         assert "PCA" in prompt
+
+
+class TestUkLangCodeNormalization:
+    def test_get_allowed_languages_maps_legacy_ua(self):
+        cfg = {"primary_language": "ua", "additional_languages": ["de", "ua"]}
+        assert get_allowed_languages(cfg) == ["uk", "de"]
+
+    def test_normalize_ukrainian_lang_codes_merges_language_sections(self):
+        cfg = {
+            "primary_language": "ua",
+            "additional_languages": ["ua", "de", "uk"],
+            "user_terms": {"ua": ["термін", "PCA"], "uk": ["PCA", "seed"]},
+            "pending_suggestions": {"ua": [{"term": "GitHub", "count": 2}]},
+            "prompt_snapshots": {"ua": ["foo"], "uk": ["foo", "bar"]},
+            "skipped_terms": {"ua": {"github.": 11}, "uk": {"github": 7}},
+        }
+        out = normalize_ukrainian_lang_codes(cfg)
+
+        assert out["primary_language"] == "uk"
+        assert out["additional_languages"] == ["de"]
+        assert out["user_terms"]["uk"] == ["термін", "PCA", "seed"]
+        assert out["pending_suggestions"]["uk"][0]["term"] == "GitHub"
+        assert out["prompt_snapshots"]["uk"] == ["foo", "bar"]
+        assert out["skipped_terms"]["uk"]["github"] == 11

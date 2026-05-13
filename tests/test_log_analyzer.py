@@ -12,7 +12,9 @@ from src.log_analyzer import (
     _levenshtein,
     _parse_history_lines,
     get_frequent_terms,
+    get_prompt_candidates,
 )
+from src.utils import get_language_script, target_lang_for_script_bucket
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +184,13 @@ class TestCollectEnglishTerms:
         terms = [t for t, _ in result]
         assert "123abc" not in terms
 
+    def test_trailing_punctuation_collapses_to_same_term(self):
+        records, sids = _records_with_sessions([(0, "GitHub."), (1, "GitHub")])
+        result = _collect_english_terms(records, sids)
+        terms = [t for t, _ in result]
+        assert "GitHub" in terms
+        assert "GitHub." not in terms
+
 
 # ---------------------------------------------------------------------------
 # _filter_near_duplicates
@@ -334,3 +343,159 @@ class TestGetFrequentTerms:
         monkeypatch.setattr("src.log_analyzer.get_phrases_file_path", lambda: p)
         en, _ = get_frequent_terms(blacklist=frozenset({"pca"}))
         assert "PCA" not in en
+
+
+# ---------------------------------------------------------------------------
+# Script bucket helpers (language-agnostic thresholds)
+# ---------------------------------------------------------------------------
+
+
+class TestLanguageScriptHelpers:
+    def test_get_language_script(self):
+        assert get_language_script("ru") == "cyrillic"
+        assert get_language_script("uk") == "cyrillic"
+        assert get_language_script("ua") == "cyrillic"
+        assert get_language_script("de") == "latin"
+        assert get_language_script("en") == "latin"
+
+    def test_target_lang_for_script_bucket(self):
+        assert target_lang_for_script_bucket("latin", "ru", ["en"]) == "en"
+        assert target_lang_for_script_bucket("cyrillic", "ru", ["en"]) == "ru"
+        assert target_lang_for_script_bucket("latin", "de", ["en"]) == "de"
+
+
+# ---------------------------------------------------------------------------
+# get_prompt_candidates (script buckets + min_count dict)
+# ---------------------------------------------------------------------------
+
+
+def _write_history_lines(path, entries: list[tuple[str, str]]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for ts, text in entries:
+            f.write(f"{ts}\t{text}\n")
+
+
+class TestGetPromptCandidates:
+    def test_min_count_dict_per_script(self, tmp_path, monkeypatch):
+        """Latin threshold 5 passes MLX; Cyrillic bigram count 5 fails threshold 8."""
+        p = tmp_path / "phrases.txt"
+        latin_lines = [
+            ("2024-01-01T10:00:00", "MLX term"),
+            ("2024-01-01T10:01:00", "MLX alpha"),
+            ("2024-01-01T10:02:00", "MLX beta"),
+            ("2024-01-01T10:03:00", "MLX gamma"),
+            ("2024-01-01T11:05:00", "MLX delta"),
+        ]
+        ru_lines = [
+            ("2024-01-02T10:00:00", "машинное обучение данных"),
+            ("2024-01-02T10:02:00", "машинное обучение данных"),
+            ("2024-01-02T10:04:00", "машинное обучение данных"),
+            ("2024-01-02T10:06:00", "машинное обучение данных"),
+            ("2024-01-02T10:08:00", "машинное обучение данных"),
+        ]
+        _write_history_lines(p, latin_lines + ru_lines)
+        monkeypatch.setattr("src.log_analyzer.get_phrases_file_path", lambda: p)
+        out = get_prompt_candidates(
+            lookback=500,
+            min_count={"latin": 5, "cyrillic": 8},
+            existing_lower_by_lang={},
+            skipped_lower_by_lang={},
+            current_phrase_count=0,
+        )
+        terms_latin = [x["term"] for x in out.get("latin", [])]
+        assert "MLX" in terms_latin
+        assert "машинное обучение" not in [x["term"] for x in out.get("cyrillic", [])]
+
+    def test_correction_signal_bypasses_session_filter(self, tmp_path, monkeypatch):
+        p = tmp_path / "phrases.txt"
+        # Single session (all gaps < 60s); bypass allows MLX despite one session.
+        _write_history_lines(
+            p,
+            [
+                ("2024-01-01T10:00:00", "MLX one"),
+                ("2024-01-01T10:00:20", "MLX two"),
+                ("2024-01-01T10:00:40", "MLX three"),
+                ("2024-01-01T10:00:50", "MLX four"),
+                ("2024-01-01T10:00:55", "MLX five"),
+            ],
+        )
+        monkeypatch.setattr("src.log_analyzer.get_phrases_file_path", lambda: p)
+        out = get_prompt_candidates(
+            min_count={"latin": 5, "cyrillic": 8},
+            term_has_correction_signal=lambda t: t == "mlx",
+            existing_lower_by_lang={},
+            skipped_lower_by_lang={},
+            current_phrase_count=0,
+        )
+        assert any(x["term"] == "MLX" for x in out.get("latin", []))
+
+    def test_no_correction_signal_keeps_session_filter(self, tmp_path, monkeypatch):
+        p = tmp_path / "phrases.txt"
+        # Single session only — without bypass, ≥2 sessions required.
+        _write_history_lines(
+            p,
+            [
+                ("2024-01-01T10:00:00", "MLX one"),
+                ("2024-01-01T10:00:20", "MLX two"),
+                ("2024-01-01T10:00:40", "MLX three"),
+                ("2024-01-01T10:00:50", "MLX four"),
+                ("2024-01-01T10:00:55", "MLX five"),
+            ],
+        )
+        monkeypatch.setattr("src.log_analyzer.get_phrases_file_path", lambda: p)
+        out = get_prompt_candidates(
+            min_count={"latin": 5, "cyrillic": 8},
+            term_has_correction_signal=None,
+            existing_lower_by_lang={},
+            skipped_lower_by_lang={},
+            current_phrase_count=0,
+        )
+        assert "latin" not in out or not any(x["term"] == "MLX" for x in out["latin"])
+
+    def test_default_min_count_none(self, tmp_path, monkeypatch):
+        p = tmp_path / "phrases.txt"
+        _write_history_lines(
+            p,
+            [
+                ("2024-01-01T10:00:00", "PCA x"),
+                ("2024-01-01T11:05:00", "PCA y"),
+                ("2024-01-01T11:06:00", "PCA z"),
+                ("2024-01-01T11:07:00", "PCA a"),
+                ("2024-01-01T11:08:00", "PCA b"),
+            ],
+        )
+        monkeypatch.setattr("src.log_analyzer.get_phrases_file_path", lambda: p)
+        out = get_prompt_candidates(min_count=None, existing_lower_by_lang={}, skipped_lower_by_lang={}, current_phrase_count=0)
+        assert any(x["term"] == "PCA" for x in out.get("latin", []))
+
+    def test_lookback_truncates_old_lines(self, tmp_path, monkeypatch):
+        # RareTok: 5 mentions in 2 sessions — then 350 filler lines — deque(300) drops RareTok.
+        rows = [
+            ("2024-01-01T10:00:00", "RareTok a"),
+            ("2024-01-01T10:01:00", "RareTok b"),
+            ("2024-01-01T11:05:00", "RareTok c"),
+            ("2024-01-01T11:06:00", "RareTok d"),
+            ("2024-01-01T11:07:00", "RareTok e"),
+        ]
+        for i in range(350):
+            rows.append((f"2024-02-01T08:{i // 60:02d}:{i % 60:02d}", "padding text"))
+        rows += [
+            ("2024-03-01T12:00:00", "NEWTOKEN a"),
+            ("2024-03-01T12:01:00", "NEWTOKEN b"),
+            ("2024-03-01T12:02:00", "NEWTOKEN c"),
+            ("2024-03-01T12:03:00", "NEWTOKEN d"),
+            ("2024-03-01T12:04:00", "NEWTOKEN e"),
+        ]
+        p = tmp_path / "phrases.txt"
+        _write_history_lines(p, rows)
+        monkeypatch.setattr("src.log_analyzer.get_phrases_file_path", lambda: p)
+        out = get_prompt_candidates(
+            lookback=300,
+            min_count={"latin": 5, "cyrillic": 8},
+            existing_lower_by_lang={},
+            skipped_lower_by_lang={},
+            current_phrase_count=0,
+        )
+        latin_terms = [x["term"] for x in out.get("latin", [])]
+        assert "NEWTOKEN" in latin_terms
+        assert "RareTok" not in latin_terms

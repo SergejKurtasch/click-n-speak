@@ -1,10 +1,13 @@
 import json
 import logging
 import os
+import re
 import shutil
+import string
 import subprocess
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -162,6 +165,24 @@ def get_phrases_file_path() -> Path:
     return support_dir / "phrase_history.txt"
 
 
+def get_corrections_file_path() -> Path:
+    """Return the path to corrections.json (dev root or Application Support)."""
+    if not _get_app_bundle():
+        return ROOT / "corrections.json"
+    support_dir = APPLICATION_SUPPORT_DIR
+    support_dir.mkdir(parents=True, exist_ok=True)
+    return support_dir / "corrections.json"
+
+
+def get_metrics_history_path() -> Path:
+    """Return path to metrics_history.jsonl (dev root or Application Support)."""
+    if not _get_app_bundle():
+        return ROOT / "metrics_history.jsonl"
+    support_dir = APPLICATION_SUPPORT_DIR
+    support_dir.mkdir(parents=True, exist_ok=True)
+    return support_dir / "metrics_history.jsonl"
+
+
 # UI strings for notifications and menu bar, keyed by primary language (ru, en, de, es, fr).
 # Fallback: en if key or lang missing.
 UI_STRINGS: dict[str, dict[str, str]] = {
@@ -188,6 +209,10 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "menu_recording": "● ЗАПИСЬ",
         "menu_processing": "● РАСПОЗН.",
         "edit_confirm_title": "Редактируй и нажми Enter",
+        "popup_title_with_hotkey": "Редактируй · Enter подтвердить · ⌘D добавить термин",
+        "toast_added": "Добавлено: {term}",
+        "toast_invalid_term": "Невалидный термин",
+        "toast_exists": "Уже в словаре",
     },
     "en": {
         "transcription_instruction": "Add punctuation. Capitalize sentences. ",
@@ -212,6 +237,10 @@ UI_STRINGS: dict[str, dict[str, str]] = {
         "menu_recording": "● RECORDING",
         "menu_processing": "● RECOGNIZING",
         "edit_confirm_title": "Edit and press Enter",
+        "popup_title_with_hotkey": "Edit · Enter to confirm · ⌘D to add term",
+        "toast_added": "Added: {term}",
+        "toast_invalid_term": "Not a valid term",
+        "toast_exists": "Already in dictionary",
     },
     "de": {
         "transcription_instruction": "Satzzeichen setzen. Sätze groß schreiben. ",
@@ -292,21 +321,108 @@ def get_primary_language(config: dict) -> str:
     """Return the primary UI/recognition language from config (e.g. 'ru', 'en'). Default 'ru'."""
     primary = config.get("primary_language")
     if primary and isinstance(primary, str):
-        return str(primary).lower().strip()
+        return normalize_lang_code(primary)
     lang_list = config.get("languages")
     if isinstance(lang_list, list) and len(lang_list) > 0:
-        return str(lang_list[0]).lower().strip()
+        return normalize_lang_code(lang_list[0])
     return "ru"
 
 
-# Maps app-internal language codes to ISO 639-1 codes that Whisper recognises.
-# "ua" (country code) is used in the UI for Ukrainian; Whisper requires "uk".
+def normalize_lang_code(lang_code: str) -> str:
+    """Canonicalise language code for internal use.
+
+    The app historically used "ua" for Ukrainian in UI/config. Internally we
+    now use ISO 639-1 "uk" everywhere while keeping UI labels as "UA".
+    """
+    code = str(lang_code or "").lower().strip()
+    return "uk" if code == "ua" else code
+
+
+def _dedupe_lang_list(languages: list[str], *, primary: str | None = None) -> list[str]:
+    """Return language codes with stable order and no duplicates."""
+    out: list[str] = []
+    seen: set[str] = set()
+    primary_code = normalize_lang_code(primary) if primary else None
+    for lang in languages:
+        code = normalize_lang_code(lang)
+        if not code:
+            continue
+        if primary_code and code == primary_code:
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out
+
+
+def get_language_script(lang_code: str) -> str:
+    """Return script family for a configured language: 'latin' or 'cyrillic'.
+
+    Used to align ISO language codes with analyzer script buckets (latin/cyrillic).
+    Cyrillic: ru, uk/ua, be, bg, mk, sr. Everything else is treated as latin.
+    """
+    cyrillic_langs = {"ru", "uk", "ua", "be", "bg", "mk", "sr"}
+    return "cyrillic" if normalize_lang_code(lang_code) in cyrillic_langs else "latin"
+
+
+def target_lang_for_script_bucket(
+    script: str,
+    primary_lang: str,
+    additional_langs: list[str] | None,
+) -> str:
+    """Map analyzer script bucket ('latin' | 'cyrillic') to one configured language code.
+
+    Prefers primary when its script matches, otherwise the first additional language
+    whose script matches. Falls back to primary (same role as legacy en/ru remap).
+    """
+    primary = str(primary_lang).lower().strip()
+    additional = [str(x).lower().strip() for x in (additional_langs or []) if x]
+    if get_language_script(primary) == script:
+        return primary
+    for code in additional:
+        if get_language_script(code) == script:
+            return code
+    return primary
+
+
+def existing_terms_union_for_script(
+    existing_lower_by_lang: dict[str, set[str]],
+    script: str,
+) -> set[str]:
+    """Union of lowercase terms across all configured languages that use *script*."""
+    out: set[str] = set()
+    for lang_code, terms in (existing_lower_by_lang or {}).items():
+        if get_language_script(lang_code) == script:
+            out |= {canonical_term_key(t) for t in terms if canonical_term_key(t)}
+    return out
+
+
+def skipped_phrases_merge_for_script(
+    skipped_lower_by_lang: dict[str, dict[str, int]],
+    script: str,
+) -> dict[str, int]:
+    """Merge skipped-term phrase indices across langs matching *script* (max per term)."""
+    merged: dict[str, int] = {}
+    for lang_code, sk in (skipped_lower_by_lang or {}).items():
+        if get_language_script(lang_code) != script:
+            continue
+        for lower, cnt in sk.items():
+            key = canonical_term_key(lower)
+            if not key:
+                continue
+            merged[key] = max(merged.get(key, -1), int(cnt))
+    return merged
+
+
+# Maps config language codes to Whisper ISO-639-1 codes.
+# Keep the legacy ua->uk alias for backward compatibility with old configs.
 _WHISPER_LANG_CODE: dict[str, str] = {"ua": "uk"}
 
 
 def get_allowed_languages(config: dict) -> list[str]:
     """Return the list of languages allowed for recognition: primary + additional (no duplicates)."""
-    primary = get_primary_language(config)
+    primary = normalize_lang_code(get_primary_language(config))
     additional = config.get("additional_languages")
     if not isinstance(additional, list):
         additional = []
@@ -314,11 +430,11 @@ def get_allowed_languages(config: dict) -> list[str]:
     if not additional:
         lang_list = config.get("languages")
         if isinstance(lang_list, list) and len(lang_list) > 1:
-            additional = [str(x).lower().strip() for x in lang_list[1:] if x]
+            additional = [normalize_lang_code(x) for x in lang_list[1:] if x]
+    additional = _dedupe_lang_list(additional, primary=primary)
     seen = {primary}
     result = [_WHISPER_LANG_CODE.get(primary, primary)]
-    for lang in additional:
-        code = str(lang).lower().strip()
+    for code in additional:
         if code and code not in seen:
             seen.add(code)
             result.append(_WHISPER_LANG_CODE.get(code, code))
@@ -392,31 +508,63 @@ def save_config_to_disk(config: dict) -> None:
     mid-write never leaves a partial/empty JSON file that would wipe user_terms on
     the next launch.
     """
-    import json
+    config_path = get_config_path()
+    try:
+        write_json_atomic(config_path, config, indent=4)
+    except OSError as e:
+        log_error(f"Error saving config: {e}")
+
+
+def write_json_atomic(path: Path, payload: object, *, indent: int | None = None) -> None:
+    """Atomically write JSON payload to *path* using temp file + os.replace."""
     import tempfile
 
-    config_path = get_config_path()
     tmp_path = None
     try:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
         tmp_path = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=4)
+                json.dump(payload, f, indent=indent)
                 f.flush()
                 os.fsync(f.fileno())
         except Exception:
-            os.close(fd)
             raise
-        os.replace(tmp_path, config_path)
-    except OSError as e:
-        log_error(f"Error saving config: {e}")
+        os.replace(tmp_path, path)
+    except OSError:
         if tmp_path is not None:
             try:
                 tmp_path.unlink(missing_ok=True)
             except Exception:
                 pass
+        raise
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Atomically write *text* to *path* using temp file + os.replace + fsync."""
+    import tempfile
+
+    tmp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            raise
+        os.replace(tmp_path, path)
+    except OSError:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
 
 
 # Language hints passed to Whisper as initial_prompt prefix.
@@ -431,7 +579,7 @@ LANG_PROMPTS: dict[str, str] = {
     "pt": "Texto em português.",
     "nl": "Nederlandse tekst.",
     "pl": "Tekst po polsku.",
-    "ua": "Українська мова.",
+    "uk": "Українська мова.",
     "tr": "Türkçe metin.",
     "zh": "中文文本。",
     "ja": "日本語テキスト。",
@@ -453,7 +601,7 @@ LANG_DEFAULT_CONTEXT: dict[str, str] = {
     "pt": "Esta é linguagem falada com vocabulário profissional e técnico.",
     "nl": "Dit is gesproken taal met professionele en technische woordenschat.",
     "pl": "To jest mowa potoczna z profesjonalnym słownictwem technicznym.",
-    "ua": "Це розмовна мова з використанням професійних термінів і абревіатур.",
+    "uk": "Це розмовна мова з використанням професійних термінів і абревіатур.",
     "tr": "Bu, profesyonel ve teknik kelime hazinesiyle konuşma dilidir.",
     "zh": "这是口语，使用专业和技术词汇。",
     "ja": "これは専門的・技術的な語彙を使った話し言葉です。",
@@ -461,8 +609,56 @@ LANG_DEFAULT_CONTEXT: dict[str, str] = {
     "ar": "هذا هو اللغة المنطوقة مع المفردات المهنية والتقنية.",
 }
 
+# Boundary punctuation removed from terms (leading/trailing only).
+# Keep +/#/_/- because they can be meaningful in technical terms (C++, C#, x-y).
+_TERM_BOUNDARY_PUNCT: set[str] = (
+    (set(string.punctuation) - set("+#_-"))
+    | set("«»“”„‟‘’‚‛…—–·，。！？、：；（）【】《》「」『』")
+)
+_SEMANTIC_LEADING_PUNCT: set[str] = {".", "@"}
+
+
+def _is_semantic_leading_punct(text: str, idx: int) -> bool:
+    """True when boundary punctuation is part of a meaningful term prefix."""
+    if idx < 0 or idx >= len(text):
+        return False
+    ch = text[idx]
+    if ch not in _SEMANTIC_LEADING_PUNCT:
+        return False
+    if idx + 1 >= len(text):
+        return False
+    return text[idx + 1].isalnum()
+
+
+def canonicalize_term(term: str) -> str:
+    """Normalize a term for display/storage without touching inner symbols.
+
+    - trims surrounding whitespace
+    - removes only leading/trailing punctuation
+    - keeps inner punctuation/symbols (e.g. C++, node.js, v2.1)
+    """
+    text = " ".join(str(term or "").split())
+    if not text:
+        return ""
+    start = 0
+    end = len(text)
+    while start < end and text[start] in _TERM_BOUNDARY_PUNCT:
+        # Preserve semantic prefixes like ".NET" and "@mention".
+        if _is_semantic_leading_punct(text, start):
+            break
+        start += 1
+    while end > start and text[end - 1] in _TERM_BOUNDARY_PUNCT:
+        end -= 1
+    return text[start:end]
+
+
+def canonical_term_key(term: str) -> str:
+    """Return lowercase identity key for a term after boundary normalization."""
+    return canonicalize_term(term).lower()
+
+
 # Normalised set for filtering language-hint phrases during term parsing.
-_LANG_HINT_LOWER: set[str] = {v.lower().rstrip(". ") for v in LANG_PROMPTS.values()}
+_LANG_HINT_LOWER: set[str] = {canonical_term_key(v.rstrip(". ")) for v in LANG_PROMPTS.values()}
 
 # Whisper's hard prompt limit is 224 BPE tokens. We budget 200 tokens for the
 # vocab/hint portion (app.py reserves the rest for the per-chunk instruction).
@@ -509,10 +705,10 @@ def parse_prompt_terms(text: str) -> list[str]:
     result: list[str] = []
     seen_lower: set[str] = set()
     for part in re.split(r"[,\n]+", text):
-        t = part.strip(" .")
+        t = canonicalize_term(part)
         if not t:
             continue
-        key = t.lower()
+        key = canonical_term_key(t)
         if key in _LANG_HINT_LOWER:
             continue
         if key not in seen_lower:
@@ -521,15 +717,38 @@ def parse_prompt_terms(text: str) -> list[str]:
     return result
 
 
-def deduplicate_prompt_terms(terms: list[str]) -> list[str]:
-    """Deduplicate a list of terms case-insensitively, preserving first occurrence."""
+def _term_str(item) -> str:
+    """Return the term string from a str or v5 dict entry."""
+    return item if isinstance(item, str) else item["term"]
+
+
+def _term_is_active(item) -> bool:
+    """Return False only for v5 dict entries explicitly marked inactive."""
+    return not (isinstance(item, dict) and item.get("inactive"))
+
+
+def _term_sort_key(item) -> tuple:
+    """Sort key: manual(0) < correction(1) < auto(2); then use_count desc; then last_seen desc."""
+    if isinstance(item, str):
+        return (0, 0, "")
+    src_order = {"manual": 0, "correction": 1, "auto": 2}.get(item.get("source", "manual"), 3)
+    use_count = -(item.get("use_count") or 0)
+    last_seen = item.get("last_seen") or ""
+    return (src_order, use_count, last_seen)
+
+
+def deduplicate_prompt_terms(terms: list) -> list:
+    """Deduplicate terms case-insensitively, preserving first occurrence.
+
+    Accepts lists of str or v5 dict entries (or mixed); returns items of the same types.
+    """
     seen_lower: set[str] = set()
-    result: list[str] = []
-    for term in terms:
-        key = term.lower().strip()
+    result = []
+    for item in terms:
+        key = canonical_term_key(_term_str(item))
         if key and key not in seen_lower:
             seen_lower.add(key)
-            result.append(term)
+            result.append(item)
     return result
 
 
@@ -549,13 +768,15 @@ def build_initial_prompt(config: dict) -> str:
 
     user_terms: dict = config.get("user_terms") or {}
 
-    terms: list[str] = list(user_terms.get(primary, []))
+    # Collect active terms only; sort by priority (manual > correction > auto by use_count).
+    raw: list = [t for t in user_terms.get(primary, []) if _term_is_active(t)]
     for lang in additional:
         if lang != primary:
-            terms.extend(user_terms.get(lang, []))
-    terms = deduplicate_prompt_terms(terms)
+            raw.extend(t for t in user_terms.get(lang, []) if _term_is_active(t))
+    raw = sorted(raw, key=_term_sort_key)
+    terms: list[str] = [_term_str(t) for t in deduplicate_prompt_terms(raw)]
 
-    primary_has_terms = bool(user_terms.get(primary))
+    primary_has_terms = any(_term_is_active(t) for t in user_terms.get(primary, []))
 
     # Build the fixed prefix (lang hint + optional style sentence)
     if not terms:
@@ -628,7 +849,7 @@ def migrate_config_to_v2(config: dict) -> dict:
     config.setdefault("pending_suggestions", {})
     config.setdefault("skipped_terms", {})
     config.setdefault("prompt_update_mode", "suggest")
-    config.setdefault("auto_prompt_check_interval", 50)
+    config.setdefault("auto_prompt_check_interval", 20)
     config.setdefault("last_analysis_phrase_count", 0)
 
     # Remove all v1 keys.
@@ -701,6 +922,192 @@ def migrate_config_to_v4(config: dict) -> dict:
     config["schema_version"] = 4
     config["initial_prompt"] = build_initial_prompt(config)
     return config
+
+
+def migrate_config_to_v5(config: dict) -> dict:
+    """Add per-term metadata (source, added_at, last_seen, use_count) to user_terms.
+
+    Idempotent: returns unchanged dict when schema_version >= 5.
+    Legacy string entries are converted to dicts with source="manual" so they
+    are never touched by the decay algorithm.
+    """
+    if config.get("schema_version", 1) >= 5:
+        return config
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    new_user_terms: dict[str, list[dict]] = {}
+    for lang, terms in (config.get("user_terms") or {}).items():
+        new_list = []
+        for t in terms:
+            if isinstance(t, str):
+                new_list.append({
+                    "term": t,
+                    "source": "manual",
+                    "added_at": now_iso,
+                    "last_seen": now_iso,
+                    "use_count": 0,
+                })
+            elif isinstance(t, dict):
+                new_list.append(t)
+        new_user_terms[lang] = new_list
+
+    config["user_terms"] = new_user_terms
+    config["schema_version"] = 5
+    config.setdefault("last_decay_run_ts", None)
+    config.setdefault("max_dictionary_age_days", 60)
+    config["initial_prompt"] = build_initial_prompt(config)
+    return config
+
+
+def migrate_config_to_v6(config: dict) -> dict:
+    """Add manual replacement pairs for misrecognition hints and direct fallback replace.
+
+    Idempotent when schema_version >= 6.
+    """
+    if config.get("schema_version", 1) >= 6:
+        config.setdefault("manual_replacements", [])
+        return config
+
+    raw = config.get("manual_replacements")
+    cleaned: list[dict] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            fr = str(item.get("from", "")).strip()
+            to = str(item.get("to", "")).strip()
+            if not fr or not to:
+                continue
+            entry = {"from": fr, "to": to}
+            added_at = item.get("added_at")
+            if isinstance(added_at, str) and added_at.strip():
+                entry["added_at"] = added_at.strip()
+            cleaned.append(entry)
+
+    config["manual_replacements"] = cleaned
+    config["schema_version"] = 6
+    return config
+
+
+def normalize_ukrainian_lang_codes(config: dict) -> dict:
+    """Normalize legacy 'ua' codes to canonical internal 'uk'.
+
+    Applies to top-level language fields and language-keyed maps while preserving
+    data. Dictionary-like sections are merged deterministically when both `ua`
+    and `uk` entries exist.
+    """
+    primary = config.get("primary_language")
+    if isinstance(primary, str):
+        config["primary_language"] = normalize_lang_code(primary)
+
+    additional = config.get("additional_languages")
+    if isinstance(additional, list):
+        config["additional_languages"] = _dedupe_lang_list(additional, primary=config.get("primary_language"))
+
+    # Legacy v1 field support.
+    legacy_langs = config.get("languages")
+    if isinstance(legacy_langs, list):
+        config["languages"] = _dedupe_lang_list(legacy_langs)
+
+    def _merge_lang_lists(section: str) -> None:
+        raw = config.get(section)
+        if not isinstance(raw, dict):
+            return
+        merged: dict[str, list] = {}
+        for lang, values in raw.items():
+            if not isinstance(values, list):
+                continue
+            key = normalize_lang_code(lang)
+            current = list(merged.get(key, []))
+            merged[key] = deduplicate_prompt_terms(current + list(values))
+        config[section] = merged
+
+    _merge_lang_lists("user_terms")
+    _merge_lang_lists("pending_suggestions")
+    _merge_lang_lists("prompt_snapshots")
+
+    skipped_raw = config.get("skipped_terms")
+    if isinstance(skipped_raw, dict):
+        merged_skipped: dict[str, dict[str, int]] = {}
+        for lang, terms in skipped_raw.items():
+            if not isinstance(terms, dict):
+                continue
+            key = normalize_lang_code(lang)
+            bucket = merged_skipped.setdefault(key, {})
+            for term, cnt in terms.items():
+                canonical = canonical_term_key(term)
+                if not canonical:
+                    continue
+                bucket[canonical] = max(bucket.get(canonical, -1), int(cnt))
+        config["skipped_terms"] = merged_skipped
+
+    return config
+
+
+def update_term_usage(config: dict, phrase: str) -> bool:
+    """Bump use_count and last_seen for any v5 dict terms found in *phrase*.
+
+    Single-word terms are matched via token set; multi-word terms via substring.
+    Returns True if at least one term was updated (dirty-flag hint for caller).
+    """
+    phrase_lower = phrase.lower()
+    tokens: set[str] = set(re.findall(r"[\w'-]+", phrase_lower))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    dirty = False
+    for lang, terms in (config.get("user_terms") or {}).items():
+        for item in terms:
+            if not isinstance(item, dict):
+                continue
+            term_lower = canonical_term_key(item["term"])
+            if " " in term_lower:
+                found = term_lower in phrase_lower
+            else:
+                found = term_lower in tokens
+            if found:
+                item["last_seen"] = now_iso
+                item["use_count"] = item.get("use_count", 0) + 1
+                if item.get("inactive"):
+                    item.pop("inactive")
+                dirty = True
+    return dirty
+
+
+def apply_decay(config: dict, max_age_days: int | None = None) -> int:
+    """Mark stale auto/correction terms inactive in initial_prompt.
+
+    Terms are deactivated when ALL of the following hold:
+    - source != "manual"
+    - last_seen older than max_age_days
+    - use_count < 3
+
+    Returns number of terms deactivated. Manual terms are never touched.
+    """
+    if max_age_days is None:
+        max_age_days = int(config.get("max_dictionary_age_days", 60))
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_age_days)
+    deactivated = 0
+    for lang, terms in (config.get("user_terms") or {}).items():
+        for item in terms:
+            if not isinstance(item, dict):
+                continue
+            if item.get("source") == "manual":
+                continue
+            raw_ts = item.get("last_seen") or item.get("added_at")
+            if not raw_ts:
+                continue
+            try:
+                last_seen = datetime.fromisoformat(raw_ts)
+            except ValueError:
+                continue
+            # Make timezone-aware if naive
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            if last_seen < cutoff and item.get("use_count", 0) < 3:
+                if not item.get("inactive"):
+                    item["inactive"] = True
+                    deactivated += 1
+    return deactivated
 
 
 def _run_notification(script: str) -> None:

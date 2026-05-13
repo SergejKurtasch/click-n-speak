@@ -9,10 +9,9 @@ silently discarded when the worker was behind the recorder).
 import queue
 import threading
 import time
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 
 def _make_app():
@@ -28,11 +27,15 @@ def _make_app():
              "transcribing_body": "",
              "still_working_title": "Всё ещё...",
              "still_working_body": "",
-             "ready_title": "",
-             "ready_body": "",
-             "edit_confirm_title": "Подтверди",
-             "transcription_instruction": "",
-         }), \
+                 "ready_title": "",
+                 "ready_body": "",
+                 "edit_confirm_title": "Подтверди",
+                 "transcription_instruction": "",
+                 "popup_title_with_hotkey": "Редактируй",
+                 "toast_added": "Added: {term}",
+                 "toast_invalid_term": "Bad term",
+                 "toast_exists": "Exists",
+             }), \
          patch("src.app.get_primary_language", return_value="ru"), \
          patch("src.app.build_initial_prompt", return_value=""), \
          patch("src.app.log_info"), \
@@ -45,6 +48,10 @@ def _make_app():
         app.is_processing = False
         app.transcribed_parts = []
         app._raw_whisper_chunks = []
+        app._raw_whisper_text = ""
+        app._ai_edited_text = None
+        app._ai_editor_status = None
+        app._needs_buffered_finalization = False
         app._session_id = 1
         app.chunk_queue = queue.Queue()
         app.stop_worker = threading.Event()
@@ -56,11 +63,14 @@ def _make_app():
         app._delayed_transcribing_timer = None
         app._timer_lock = threading.Lock()
         app._preview_panel = MagicMock()
+        app._append_to_popup = False
         app._still_working_delay_seconds = 999
         app._cached_initial_prompt = ""
         app._initial_prompt_dirty = False
         app._last_transcription_time = time.time()
+        app._completed_sessions = 0
         app.ai_editor = None
+        app.gemini_editor = None
         app.worker_thread = None
         return app
 
@@ -114,3 +124,25 @@ def test_process_chunk_no_longer_skips_non_final_on_stop():
     # transcriber.transcribe must have been called despite stop_worker being set
     app.transcriber.transcribe.assert_called_once()
     assert "слово" in app.transcribed_parts
+
+
+def test_worker_finalizes_buffered_partials_after_no_final_audio_timeout():
+    """If stop() had no final chunk, late partials must still open the popup after drain."""
+    app = _make_app()
+    app.stop_worker.set()
+    app._needs_buffered_finalization = True
+    app.transcribed_parts = ["поздний чанк"]
+    app._raw_whisper_chunks = ["поздний чанк"]
+
+    app.chunk_worker()
+
+    fn, args, kwargs = app._main_thread_queue.get_nowait()
+    assert fn == app._finalize_buffered_transcription_on_main
+    assert args == (1,)
+    assert kwargs == {}
+
+    fn(*args, **kwargs)
+
+    app._preview_panel.show_interactive.assert_called_once()
+    shown_text = app._preview_panel.show_interactive.call_args.args[0]
+    assert shown_text == "поздний чанк"
