@@ -1,5 +1,6 @@
 import json
 import queue
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -282,6 +283,9 @@ class SVoiceRecApp:
         self._ai_editor_status: Optional[str] = None
         self._needs_buffered_finalization: bool = False
         self._buffered_final_text: Optional[str] = None
+        self._last_memory_pressure_notification_ts: float = 0.0
+        # Cache for _is_memory_pressure_high(): result + timestamp (monotonic).
+        self._memory_pressure_cache: tuple[bool, float] = (False, 0.0)
 
         # Cached result of build_initial_prompt(). Invalidated by load_config_data()
         # so process_chunk() avoids rebuilding (dedup+join+truncate) on every chunk.
@@ -1510,7 +1514,8 @@ class SVoiceRecApp:
                     if self._preview_panel:
                         self._preview_panel.update_text(accumulated, self._main_thread_queue)
                     log_info(
-                        f"Partial chunk buffered ({len(self.transcribed_parts)} chunk(s))"
+                        f"Partial chunk buffered ({len(self.transcribed_parts)} chunk(s)), "
+                        f"last_chunk_len={len(text)}"
                     )
             else:
                 log_info("Transcriber returned empty text for this chunk.")
@@ -1959,13 +1964,34 @@ class SVoiceRecApp:
             log_error(f"Transcriber restart failed: {e}")
 
     def _is_memory_pressure_high(self) -> bool:
-        """Check if system memory usage exceeds the threshold."""
+        """Return True only when macOS reports CRITICAL memory pressure (level 4).
+
+        Uses kern.memorystatus_vm_pressure_level (1=Normal, 2=Warning, 4=Critical).
+        Results are cached for 5 s to avoid spawning sysctl on every chunk.
+        Falls back to psutil percent check if sysctl is unavailable.
+        """
+        cached_result, cached_at = self._memory_pressure_cache
+        if time.monotonic() - cached_at < 5.0:
+            return cached_result
+        result = self._check_memory_pressure_now()
+        self._memory_pressure_cache = (result, time.monotonic())
+        return result
+
+    def _check_memory_pressure_now(self) -> bool:
+        try:
+            r = subprocess.run(
+                ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                capture_output=True, text=True, timeout=1.0
+            )
+            if r.returncode == 0:
+                return int(r.stdout.strip()) >= 4  # 4 = Critical only
+        except Exception:
+            pass
+        # Fallback: psutil percent
         try:
             import psutil
-            mem = psutil.virtual_memory()
-            return mem.percent > MEMORY_PRESSURE_THRESHOLD_PERCENT
+            return psutil.virtual_memory().percent > MEMORY_PRESSURE_THRESHOLD_PERCENT
         except ImportError:
-            # psutil not available — assume memory is fine
             return False
         except Exception as e:
             log_error(f"Error checking memory pressure: {e}")
@@ -1976,7 +2002,12 @@ class SVoiceRecApp:
 
         Called on the main thread via _submit_for_main_thread so it doesn't race
         with the interactive popup appearing at the same moment.
+        Throttled to at most once per 30 minutes so repeated skips don't spam the user.
         """
+        now = time.monotonic()
+        if now - self._last_memory_pressure_notification_ts < 30 * 60:
+            return
+        self._last_memory_pressure_notification_ts = now
         send_notification(
             "Click-n-speak",
             "AI-редактор пропущен",
