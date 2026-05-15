@@ -221,6 +221,7 @@ class SVoiceRecApp:
             target_speech_duration=self.config.get("target_speech_duration", 4.0),
             max_speech_duration=self.config.get("max_speech_duration", 8.0),
             min_speech_duration=self.config.get("min_speech_duration", 0.5),
+            on_fatal_error=self._on_recorder_fatal_error,
         )
         self.transcriber = TranscriberProcessWrapper(
             model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
@@ -1144,6 +1145,12 @@ class SVoiceRecApp:
 
         try:
             self.recorder.start(chunk_callback=self.on_chunk_received)
+            if not self.recorder.recording:
+                # recorder.start() returned early due to a fatal audio error (e.g. PortAudio
+                # stream-close hang). _on_recorder_fatal_error already queued an auto-restart.
+                self.is_recording = False
+                self.stop_worker.set()
+                return
             log_info(
                 "AudioRecorder started with settings: "
                 f"sample_rate={self.recorder.sample_rate}, "
@@ -1935,6 +1942,16 @@ class SVoiceRecApp:
             except Exception:
                 pass
             self._keep_alive_timer = None
+
+    def _on_recorder_fatal_error(self) -> None:
+        """Called by AudioRecorder when the audio stream cannot be recovered.
+
+        Runs on the recorder's background thread — posts restart to main thread.
+        """
+        def _do_restart():
+            if self.menu_bar is not None:
+                self.menu_bar.restart_application()
+        self._submit_for_main_thread(_do_restart)
 
     def _restart_transcriber_for_memory(self) -> None:
         """Restart the transcriber child process to reset accumulated MLX memory.

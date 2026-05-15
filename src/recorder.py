@@ -32,12 +32,14 @@ class AudioRecorder:
         target_speech_duration=4.0,
         max_speech_duration=8.0,
         min_speech_duration=0.5,
+        on_fatal_error=None,
     ):
         self.sample_rate = sample_rate
         self.recording = False
         self.audio_data = []  # Current chunk data
         self.stream = None
         self._stop_event = threading.Event()
+        self._on_fatal_error = on_fatal_error
 
         # Silence detection parameters
         self.silence_threshold = silence_threshold
@@ -59,7 +61,8 @@ class AudioRecorder:
         else:
             log_info("webrtcvad not found, falling back to RMS energy. Run 'pip install webrtcvad' for better accuracy.")
 
-        # If device_id is provided in config, use it. Otherwise, try to find built-in.
+        # If device_id is provided in config, pin it; otherwise scan at init and before each start.
+        self._device_id_from_config = device_id is not None
         if device_id is not None:
             self.device_id = device_id
         else:
@@ -177,22 +180,33 @@ class AudioRecorder:
             log_info("Previous stream close still in progress. Waiting up to 5s…")
             close_thread.join(timeout=5.0)
             if close_thread.is_alive():
-                # Thread is a daemon — it will be cleaned up by the OS eventually.
-                # Force-reset our state so the user isn't permanently locked out.
+                # The old PortAudio/CoreAudio abort() is stuck — likely because macOS
+                # reconfigured the audio device graph (e.g. Bluetooth connect/disconnect).
+                # Starting a new stream while the close thread holds the PortAudio mutex
+                # would either deadlock or produce a stream that captures no audio.
+                # Trigger an auto-restart instead.
                 log_error(
                     "Previous audio stream close did not complete after 5s. "
-                    "Force-resetting recorder state to allow new recording."
+                    "Triggering automatic restart."
                 )
                 send_notification(
                     "Сбой аудиосистемы macOS",
-                    "Микрофон завис.",
-                    "Пожалуйста, перезапустите Click-n-speak.",
+                    "Микрофон завис — перезапускаю Click-n-speak.",
+                    "",
                 )
                 self.stream = None
                 self._close_thread = None
+                if self._on_fatal_error is not None:
+                    self._on_fatal_error()
+                return  # Don't attempt to open a broken stream
             else:
                 log_info("Previous stream close completed. Proceeding with new recording.")
                 self._close_thread = None
+
+        # Re-scan device ID before each start: macOS/PortAudio renumbers devices when
+        # audio configuration changes (Bluetooth, USB audio), so the cached ID can become stale.
+        if not self._device_id_from_config:
+            self.device_id = self._find_builtin_device()
 
         log_info(f"Starting recording on device {self.device_id if self.device_id is not None else 'default'}...")
         self.audio_data = []
