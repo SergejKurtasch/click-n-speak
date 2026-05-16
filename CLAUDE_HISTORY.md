@@ -157,6 +157,15 @@
 
 ---
 
+### ✅ Etap 16 — Stability: PortAudio auto-restart, native memory pressure, SuggestionsPanel height
+
+- **PortAudio stream-close hang recovery** (`recorder.py`): `start()` detects stuck `_close_thread` after 5 s timeout → calls `_on_fatal_error` callback → `SVoiceRecApp._on_recorder_fatal_error()` posts `restart_application()` to `_main_thread_queue`; `_device_id_from_config` flag enables per-start device re-scan for Bluetooth/USB reconnections
+- **Native macOS memory pressure** (`app.py`): `_is_memory_pressure_high()` reads `kern.memorystatus_vm_pressure_level` via sysctl (Critical=4 only, not psutil percent); sysctl runs in a daemon thread (`_refresh_memory_pressure_cache` / `_memory_pressure_refresh_thread`) so chunk_worker is never blocked; cache TTL 5 s; memory-pressure notifications throttled to once per 30 min (`_last_memory_pressure_notification_ts`)
+- **SuggestionsPanel window height** (`suggestions_panel.py`): height formula corrected to `min(max(desired_h, fixed_h + _MIN_LIST_H), max_h)` — window always tall enough for minimum list area even with one term
+- **Файлы:** `src/app.py`, `src/recorder.py`, `src/suggestions_panel.py`, `tests/test_stability_fixes.py`
+
+---
+
 ### ✅ Etap 15 — Direct replacement pairs pipeline + ReplacementsPanel
 - `src/replacements_panel.py` (новый): NSWindow для редактирования ручных пар замены (from→to); auto-пары из corrections index; enable/disable per-row
 - `src/vocab_provider.py`: `normalize_replacement_side`, `manual_replacement_tuples`, `list_replacement_rows_for_ui`, `apply_replacements`, `apply_replacements_sequential`, `collect_replacement_pairs_for_apply`, `_merge_misrecognition_pairs`, `_compile_replacement_pattern`

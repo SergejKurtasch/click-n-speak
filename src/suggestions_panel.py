@@ -188,8 +188,9 @@ class SuggestionsPanel:
             + _MARGIN
         )
         desired_h = fixed_h + (n * _ROW_H)
-        max_h = max(_MIN_LIST_H + fixed_h, sf.size.height * _MAX_SCREEN_H_RATIO)
-        window_h = min(desired_h, max_h)
+        max_h = sf.size.height * _MAX_SCREEN_H_RATIO
+        # Window must always be tall enough to show the minimum list area.
+        window_h = min(max(desired_h, fixed_h + _MIN_LIST_H), max_h)
         list_h = max(_MIN_LIST_H, window_h - fixed_h)
 
         btn_y = _MARGIN

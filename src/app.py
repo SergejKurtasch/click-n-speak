@@ -1,5 +1,6 @@
 import json
 import queue
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -220,6 +221,7 @@ class SVoiceRecApp:
             target_speech_duration=self.config.get("target_speech_duration", 4.0),
             max_speech_duration=self.config.get("max_speech_duration", 8.0),
             min_speech_duration=self.config.get("min_speech_duration", 0.5),
+            on_fatal_error=self._on_recorder_fatal_error,
         )
         self.transcriber = TranscriberProcessWrapper(
             model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
@@ -282,6 +284,11 @@ class SVoiceRecApp:
         self._ai_editor_status: Optional[str] = None
         self._needs_buffered_finalization: bool = False
         self._buffered_final_text: Optional[str] = None
+        self._last_memory_pressure_notification_ts: float = 0.0
+        # Cache for _is_memory_pressure_high(): result + timestamp (monotonic).
+        self._memory_pressure_cache: tuple[bool, float] = (False, 0.0)
+        # Background thread that refreshes _memory_pressure_cache without blocking worker.
+        self._memory_pressure_refresh_thread: Optional[threading.Thread] = None
 
         # Cached result of build_initial_prompt(). Invalidated by load_config_data()
         # so process_chunk() avoids rebuilding (dedup+join+truncate) on every chunk.
@@ -1140,6 +1147,12 @@ class SVoiceRecApp:
 
         try:
             self.recorder.start(chunk_callback=self.on_chunk_received)
+            if not self.recorder.recording:
+                # recorder.start() returned early due to a fatal audio error (e.g. PortAudio
+                # stream-close hang). _on_recorder_fatal_error already queued an auto-restart.
+                self.is_recording = False
+                self.stop_worker.set()
+                return
             log_info(
                 "AudioRecorder started with settings: "
                 f"sample_rate={self.recorder.sample_rate}, "
@@ -1510,7 +1523,8 @@ class SVoiceRecApp:
                     if self._preview_panel:
                         self._preview_panel.update_text(accumulated, self._main_thread_queue)
                     log_info(
-                        f"Partial chunk buffered ({len(self.transcribed_parts)} chunk(s))"
+                        f"Partial chunk buffered ({len(self.transcribed_parts)} chunk(s)), "
+                        f"last_chunk_len={len(text)}"
                     )
             else:
                 log_info("Transcriber returned empty text for this chunk.")
@@ -1931,6 +1945,16 @@ class SVoiceRecApp:
                 pass
             self._keep_alive_timer = None
 
+    def _on_recorder_fatal_error(self) -> None:
+        """Called by AudioRecorder when the audio stream cannot be recovered.
+
+        Runs on the recorder's background thread — posts restart to main thread.
+        """
+        def _do_restart():
+            if self.menu_bar is not None:
+                self.menu_bar.restart_application()
+        self._submit_for_main_thread(_do_restart)
+
     def _restart_transcriber_for_memory(self) -> None:
         """Restart the transcriber child process to reset accumulated MLX memory.
 
@@ -1959,13 +1983,46 @@ class SVoiceRecApp:
             log_error(f"Transcriber restart failed: {e}")
 
     def _is_memory_pressure_high(self) -> bool:
-        """Check if system memory usage exceeds the threshold."""
+        """Return True only when macOS reports CRITICAL memory pressure (level 4).
+
+        Uses kern.memorystatus_vm_pressure_level (1=Normal, 2=Warning, 4=Critical).
+        Results are cached for 5 s. Cache refresh runs in a daemon thread so that
+        the chunk-worker thread is never blocked by sysctl spawning.
+        Falls back to psutil percent check if sysctl is unavailable.
+        """
+        cached_result, cached_at = self._memory_pressure_cache
+        if time.monotonic() - cached_at < 5.0:
+            return cached_result
+        # Cache is stale — kick off a background refresh and return the current value
+        # immediately so the worker thread is not blocked by subprocess.run.
+        t = self._memory_pressure_refresh_thread
+        if t is None or not t.is_alive():
+            t = threading.Thread(target=self._refresh_memory_pressure_cache, daemon=True)
+            self._memory_pressure_refresh_thread = t
+            t.start()
+        return cached_result
+
+    def _refresh_memory_pressure_cache(self) -> None:
+        result = self._check_memory_pressure_now()
+        self._memory_pressure_cache = (result, time.monotonic())
+
+    def _check_memory_pressure_now(self) -> bool:
+        try:
+            r = subprocess.run(
+                ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                capture_output=True, text=True, timeout=1.0
+            )
+            if r.returncode == 0:
+                return int(r.stdout.strip()) >= 4  # 4 = Critical only
+        except subprocess.TimeoutExpired:
+            log_info("sysctl memory pressure check timed out, falling back to psutil")
+        except (OSError, ValueError) as e:
+            log_info(f"sysctl memory pressure check failed: {e}")
+        # Fallback: psutil percent
         try:
             import psutil
-            mem = psutil.virtual_memory()
-            return mem.percent > MEMORY_PRESSURE_THRESHOLD_PERCENT
+            return psutil.virtual_memory().percent > MEMORY_PRESSURE_THRESHOLD_PERCENT
         except ImportError:
-            # psutil not available — assume memory is fine
             return False
         except Exception as e:
             log_error(f"Error checking memory pressure: {e}")
@@ -1976,7 +2033,12 @@ class SVoiceRecApp:
 
         Called on the main thread via _submit_for_main_thread so it doesn't race
         with the interactive popup appearing at the same moment.
+        Throttled to at most once per 30 minutes so repeated skips don't spam the user.
         """
+        now = time.monotonic()
+        if now - self._last_memory_pressure_notification_ts < 30 * 60:
+            return
+        self._last_memory_pressure_notification_ts = now
         send_notification(
             "Click-n-speak",
             "AI-редактор пропущен",
