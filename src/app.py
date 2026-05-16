@@ -287,6 +287,8 @@ class SVoiceRecApp:
         self._last_memory_pressure_notification_ts: float = 0.0
         # Cache for _is_memory_pressure_high(): result + timestamp (monotonic).
         self._memory_pressure_cache: tuple[bool, float] = (False, 0.0)
+        # Background thread that refreshes _memory_pressure_cache without blocking worker.
+        self._memory_pressure_refresh_thread: Optional[threading.Thread] = None
 
         # Cached result of build_initial_prompt(). Invalidated by load_config_data()
         # so process_chunk() avoids rebuilding (dedup+join+truncate) on every chunk.
@@ -1984,15 +1986,25 @@ class SVoiceRecApp:
         """Return True only when macOS reports CRITICAL memory pressure (level 4).
 
         Uses kern.memorystatus_vm_pressure_level (1=Normal, 2=Warning, 4=Critical).
-        Results are cached for 5 s to avoid spawning sysctl on every chunk.
+        Results are cached for 5 s. Cache refresh runs in a daemon thread so that
+        the chunk-worker thread is never blocked by sysctl spawning.
         Falls back to psutil percent check if sysctl is unavailable.
         """
         cached_result, cached_at = self._memory_pressure_cache
         if time.monotonic() - cached_at < 5.0:
             return cached_result
+        # Cache is stale — kick off a background refresh and return the current value
+        # immediately so the worker thread is not blocked by subprocess.run.
+        t = self._memory_pressure_refresh_thread
+        if t is None or not t.is_alive():
+            t = threading.Thread(target=self._refresh_memory_pressure_cache, daemon=True)
+            self._memory_pressure_refresh_thread = t
+            t.start()
+        return cached_result
+
+    def _refresh_memory_pressure_cache(self) -> None:
         result = self._check_memory_pressure_now()
         self._memory_pressure_cache = (result, time.monotonic())
-        return result
 
     def _check_memory_pressure_now(self) -> bool:
         try:
@@ -2002,8 +2014,10 @@ class SVoiceRecApp:
             )
             if r.returncode == 0:
                 return int(r.stdout.strip()) >= 4  # 4 = Critical only
-        except Exception:
-            pass
+        except subprocess.TimeoutExpired:
+            log_info("sysctl memory pressure check timed out, falling back to psutil")
+        except (OSError, ValueError) as e:
+            log_info(f"sysctl memory pressure check failed: {e}")
         # Fallback: psutil percent
         try:
             import psutil

@@ -298,27 +298,29 @@ def test_min_speech_duration_filtering():
 # ---------------------------------------------------------------------------
 
 def test_keep_alive_memory_pressure():
-    """Test that keep alive respects memory pressure threshold (psutil fallback path)."""
+    """Test _check_memory_pressure_now psutil fallback path.
+
+    _is_memory_pressure_high() now delegates the actual check to a background thread
+    and returns the cached value immediately, so we test the underlying
+    _check_memory_pressure_now() directly.
+    """
     from src.app import SVoiceRecApp, MEMORY_PRESSURE_THRESHOLD_PERCENT
     import sys
     from unittest.mock import patch
 
     app = SVoiceRecApp.__new__(SVoiceRecApp)
-    # Required by _is_memory_pressure_high
-    app._memory_pressure_cache = (False, 0.0)
 
     mock_psutil = MagicMock()
     sys.modules["psutil"] = mock_psutil
 
     try:
         # Force sysctl to fail so code falls back to psutil
-        with patch("subprocess.run", side_effect=Exception("no sysctl")):
+        with patch("subprocess.run", side_effect=OSError("no sysctl")):
             mock_psutil.virtual_memory.return_value.percent = MEMORY_PRESSURE_THRESHOLD_PERCENT + 10
-            assert app._is_memory_pressure_high() is True
-            app._memory_pressure_cache = (False, 0.0)  # reset cache between checks
+            assert app._check_memory_pressure_now() is True
 
             mock_psutil.virtual_memory.return_value.percent = MEMORY_PRESSURE_THRESHOLD_PERCENT - 10
-            assert app._is_memory_pressure_high() is False
+            assert app._check_memory_pressure_now() is False
     finally:
         sys.modules.pop("psutil", None)
 

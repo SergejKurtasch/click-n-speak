@@ -1,5 +1,6 @@
 import threading
 import time
+from typing import Callable, Optional
 
 import numpy as np
 import sounddevice as sd
@@ -32,7 +33,7 @@ class AudioRecorder:
         target_speech_duration=4.0,
         max_speech_duration=8.0,
         min_speech_duration=0.5,
-        on_fatal_error=None,
+        on_fatal_error: Optional[Callable[[], None]] = None,
     ):
         self.sample_rate = sample_rate
         self.recording = False
