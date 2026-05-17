@@ -40,6 +40,7 @@ from .vocab_provider import (
     collect_replacement_pairs_for_apply,
 )
 from .utils import (
+    _count_prompt_tokens,
     _term_str,
     apply_decay,
     build_initial_prompt,
@@ -83,6 +84,67 @@ def _join_chunks(parts: list[str]) -> str:
             result = result[:-1]
         result += " " + part
     return result.strip()
+
+
+# Whisper's prompt window is capped at 224 tokens; we stay 4 below to be safe.
+_WHISPER_PROMPT_TOKEN_LIMIT = 220
+_WHISPER_PROMPT_CHAR_BUDGET = 700
+# recent_text may occupy at most this fraction of the char budget so vocab is
+# never crowded out by a long transcription history.
+_RECENT_CHARS_RATIO = 0.5
+_MAX_RECENT_CHUNKS = 3
+
+
+def _build_chunk_context(
+    instruction: str,
+    vocab_prompt: str,
+    transcribed_parts: list[str],
+    char_budget: int = _WHISPER_PROMPT_CHAR_BUDGET,
+    token_limit: int = _WHISPER_PROMPT_TOKEN_LIMIT,
+) -> str:
+    """Build the initial_prompt context for one chunk transcription.
+
+    Guarantees:
+    - token count of result <= token_limit (BPE)
+    - len(result) <= char_budget
+    - vocab_prompt preserved whole; recent chunks trimmed first
+    - recent_text <= 50% of char_budget and at most _MAX_RECENT_CHUNKS chunks
+    """
+    base = instruction + vocab_prompt
+    base_tokens = _count_prompt_tokens(base)
+    if base_tokens > token_limit:
+        log_info(
+            f"_build_chunk_context: base exceeds token limit "
+            f"({base_tokens} > {token_limit}); recent_text skipped"
+        )
+
+    available_chars = min(
+        max(0, char_budget - len(base) - 1),
+        int(char_budget * _RECENT_CHARS_RATIO),
+    )
+    available_tokens = max(0, token_limit - base_tokens)
+
+    recent: list[str] = []
+    used_chars = 0
+    used_tokens = 0
+    tail = transcribed_parts[-_MAX_RECENT_CHUNKS:]
+    for chunk in reversed(tail):
+        sep = 1 if recent else 0
+        needed_chars = len(chunk) + sep
+        if used_chars + needed_chars > available_chars:
+            break
+        chunk_tokens = _count_prompt_tokens((" " if sep else "") + chunk)
+        if used_tokens + chunk_tokens > available_tokens:
+            break
+        recent.append(chunk)
+        used_chars += needed_chars
+        used_tokens += chunk_tokens
+    recent.reverse()
+
+    if recent:
+        return base + " " + " ".join(recent)
+    return base
+
 
 # Restart the transcriber child process every N completed sessions.
 # MLX weight tensors are never freed by clear_cache() (they're always referenced);
@@ -1327,24 +1389,7 @@ class SVoiceRecApp:
                 self._cached_initial_prompt = build_initial_prompt(self.config)
                 self._initial_prompt_dirty = False
             vocab_prompt = self._cached_initial_prompt
-            if self.transcribed_parts:
-                # Whisper's prompt window is ~224 tokens (~700 chars for mixed text).
-                # Subtract fixed parts to get chars available for recent speech context.
-                _WHISPER_PROMPT_BUDGET = 700
-                available = max(0, _WHISPER_PROMPT_BUDGET - len(instruction) - len(vocab_prompt) - 1)
-                recent: list[str] = []
-                used = 0
-                for chunk in reversed(self.transcribed_parts):
-                    needed = len(chunk) + (1 if recent else 0)
-                    if used + needed > available:
-                        break
-                    recent.append(chunk)
-                    used += needed
-                recent.reverse()
-                recent_text = " ".join(recent)
-                context = instruction + vocab_prompt + (" " + recent_text if recent_text else "")
-            else:
-                context = instruction + vocab_prompt
+            context = _build_chunk_context(instruction, vocab_prompt, self.transcribed_parts)
 
             allowed_languages = get_allowed_languages(self.config)
             condition_on_previous_text = self.config.get(
