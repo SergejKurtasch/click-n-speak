@@ -34,17 +34,21 @@ temp/
 # Personal / generated — not for repo
 current_prompt.txt
 phrase_history.txt
+config.json
 
 # Dev notes / AI assistant instructions — internal only
 CLAUDE.md
+CLAUDE_HISTORY.md
 .claude/
+
+# AI assistant local tooling — not for repo
+.agents/
+.codex/
 
 # Untracked dev files
 scripts/launcher.c
 
-# Auto-excluded (already handled by other tools)
-.pre-commit-config.yaml
-pyproject.toml
+# Internal / not for repo
 transparent Vector Illustration
 training1.md
 training2.md

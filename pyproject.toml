@@ -1,0 +1,42 @@
+[project]
+name = "click-n-speak"
+version = "0.1.0"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = [
+    "E501",   # line too long — в ML коде длинные строки норма
+    "N803",   # argument name should be lowercase — X, X_train это ML-конвенция
+    "N806",   # variable in function should be lowercase — X_val, X_boot и т.д.
+    "N802",   # function name should be lowercase — G_left и т.д.
+    "UP006",  # use list instead of List — починим постепенно
+    "UP007",  # use X|Y instead of Optional — починим постепенно
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+no_strict_optional = true
+follow_imports = "skip"
+disallow_untyped_defs = false
+check_untyped_defs = false
+
+disable_error_code = [
+    "attr-defined",
+    "union-attr",
+    "index",
+    "assignment",
+    "return-value",
+    "arg-type",
+    "var-annotated",
+    "valid-type",
+    "call-arg",
+    "operator",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
