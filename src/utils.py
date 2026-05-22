@@ -121,7 +121,15 @@ def get_config_path() -> Path:
     """Return the path to config.json (project root in dev, Application Support when run from .app)."""
     app_bundle = _get_app_bundle()
     if not app_bundle:
-        return ROOT / "config.json"
+        config_path = ROOT / "config.json"
+        if not config_path.exists():
+            example = ROOT / "config.example.json"
+            if example.exists():
+                try:
+                    shutil.copy2(example, config_path)
+                except OSError as e:
+                    logging.getLogger(__name__).warning("Could not copy config.example.json: %s", e)
+        return config_path
 
     support_dir = APPLICATION_SUPPORT_DIR
     config_path = support_dir / "config.json"
