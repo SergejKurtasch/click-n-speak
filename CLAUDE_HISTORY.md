@@ -173,3 +173,82 @@
 - `src/utils.py`: `migrate_config_to_v6()` — добавляет `manual_replacements: []`; schema_version → **6**
 - `src/menu_bar.py`: `_on_edit_replacements` → открывает `ReplacementsPanel`; `_PromptTermsPanelDelegate` + `_open_prompt_terms_editor` — inline NSPanel для редактирования терминов
 - **Файлы:** `src/replacements_panel.py`, `src/vocab_provider.py`, `src/app.py`, `src/utils.py`, `src/menu_bar.py`, `src/correction_analyzer.py`, `src/recorder.py`, `src/ai_editor.py`, `scripts/clean_corrections.py`, тесты `test_vocab_provider.py`, `test_chunk_drain_on_stop.py`, `test_suggestions_startup.py`
+
+
+---
+
+### ✅ Etap 17 — Initial prompt quality: _build_chunk_context, vocab cleanup
+
+- **`_build_chunk_context()` в `src/app.py`** (новая функция): заменяет inline-логику в `process_chunk`; гарантирует `≤ 220 BPE токенов` И `≤ 700 символов`; recent_text ≤ 50% char budget, ≤ 3 чанков; vocab сохраняется целиком
+- **`_WHISPER_PROMPT_TOKEN_LIMIT=220`, `_RECENT_CHARS_RATIO=0.5`, `_MAX_RECENT_CHUNKS=3`** — новые модульные константы
+- **Ручная чистка `config.json`**: удалены мусорные RU-глаголы (напиши, проверь, …) и generic EN-слова (API, code, Data, …); оставлено 19 нишевых терминов (Claude, Whisper, Gemini, TF-IDF, XGBoost, MCP, Qwen, ADK, LLM, …)
+- **`tests/test_app_context.py`** (новый): 15 тестов на token/char гарантии, chunk-cap, 50%-бюджет, edge cases
+- **Файлы:** `src/app.py`, `tests/test_app_context.py`, `config.json`
+
+---
+
+### ✅ Etap 18 — Fast-decay for zero-use auto terms
+
+- **`apply_fast_decay(config)` в `src/utils.py`** (новая функция): деактивирует auto-термины с `use_count=0` старше 14 дней (`_FAST_DECAY_AGE_DAYS`); correction и manual не трогает; idempotent
+- **`apply_decay`** теперь вызывает `apply_fast_decay` как первый (fast) проход перед стандартным 60-дневным (slow) проходом; возвращает суммарное число
+- **Тесты** (`tests/test_decay.py`): 9 новых тестов — source guards (manual/correction пропускаются), age threshold (14d граница), edge cases (missing added_at, missing use_count, idempotency), комбинированный fast+slow сценарий
+- **Файлы:** `src/utils.py`, `tests/test_decay.py`
+
+---
+
+### ✅ Etap 19 — A2: Per-term hit tracking in dataset_logger
+
+- **`_find_terms(text, terms)` в `src/dataset_logger.py`** (новая функция): case-insensitive поиск активных терминов словаря в тексте; обрабатывает `C++`, `.NET` и прочие нестандартные токены через `_WORD_RE`
+- **`append_to_dataset`** расширен keyword-only аргументами: `lang`, `user_terms_for_lang`, `prompt_hash`; каждая запись теперь содержит `vocab_terms_in_raw`, `vocab_terms_in_final`, `lang`, `prompt_hash`
+- **`src/transcriber.py`**: `WhisperTranscriber._last_detected_language` — захватывает язык после `_call_mlx_transcribe` (включая retry-путь); `_run_loop` пробрасывает `"language"` в output_queue; `TranscriberProcessWrapper.last_detected_language` — публичный атрибут, доступный после каждого `transcribe()`
+- **`src/app.py`**: `self._detected_transcription_lang` — заполняется при финальном чанке из `transcriber.last_detected_language`; call-site `append_to_dataset` передаёт detected lang, активные термины и prompt_hash
+- **`scripts/term_effectiveness.py`** (новый): отчёт `in_raw / in_final / help_ratio` по всем терминам из датасета
+- **`tests/test_dataset_logger.py`** (новый): 10 тестов — case-insensitive matching, `C++`, пустые аргументы, кириллица, record shape, backward compat
+- **Файлы:** `src/dataset_logger.py`, `src/transcriber.py`, `src/app.py`, `scripts/term_effectiveness.py`, `tests/test_dataset_logger.py`
+
+---
+
+### ✅ Etap 20 — C1: Script-aware ⌘D routing + multi-word dictionary phrases
+
+- **`detect_term_script(term)` в `src/utils.py`** (новая функция): считает Latin vs Cyrillic символы в термине; возвращает `'latin'`, `'cyrillic'` или `None` (tied / no alpha). Заменяет грубый `any(0x0400 <= ord(ch) <= 0x052F)` в `_on_add_to_dictionary`
+- **`src/app.py:_on_add_to_dictionary`**: использует `detect_term_script()` для точного определения целевого языка; при `None` (смешанный скрипт) — fallback на primary lang вместо всегда-latin
+- **`src/preview_panel.py:_is_valid_term`**: убран `if " " in candidate: return False`; добавлен лимит `_MAX_TERM_WORDS=4`, `_MAX_TERM_CHARS=60`; валидация переработана per-word; TERM_STOPLIST проверяется только для однословных кандидатов — выделение нескольких слов теперь работает
+- **`tests/test_vocab_dictionary.py`** (новый): 29 тестов — `detect_term_script` (latin/cyrillic/tied/None/mixed-script phrase), script→lang routing, `_is_valid_term` (single-word regression + multi-word), `add_term_to_user_terms` с фразами
+- **Файлы:** `src/utils.py`, `src/app.py`, `src/preview_panel.py`, `tests/test_vocab_dictionary.py`
+
+---
+
+### ✅ Etap 21 — B2 + B3 + A3: SuggestionsPanel help text, ⌘D lang toast, failed_pairs in Statistics
+
+- **B2 — SuggestionsPanel explanatory text** (`src/suggestions_panel.py`): добавлена help-строка под заголовком («Добавленные слова помогут Whisper лучше их узнавать. Удалить можно позже в Manage Terms.»); `_HELP_H=32`, `_LABEL_H` уменьшен до 22; `fixed_h` и y-координаты пересчитаны; label с `setWraps_(True)` и `secondary=True`
+- **B3 — Toast с языком после ⌘D** (`src/utils.py`, `src/app.py`, `src/preview_panel.py`): `LANG_NAMES` — новый публичный dict `{lang_code: display_name}`; `_on_add_to_dictionary` теперь возвращает `str` (formatted toast: `„term" → Язык`) вместо `bool`; `_add_selection_to_dictionary` использует returned string если это `str`, иначе fallback на шаблон
+- **A3 — failed_pairs в Statistics** (`src/menu_bar.py`): `_show_statistics_alert` читает `snapshot["failed_pairs"]`; показывает top-5 пар «Whisper упорно не узнаёт»; `✓` если пара уже в `manual_replacements`; добавляет кнопку «Open Replacements…» (только когда есть пары) → вызывает `_on_edit_replacements`
+- **Файлы:** `src/utils.py`, `src/app.py`, `src/preview_panel.py`, `src/menu_bar.py`, `src/suggestions_panel.py`
+
+
+### ✅ Etap 22 — B1 + B5 + B4: Grouped suggestions, statistics effectiveness card, TermsPanel
+
+**B1 — SuggestionsPanel language grouping** (`src/suggestions_panel.py`):
+- Section headers `── Русский (8) ──` when candidates span >1 language
+- Per-section "выбрать" / "снять" buttons (NSButton inside doc view, tag = lang_idx)
+- `_get_ordered_langs()` — sorts langs by total candidate count desc
+- `_do_select_section(idx)` / `_do_deselect_section(idx)` — toggle checkboxes for one section
+- `_ordered_langs` stored on panel for delegate lookup; `selectSection_` / `deselectSection_` added to `_PanelDelegate`
+- `desired_h` accounts for header rows; badge shows only count (lang redundant when sectioned)
+- Single-language: no headers, behaviour unchanged
+
+**B5 — Statistics effectiveness card** (`src/metrics.py`, `src/menu_bar.py`):
+- `top_helping_terms(dataset_path, limit=5)` — reads last 1000 dataset records; computes recognition_rate = min(1.0, n_raw / n_final); returns [] when no records with vocab tracking
+- `dead_weight_terms(config, days=30)` — active terms with use_count=0 added >N days ago; skips inactive; sorted by age desc
+- `_show_statistics_alert` extended: "Whisper узнаёт без правок" section (or "недостаточно данных"); "Мёртвый груз" section; button "Удалить мёртвый груз (N)" when dead>0
+- `_delete_dead_weight_terms(dead)` — bulk delete, rebuild prompt, sync .txt, notify
+- Button routing via `button_actions` list (index-based) so OK/history/delete_dead/replacements don't hard-code result codes
+
+**B4 — TermsPanel** (`src/terms_panel.py` new, `src/menu_bar.py`):
+- `TermsPanel` — NSWindow 600×480 with NSSegmentedControl (lang filter) + NSScrollView/NSTableView + stats label + delete/close buttons
+- `_TermsDataSource(NSObject)` — cell-based datasource, columns: term/lang/source/use_count/last_seen/status
+- `_TermsPanelDelegate(NSObject)` — handles deleteSelected_/closePanel_/langChanged_/tableViewSelectionDidChange_
+- Delete: NSAlert confirmation → removes from `_all_rows` → calls `on_delete` callback → menu_bar removes from config + rebuilds prompt + syncs .txt
+- `_on_manage_terms` in `ClickNSpeakApp` replaced: opens `TermsPanel` instead of text editor
+- `self._terms_panel` (lazy init) added to `ClickNSpeakApp.__init__`
+- **Файлы:** `src/terms_panel.py` (new), `src/suggestions_panel.py`, `src/metrics.py`, `src/menu_bar.py`, `tests/test_metrics.py`

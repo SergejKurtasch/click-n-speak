@@ -356,6 +356,39 @@ def _dedupe_lang_list(languages: list[str], *, primary: str | None = None) -> li
     return out
 
 
+LANG_NAMES: dict[str, str] = {
+    "ru": "Русский",
+    "en": "English",
+    "uk": "Українська",
+    "de": "Deutsch",
+    "fr": "Français",
+    "es": "Español",
+    "it": "Italiano",
+    "pl": "Polski",
+    "pt": "Português",
+    "zh": "中文",
+    "ja": "日本語",
+    "ko": "한국어",
+}
+
+
+def detect_term_script(term: str) -> str | None:
+    """Return dominant script of a term: 'latin', 'cyrillic', or None.
+
+    None means no alphabetic chars, or Latin and Cyrillic counts are equal.
+    Used for script-aware dictionary routing (⌘D, auto-add).
+    """
+    latin = sum(1 for c in term if c.isalpha() and ord(c) < 0x400)
+    cyrillic = sum(1 for c in term if c.isalpha() and 0x0400 <= ord(c) <= 0x052F)
+    if latin == 0 and cyrillic == 0:
+        return None
+    if latin > cyrillic:
+        return "latin"
+    if cyrillic > latin:
+        return "cyrillic"
+    return None  # tied — caller should fall back to primary lang
+
+
 def get_language_script(lang_code: str) -> str:
     """Return script family for a configured language: 'latin' or 'cyrillic'.
 

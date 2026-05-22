@@ -31,14 +31,15 @@ from AppKit import (
 )
 from Foundation import NSObject
 
-from .utils import log_error, log_info
+from .utils import LANG_NAMES, log_error, log_info
 
 _PAGE_SIZE = 10
 _WIN_W = 480
 _MARGIN = 12
 _BTN_H = 30
 _ROW_H = 28
-_LABEL_H = 36
+_LABEL_H = 22
+_HELP_H = 32
 _SHOW_MORE_BTN_H = 26
 _SELECT_ROW_H = 26
 _MIN_LIST_H = 140
@@ -81,6 +82,14 @@ class _PanelDelegate(NSObject):
         if self._owner:
             self._owner._do_deselect_all()
 
+    def selectSection_(self, sender):
+        if self._owner:
+            self._owner._do_select_section(int(sender.tag()))
+
+    def deselectSection_(self, sender):
+        if self._owner:
+            self._owner._do_deselect_section(int(sender.tag()))
+
 
 class _FlippedView(NSView):
     """Top-left coordinate system for predictable list rendering in scroll view."""
@@ -104,6 +113,8 @@ class SuggestionsPanel:
         self._on_auto: Callable | None = None
         # Persists checkbox states across "Show more" rebuilds: term → checked
         self._checkbox_states: dict[str, bool] = {}
+        # Language order computed each build — maps section-button tag → lang
+        self._ordered_langs: list[str] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,6 +183,16 @@ class SuggestionsPanel:
         n = min(self._visible_count, len(self._items))
         has_more = len(self._items) > self._visible_count
 
+        # Language grouping — compute before layout so header rows affect window height
+        ordered_langs = self._get_ordered_langs()
+        self._ordered_langs = ordered_langs
+        multi_lang = len(ordered_langs) > 1
+        visible_items = self._items[:n]
+        header_rows = (
+            sum(1 for lang in ordered_langs if any(it["lang"] == lang for it in visible_items))
+            if multi_lang else 0
+        )
+
         # Center on screen.
         screen = NSScreen.mainScreen()
         sf = screen.visibleFrame()
@@ -184,10 +205,12 @@ class SuggestionsPanel:
             + 8
             + _SELECT_ROW_H
             + 6
+            + _HELP_H
+            + 4
             + _LABEL_H
             + _MARGIN
         )
-        desired_h = fixed_h + (n * _ROW_H)
+        desired_h = fixed_h + ((n + header_rows) * _ROW_H)
         max_h = sf.size.height * _MAX_SCREEN_H_RATIO
         # Window must always be tall enough to show the minimum list area.
         window_h = min(max(desired_h, fixed_h + _MIN_LIST_H), max_h)
@@ -197,7 +220,8 @@ class SuggestionsPanel:
         show_more_y = btn_y + _BTN_H + _MARGIN
         list_y = show_more_y + (_SHOW_MORE_BTN_H + 8 if has_more else 0)
         select_row_y = list_y + list_h + 8
-        label_y = select_row_y + _SELECT_ROW_H + 6
+        help_y = select_row_y + _SELECT_ROW_H + 6
+        label_y = help_y + _HELP_H + 4
 
         wx = sf.origin.x + (sf.size.width - _WIN_W) / 2
         wy = sf.origin.y + (sf.size.height - window_h) / 2
@@ -215,12 +239,23 @@ class SuggestionsPanel:
 
         # Description label
         desc = self._make_label(
-            f"Выберите термины для словаря Whisper (из последних 100 фраз):",
+            "Выберите термины для словаря Whisper (из последних 100 фраз):",
             NSRect(NSPoint(_MARGIN, label_y), NSSize(_WIN_W - 2 * _MARGIN, _LABEL_H)),
             font_size=12.0,
         )
         desc.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
         content.addSubview_(desc)
+
+        # Explanatory help text
+        help_label = self._make_label(
+            "Добавленные слова помогут Whisper лучше их узнавать. Удалить можно позже в Manage Terms.",
+            NSRect(NSPoint(_MARGIN, help_y), NSSize(_WIN_W - 2 * _MARGIN, _HELP_H)),
+            font_size=11.0,
+            secondary=True,
+        )
+        help_label.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
+        help_label.cell().setWraps_(True)
+        content.addSubview_(help_label)
 
         # "Select all" / "Deselect all" mini-buttons
         mini_w = 120
@@ -246,31 +281,68 @@ class SuggestionsPanel:
         scroll.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         scroll.setBorderType_(1)  # NSBezelBorder
 
-        doc_h = max(int(list_h), n * _ROW_H)
+        total_rows = n + header_rows
+        doc_h = max(int(list_h), total_rows * _ROW_H)
         doc = _FlippedView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(list_w, doc_h)))
 
-        # Checkboxes with count badges — restore saved states on rebuild.
-        for i, item in enumerate(self._items[:n]):
-            row_y = i * _ROW_H
-            checkbox = NSButton.alloc().initWithFrame_(
-                NSRect(NSPoint(8, row_y), NSSize(list_w - 95, _ROW_H - 4))
-            )
-            checkbox.setButtonType_(NSButtonTypeSwitch)
-            checkbox.setTitle_(item["term"])
-            checkbox.setFont_(NSFont.systemFontOfSize_(13.0))
-            saved = self._checkbox_states.get(item["term"], True)
-            checkbox.setState_(NSControlStateValueOn if saved else NSControlStateValueOff)
-            doc.addSubview_(checkbox)
-            item["checkbox"] = checkbox
+        # Checkboxes with count badges — grouped by language when multi_lang.
+        current_y = 0
+        for lang_idx, lang in enumerate(ordered_langs):
+            lang_items = [it for it in visible_items if it["lang"] == lang]
+            if not lang_items:
+                continue
 
-            badge = self._make_label(
-                f"{item['count']}× / {item['lang'].upper()}",
-                NSRect(NSPoint(list_w - 85, row_y), NSSize(80, _ROW_H - 4)),
-                font_size=11.0,
-                secondary=True,
-                align_right=True,
-            )
-            doc.addSubview_(badge)
+            if multi_lang:
+                lang_name = LANG_NAMES.get(lang, lang.upper())
+                n_total_lang = sum(1 for it in self._items if it["lang"] == lang)
+                header_lbl = self._make_label(
+                    f"── {lang_name} ({n_total_lang}) ──",
+                    NSRect(NSPoint(8, current_y + 3), NSSize(list_w - 168, _ROW_H - 6)),
+                    font_size=11.0,
+                    secondary=True,
+                )
+                header_lbl.setFont_(NSFont.boldSystemFontOfSize_(11.0))
+                doc.addSubview_(header_lbl)
+
+                sec_sel = self._make_button(
+                    "выбрать", current_y, list_w - 158, 70, height=_ROW_H - 6
+                )
+                sec_sel.setTag_(lang_idx)
+                sec_sel.setTarget_(self._delegate)
+                sec_sel.setAction_("selectSection:")
+                doc.addSubview_(sec_sel)
+
+                sec_desel = self._make_button(
+                    "снять", current_y, list_w - 82, 70, height=_ROW_H - 6
+                )
+                sec_desel.setTag_(lang_idx)
+                sec_desel.setTarget_(self._delegate)
+                sec_desel.setAction_("deselectSection:")
+                doc.addSubview_(sec_desel)
+
+                current_y += _ROW_H
+
+            for item in lang_items:
+                checkbox = NSButton.alloc().initWithFrame_(
+                    NSRect(NSPoint(8, current_y), NSSize(list_w - 75, _ROW_H - 4))
+                )
+                checkbox.setButtonType_(NSButtonTypeSwitch)
+                checkbox.setTitle_(item["term"])
+                checkbox.setFont_(NSFont.systemFontOfSize_(13.0))
+                saved = self._checkbox_states.get(item["term"], True)
+                checkbox.setState_(NSControlStateValueOn if saved else NSControlStateValueOff)
+                doc.addSubview_(checkbox)
+                item["checkbox"] = checkbox
+
+                badge = self._make_label(
+                    f"{item['count']}×",
+                    NSRect(NSPoint(list_w - 65, current_y), NSSize(60, _ROW_H - 4)),
+                    font_size=11.0,
+                    secondary=True,
+                    align_right=True,
+                )
+                doc.addSubview_(badge)
+                current_y += _ROW_H
 
         scroll.setDocumentView_(doc)
         content.addSubview_(scroll)
@@ -376,6 +448,37 @@ class SuggestionsPanel:
             if cb is not None:
                 cb.setState_(NSControlStateValueOff)
             self._checkbox_states[item["term"]] = False
+
+    def _get_ordered_langs(self) -> list[str]:
+        """Return languages sorted by total candidate count descending."""
+        lang_counts: dict[str, int] = {}
+        for item in self._items:
+            lang_counts[item["lang"]] = lang_counts.get(item["lang"], 0) + item["count"]
+        return sorted(lang_counts.keys(), key=lambda l: -lang_counts[l])
+
+    def _do_select_section(self, idx: int) -> None:
+        if idx >= len(self._ordered_langs):
+            return
+        lang = self._ordered_langs[idx]
+        n = min(self._visible_count, len(self._items))
+        for item in self._items[:n]:
+            if item["lang"] == lang:
+                cb = item.get("checkbox")
+                if cb is not None:
+                    cb.setState_(NSControlStateValueOn)
+                self._checkbox_states[item["term"]] = True
+
+    def _do_deselect_section(self, idx: int) -> None:
+        if idx >= len(self._ordered_langs):
+            return
+        lang = self._ordered_langs[idx]
+        n = min(self._visible_count, len(self._items))
+        for item in self._items[:n]:
+            if item["lang"] == lang:
+                cb = item.get("checkbox")
+                if cb is not None:
+                    cb.setState_(NSControlStateValueOff)
+                self._checkbox_states[item["term"]] = False
 
     # ------------------------------------------------------------------
     # Helpers

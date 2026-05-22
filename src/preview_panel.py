@@ -142,21 +142,28 @@ def _word_at_offset(text: str, offset: int) -> str:
     return best
 
 
+_MAX_TERM_WORDS = 4
+_MAX_TERM_CHARS = 60
+
+
 def _is_valid_term(word: str) -> bool:
     candidate = " ".join((word or "").split()).strip()
-    if len(candidate) < 2 or len(candidate) > 30:
-        return False
-    if " " in candidate:
+    if len(candidate) < 2 or len(candidate) > _MAX_TERM_CHARS:
         return False
     if candidate.isdigit():
         return False
     if not any(ch.isalpha() for ch in candidate):
         return False
-    if not _is_term_start_char(candidate[0]):
+    words = candidate.split()
+    if len(words) > _MAX_TERM_WORDS:
         return False
-    if not all(_is_term_char(ch) for ch in candidate):
-        return False
-    if candidate.lower() in TERM_STOPLIST:
+    for w in words:
+        if not _is_term_start_char(w[0]):
+            return False
+        if not all(_is_term_char(ch) for ch in w):
+            return False
+    # Stoplist only for single-word candidates (multi-word phrases are intentional)
+    if len(words) == 1 and candidate.lower() in TERM_STOPLIST:
         return False
     return True
 
@@ -462,14 +469,16 @@ class TranscriptionPreviewPanel:
             return
 
         try:
-            added = bool(self._on_add_to_dictionary(candidate))
+            result = self._on_add_to_dictionary(candidate)
         except Exception as e:
             log_exception(f"[preview_panel] on_add_to_dictionary error: {e}")
             self._flash_toast(queue, self._toast_invalid_term)
             return
 
-        if added:
-            self._flash_toast(queue, self._toast_added_template.format(term=candidate))
+        if result:
+            # result may be a formatted message string (new) or plain True (legacy)
+            msg = result if isinstance(result, str) else self._toast_added_template.format(term=candidate)
+            self._flash_toast(queue, msg)
         else:
             self._flash_toast(queue, self._toast_exists)
 

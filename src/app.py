@@ -1,3 +1,4 @@
+import hashlib
 import json
 import queue
 import subprocess
@@ -41,11 +42,14 @@ from .vocab_provider import (
 )
 from .utils import (
     _count_prompt_tokens,
+    _term_is_active,
     _term_str,
     apply_decay,
     build_initial_prompt,
     canonical_term_key,
     canonicalize_term,
+    detect_term_script,
+    LANG_NAMES,
     get_allowed_languages,
     get_corrections_file_path,
     get_metrics_history_path,
@@ -301,6 +305,7 @@ class SVoiceRecApp:
         )
         self.is_recording = False
         self.is_processing = False
+        self._restart_pending = False  # Set by _on_recorder_fatal_error; blocks new recordings
         self.last_toggle_time = 0.0
         self.debounce_interval = 0.3  # seconds
 
@@ -344,6 +349,7 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
         self._ai_edited_text = None
         self._ai_editor_status: Optional[str] = None
+        self._detected_transcription_lang: str = ""
         self._needs_buffered_finalization: bool = False
         self._buffered_final_text: Optional[str] = None
         self._last_memory_pressure_notification_ts: float = 0.0
@@ -576,6 +582,10 @@ class SVoiceRecApp:
                 log_info("Still processing previous recording. Please wait.")
                 return
 
+            if self._restart_pending:
+                log_info("Ignoring hotkey: app restart in progress.")
+                return
+
             # Do not start a new recording cycle while warm-up is in progress.
             if (
                 not self.is_recording
@@ -679,11 +689,23 @@ class SVoiceRecApp:
                     log_info("_run_injection: start")
 
                     # Log to dataset (background thread, file I/O — safe)
+                    _detected_lang = self._detected_transcription_lang or get_primary_language(self.config)
+                    _active_terms = [
+                        _term_str(t)
+                        for t in self.config.get("user_terms", {}).get(_detected_lang, [])
+                        if _term_is_active(t)
+                    ]
+                    _prompt_hash = hashlib.md5(
+                        self.config.get("initial_prompt", "").encode()
+                    ).hexdigest()[:12]
                     append_to_dataset(
                         self._raw_whisper_text,
                         self._ai_edited_text,
                         user_text,
                         ai_status=self._ai_editor_status,
+                        lang=_detected_lang,
+                        user_terms_for_lang=_active_terms,
+                        prompt_hash=_prompt_hash,
                     )
                     log_info("_run_injection: dataset saved")
 
@@ -733,8 +755,12 @@ class SVoiceRecApp:
         def _on_add_to_dictionary(term: str) -> bool:
             primary = get_primary_language(self.config)
             additional = list(self.config.get("additional_languages") or [])
-            term_script = "cyrillic" if any(0x0400 <= ord(ch) <= 0x052F for ch in term) else "latin"
-            target_lang = target_lang_for_script_bucket(term_script, primary, additional)
+            term_script = detect_term_script(term)
+            target_lang = (
+                target_lang_for_script_bucket(term_script, primary, additional)
+                if term_script is not None
+                else primary
+            )
             added = add_term_to_user_terms(self.config, target_lang, term, source="manual")
             if not added:
                 return False
@@ -749,7 +775,8 @@ class SVoiceRecApp:
             if mb is not None and hasattr(mb, "_sync_prompt_file"):
                 mb._sync_prompt_file(target_lang)
             log_info(f"Added term to dictionary via popup: {term} -> {target_lang}")
-            return True
+            lang_name = LANG_NAMES.get(target_lang, target_lang.upper())
+            return f'„{term}“ → {lang_name}'
 
         return _on_confirm, _on_cancel, _on_add_to_dictionary
 
@@ -1162,6 +1189,7 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []
         self._ai_edited_text = None
         self._ai_editor_status = None
+        self._detected_transcription_lang = ""
         self._needs_buffered_finalization = False
         self._buffered_final_text = None
         self.stop_worker.clear()
@@ -1450,6 +1478,10 @@ class SVoiceRecApp:
                 if is_final_chunk:
                     # Build raw_whisper_text from pure Whisper output, not AI-edited parts
                     self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
+                    self._detected_transcription_lang = (
+                        self.transcriber.last_detected_language
+                        or get_primary_language(self.config)
+                    )
 
                 self.transcribed_parts.append(text)
 
@@ -1995,6 +2027,7 @@ class SVoiceRecApp:
 
         Runs on the recorder's background thread — posts restart to main thread.
         """
+        self._restart_pending = True  # Block hotkey immediately, before main-thread restart runs
         def _do_restart():
             if self.menu_bar is not None:
                 self.menu_bar.restart_application()

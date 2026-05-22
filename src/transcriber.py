@@ -200,6 +200,7 @@ class WhisperTranscriber:
     def __init__(self, model_name="mlx-community/whisper-large-v3-turbo"):
         self.model_name = model_name
         self._warmup_done = False
+        self._last_detected_language: str = ""
         # Whisper hallucination phrases matched as whole words/phrases (word-boundary regex).
         # Single words like "субтитры" only match when they appear as a standalone word,
         # so "включи субтитры" is no longer falsely dropped.
@@ -355,6 +356,7 @@ class WhisperTranscriber:
             log_info(f"Transcription finished in {end_time - start_time:.2f} seconds.")
 
             text = result.get("text", "").strip()
+            self._last_detected_language = result.get("language", "").lower()
             if not text:
                 return ""
 
@@ -391,6 +393,7 @@ class WhisperTranscriber:
                                 **whisper_kw,
                             )
                             text = result.get("text", "").strip()
+                            self._last_detected_language = result.get("language", "").lower()
                             if text:
                                 words = text.split()
                                 is_trivial = len(words) <= 1 or not any(
@@ -500,6 +503,7 @@ class TranscriberProcessWrapper:
         # Epoch time of the last completed transcription in this wrapper.
         # Used to skip prewarm when the model is already warm (recent transcription).
         self._last_transcribe_returned_at: float = 0.0
+        self.last_detected_language: str = ""
 
         # Start child process
         self._process = mp.Process(target=self._run_loop, daemon=True)
@@ -567,7 +571,8 @@ class TranscriberProcessWrapper:
                     self.output_queue.put({
                         "type": "transcription",
                         "text": text,
-                        "is_final_chunk": cmd.get("is_final_chunk", False)
+                        "is_final_chunk": cmd.get("is_final_chunk", False),
+                        "language": getattr(transcriber, "_last_detected_language", ""),
                     })
                     # Free unused MLX Metal buffers after every transcription.
                     # mlx_whisper allocates mel/attention/logit tensors on each call;
@@ -722,6 +727,7 @@ class TranscriberProcessWrapper:
                 res = self.output_queue.get(timeout=poll_timeout)
                 if res["type"] == "transcription":
                     self._last_transcribe_returned_at = time.time()
+                    self.last_detected_language = res.get("language", "")
                     return res["text"]
                 elif res["type"] == "error":
                     log_error(f"Transcriber process error: {res['message']}\n{res.get('trace')}")
