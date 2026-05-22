@@ -155,6 +155,8 @@ from .permissions import (
 )
 from .autostart import is_launch_at_login_enabled, set_launch_at_login
 from .correction_analyzer import remove_replacement_pair_from_index
+from .dataset_logger import _DEFAULT_DATASET_PATH
+from .metrics import dead_weight_terms, top_helping_terms
 from .replacements_panel import ReplacementsPanel
 from .vocab_provider import list_replacement_rows_for_ui, normalize_replacement_side
 from .utils import (
@@ -658,6 +660,7 @@ class ClickNSpeakApp(rumps.App):
         self._prompt_terms_stats_label = None
         self._prompt_terms_delete_btn = None
         self._replacements_panel: "ReplacementsPanel | None" = None
+        self._terms_panel = None  # TermsPanel instance (lazy)
 
         # Build Menu
         self.setup_menu()
@@ -2201,24 +2204,34 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} восстановлена.")
 
     def _on_manage_terms(self, _) -> None:
-        """Open the term editor panel; show a language picker first when multiple languages are active."""
+        """Open TermsPanel — table view of all user_terms with delete support."""
         try:
-            langs = get_allowed_languages(self.config)
-            if len(langs) <= 1:
-                lang = langs[0] if langs else get_primary_language(self.config)
-                self._schedule_prompt_terms_editor(lang)
-                return
-            from AppKit import NSAlert
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_("Edit Terms")
-            alert.setInformativeText_("Choose a language to edit:")
-            for lang in langs:
-                alert.addButtonWithTitle_(lang.upper())
-            alert.addButtonWithTitle_("Cancel")
-            result = alert.runModal()
-            idx = result - 1000
-            if 0 <= idx < len(langs):
-                self._schedule_prompt_terms_editor(langs[idx])
+            from .terms_panel import TermsPanel
+
+            def on_delete(to_delete: list[tuple[str, str]]) -> None:
+                user_terms = self.config.get("user_terms") or {}
+                n_removed = 0
+                for lang, term in to_delete:
+                    if lang not in user_terms:
+                        continue
+                    before = len(user_terms[lang])
+                    user_terms[lang] = [
+                        t for t in user_terms[lang]
+                        if not (isinstance(t, dict) and t.get("term") == term)
+                    ]
+                    n_removed += before - len(user_terms[lang])
+                if n_removed:
+                    self.config["user_terms"] = user_terms
+                    self.config["initial_prompt"] = build_initial_prompt(self.config)
+                    self.save_config()
+                    self.main_app.load_config_data(self.config)
+                    for lang_sync in get_allowed_languages(self.config):
+                        self._sync_prompt_file(lang_sync)
+                    self.main_app.notify("Словарь", f"{n_removed} терминов удалено.")
+
+            if self._terms_panel is None:
+                self._terms_panel = TermsPanel()
+            self._terms_panel.show(self.config, on_delete)
         except Exception as exc:
             log_exception(f"_on_manage_terms failed: {exc}")
 
@@ -2304,6 +2317,15 @@ class ClickNSpeakApp(rumps.App):
             edit_delta = (snapshot.get("edit_score_trend") or {}).get("delta")
             hit_delta = (snapshot.get("hit_rate_trend") or {}).get("delta")
 
+            failed_pairs = snapshot.get("failed_pairs") or []
+            top_failed = failed_pairs[:5]
+
+            # B5: effectiveness card — top helpers + dead weight
+            from pathlib import Path as _Path
+            _dataset_path = _Path(_DEFAULT_DATASET_PATH)
+            helpers = top_helping_terms(_dataset_path, limit=5)
+            dead = dead_weight_terms(self.config, days=30)
+
             lines = [
                 f"Recent dictionary performance (last {snapshot.get('window_size', 100)} phrases)",
                 "",
@@ -2330,16 +2352,87 @@ class ClickNSpeakApp(rumps.App):
                 f"Inactive terms ready to clean: {snapshot.get('inactive_terms_count', 0)}",
             ]
 
+            # Top helpers section
+            lines += ["", "Whisper узнаёт без правок (топ-5):"]
+            if helpers:
+                for h in helpers:
+                    pct = f"{h['recognition_rate'] * 100:.0f}%"
+                    lines.append(f"  {h['term']:<18} {pct:>5}  ({h['n_raw']}/{h['n_final']})")
+            else:
+                lines.append("  — недостаточно данных (нужно больше транскрипций)")
+
+            # Dead weight section
+            if dead:
+                lines += ["", f"Мёртвый груз (0 появлений за 30+ дней, {len(dead)} шт.):"]
+                for d in dead[:5]:
+                    lines.append(f"  [{d['lang'].upper()}] {d['term']:<16} ({d['age_days']}д)")
+                if len(dead) > 5:
+                    lines.append(f"  … и ещё {len(dead) - 5}")
+
+            # Failed pairs section
+            if top_failed:
+                lines += [
+                    "",
+                    "Whisper упорно не узнаёт (добавьте в Replacements):",
+                ]
+                for fp in top_failed:
+                    already = any(
+                        r.get("from", "").lower() == fp["from"].lower()
+                        and r.get("to", "").lower() == fp["to"].lower()
+                        for r in (self.config.get("manual_replacements") or [])
+                    )
+                    mark = " ✓" if already else ""
+                    lines.append(f'  "{fp["from"]}" -> "{fp["to"]}" ({fp["count"]}x){mark}')
+
             alert = NSAlert.alloc().init()
             alert.setMessageText_("Statistics")
             alert.setInformativeText_("\n".join(lines))
+            button_actions: list[str] = []
             alert.addButtonWithTitle_("OK")
+            button_actions.append("ok")
             alert.addButtonWithTitle_("Open metrics history")
+            button_actions.append("history")
+            if dead:
+                alert.addButtonWithTitle_(f"Удалить мёртвый груз ({len(dead)})")
+                button_actions.append("delete_dead")
+            if top_failed:
+                alert.addButtonWithTitle_("Open Replacements…")
+                button_actions.append("replacements")
             result = alert.runModal()
-            if result == 1001:
+            action_idx = result - 1000
+            action = button_actions[action_idx] if 0 <= action_idx < len(button_actions) else "ok"
+            if action == "history":
                 subprocess.run(["open", str(get_metrics_history_path())], check=False)
+            elif action == "delete_dead":
+                self._delete_dead_weight_terms(dead)
+            elif action == "replacements":
+                self._on_edit_replacements(None)
         except Exception as exc:
             log_exception(f"_show_statistics_alert failed: {exc}")
+
+    def _delete_dead_weight_terms(self, dead: list[dict]) -> None:
+        """Remove dead-weight terms (use_count=0, >30 days old) from user_terms."""
+        user_terms = self.config.get("user_terms") or {}
+        n_removed = 0
+        for entry in dead:
+            lang = entry["lang"]
+            term = entry["term"]
+            if lang not in user_terms:
+                continue
+            before = len(user_terms[lang])
+            user_terms[lang] = [
+                t for t in user_terms[lang]
+                if not (isinstance(t, dict) and t.get("term") == term and not t.get("use_count", 0))
+            ]
+            n_removed += before - len(user_terms[lang])
+        if n_removed:
+            self.config["user_terms"] = user_terms
+            self.config["initial_prompt"] = build_initial_prompt(self.config)
+            self.save_config()
+            self.main_app.load_config_data(self.config)
+            for lang in get_allowed_languages(self.config):
+                self._sync_prompt_file(lang)
+            self.main_app.notify("Словарь", f"{n_removed} неиспользуемых терминов удалено.")
 
     def _clear_inactive_terms(self) -> None:
         """Permanently remove all inactive terms from user_terms."""

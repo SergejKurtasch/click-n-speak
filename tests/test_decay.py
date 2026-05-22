@@ -6,6 +6,7 @@ import pytest
 
 from src.utils import (
     apply_decay,
+    apply_fast_decay,
     build_initial_prompt,
     migrate_config_to_v5,
     update_term_usage,
@@ -236,3 +237,137 @@ def test_term_priority_in_prompt():
     assert idx_manual < idx_correction, "manual should appear before correction"
     assert idx_correction < idx_auto_high, "correction should appear before auto"
     assert idx_auto_high < idx_auto_low, "higher use_count auto should appear first"
+
+
+# ---------------------------------------------------------------------------
+# 11. apply_fast_decay — source guards
+# ---------------------------------------------------------------------------
+
+def test_fast_decay_skips_manual():
+    """Manual terms with use_count=0 and old age must NOT be deactivated."""
+    cfg = _make_v5_config({"ru": [
+        {"term": "ручной", "source": "manual",
+         "added_at": _iso_days_ago(30), "last_seen": _iso_days_ago(30),
+         "use_count": 0}
+    ]})
+    n = apply_fast_decay(cfg)
+    assert n == 0
+    assert not cfg["user_terms"]["ru"][0].get("inactive")
+
+
+def test_fast_decay_skips_correction():
+    """Correction terms with use_count=0 must NOT be fast-decayed (only slow decay applies)."""
+    cfg = _make_v5_config({"en": [
+        {"term": "correction_term", "source": "correction",
+         "added_at": _iso_days_ago(30), "last_seen": _iso_days_ago(30),
+         "use_count": 0}
+    ]})
+    n = apply_fast_decay(cfg)
+    assert n == 0
+    assert not cfg["user_terms"]["en"][0].get("inactive")
+
+
+# ---------------------------------------------------------------------------
+# 12. apply_fast_decay — age threshold
+# ---------------------------------------------------------------------------
+
+def test_fast_decay_old_unused_auto():
+    """auto + use_count=0 + age=15d → inactive."""
+    cfg = _make_v5_config({"en": [
+        {"term": "OldTerm", "source": "auto",
+         "added_at": _iso_days_ago(15), "last_seen": _iso_days_ago(15),
+         "use_count": 0}
+    ]})
+    n = apply_fast_decay(cfg)
+    assert n == 1
+    assert cfg["user_terms"]["en"][0]["inactive"] is True
+
+
+def test_fast_decay_recent_unused_auto():
+    """auto + use_count=0 + age=5d → NOT inactive (within 14-day window)."""
+    cfg = _make_v5_config({"en": [
+        {"term": "NewTerm", "source": "auto",
+         "added_at": _iso_days_ago(5), "last_seen": _iso_days_ago(5),
+         "use_count": 0}
+    ]})
+    n = apply_fast_decay(cfg)
+    assert n == 0
+    assert not cfg["user_terms"]["en"][0].get("inactive")
+
+
+def test_fast_decay_used_auto_not_touched():
+    """auto + use_count=2 + old age → fast decay skips it (use_count >= 1)."""
+    cfg = _make_v5_config({"en": [
+        {"term": "UsedTerm", "source": "auto",
+         "added_at": _iso_days_ago(30), "last_seen": _iso_days_ago(30),
+         "use_count": 2}
+    ]})
+    n = apply_fast_decay(cfg)
+    assert n == 0
+    assert not cfg["user_terms"]["en"][0].get("inactive")
+
+
+# ---------------------------------------------------------------------------
+# 13. apply_fast_decay — edge cases
+# ---------------------------------------------------------------------------
+
+def test_fast_decay_already_inactive_idempotent():
+    """Running fast decay twice on the same term returns 0 on second call."""
+    cfg = _make_v5_config({"en": [
+        {"term": "OldTerm", "source": "auto",
+         "added_at": _iso_days_ago(20), "last_seen": _iso_days_ago(20),
+         "use_count": 0}
+    ]})
+    n1 = apply_fast_decay(cfg)
+    n2 = apply_fast_decay(cfg)
+    assert n1 == 1
+    assert n2 == 0
+
+
+def test_fast_decay_missing_added_at_skipped():
+    """Terms without added_at are skipped — no data to judge age."""
+    cfg = _make_v5_config({"en": [
+        {"term": "NoDate", "source": "auto", "use_count": 0}
+    ]})
+    n = apply_fast_decay(cfg)
+    assert n == 0
+    assert not cfg["user_terms"]["en"][0].get("inactive")
+
+
+def test_fast_decay_missing_use_count_treated_as_zero():
+    """Terms without use_count field are treated as use_count=0."""
+    cfg = _make_v5_config({"en": [
+        {"term": "Legacy", "source": "auto",
+         "added_at": _iso_days_ago(20)}
+    ]})
+    n = apply_fast_decay(cfg)
+    assert n == 1
+    assert cfg["user_terms"]["en"][0]["inactive"] is True
+
+
+# ---------------------------------------------------------------------------
+# 14. apply_decay — fast + slow combined
+# ---------------------------------------------------------------------------
+
+def test_apply_decay_counts_both_fast_and_slow():
+    """apply_decay total = fast-decayed (unused auto) + slow-decayed (stale auto/correction)."""
+    cfg = _make_v5_config({"en": [
+        # fast-decay candidate: auto, use_count=0, 20 days old
+        {"term": "FastCandidate", "source": "auto",
+         "added_at": _iso_days_ago(20), "last_seen": _iso_days_ago(20),
+         "use_count": 0},
+        # slow-decay candidate: correction, use_count=1, 90 days old
+        {"term": "SlowCandidate", "source": "correction",
+         "added_at": _iso_days_ago(90), "last_seen": _iso_days_ago(90),
+         "use_count": 1},
+        # survivor: manual, never touched
+        {"term": "Manual", "source": "manual",
+         "added_at": _iso_days_ago(90), "last_seen": _iso_days_ago(90),
+         "use_count": 0},
+    ]})
+    n = apply_decay(cfg, max_age_days=60)
+    assert n == 2
+    terms = {t["term"]: t for t in cfg["user_terms"]["en"]}
+    assert terms["FastCandidate"]["inactive"] is True
+    assert terms["SlowCandidate"]["inactive"] is True
+    assert not terms["Manual"].get("inactive")

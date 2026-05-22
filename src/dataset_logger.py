@@ -8,12 +8,39 @@ so the data can later be used for fine-tuning or quality analysis.
 import datetime
 import json
 import os
+import re
 from typing import Optional
 
-from .utils import log_error, log_info
+from .utils import canonical_term_key, log_error, log_info
 
 # Default path for the dataset file (hidden file in user home)
 _DEFAULT_DATASET_PATH = os.path.expanduser("~/.clicknspeak_dataset.jsonl")
+
+_WORD_RE = re.compile(r"[\w\-.+#]+", re.UNICODE)
+
+
+def _find_terms(text: str, terms: list[str]) -> list[str]:
+    """Return canonical keys of user terms found in text (case-insensitive).
+
+    Single-word terms use token-set matching; multi-word phrases use substring
+    search on the lowercased text so "machine learning" matches correctly.
+    """
+    if not text or not terms:
+        return []
+    tokens = {canonical_term_key(t) for t in _WORD_RE.findall(text)}
+    text_lower = text.lower()
+    found: set[str] = set()
+    for term in terms:
+        key = canonical_term_key(term)
+        if not key:
+            continue
+        if " " in key:
+            if key in text_lower:
+                found.add(key)
+        else:
+            if key in tokens:
+                found.add(key)
+    return sorted(found)
 
 
 def append_to_dataset(
@@ -22,6 +49,10 @@ def append_to_dataset(
     user_final_text: str,
     ai_status: Optional[str] = None,
     dataset_path: str = _DEFAULT_DATASET_PATH,
+    *,
+    lang: Optional[str] = None,
+    user_terms_for_lang: Optional[list[str]] = None,
+    prompt_hash: Optional[str] = None,
 ) -> None:
     """Append a single transcription record to the JSONL dataset file.
 
@@ -31,13 +62,21 @@ def append_to_dataset(
         user_final_text: Text the user actually confirmed/sent after editing.
         ai_status: One of AiEditor.REFINE_STATUS_* or None (AI disabled / not run).
         dataset_path: Path to the JSONL file.
+        lang: Detected transcription language (ISO 639-1).
+        user_terms_for_lang: Active user_terms for the detected language (term strings).
+        prompt_hash: md5[:12] of initial_prompt at transcription time.
     """
+    terms = user_terms_for_lang or []
     record = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "raw_whisper": raw_text,
         "ai_edited": ai_text,
         "ai_status": ai_status,
         "user_final": user_final_text,
+        "lang": lang,
+        "prompt_hash": prompt_hash,
+        "vocab_terms_in_raw": _find_terms(raw_text, terms),
+        "vocab_terms_in_final": _find_terms(user_final_text, terms),
     }
 
     try:

@@ -356,6 +356,39 @@ def _dedupe_lang_list(languages: list[str], *, primary: str | None = None) -> li
     return out
 
 
+LANG_NAMES: dict[str, str] = {
+    "ru": "Русский",
+    "en": "English",
+    "uk": "Українська",
+    "de": "Deutsch",
+    "fr": "Français",
+    "es": "Español",
+    "it": "Italiano",
+    "pl": "Polski",
+    "pt": "Português",
+    "zh": "中文",
+    "ja": "日本語",
+    "ko": "한국어",
+}
+
+
+def detect_term_script(term: str) -> str | None:
+    """Return dominant script of a term: 'latin', 'cyrillic', or None.
+
+    None means no alphabetic chars, or Latin and Cyrillic counts are equal.
+    Used for script-aware dictionary routing (⌘D, auto-add).
+    """
+    latin = sum(1 for c in term if c.isalpha() and ord(c) < 0x400)
+    cyrillic = sum(1 for c in term if c.isalpha() and 0x0400 <= ord(c) <= 0x052F)
+    if latin == 0 and cyrillic == 0:
+        return None
+    if latin > cyrillic:
+        return "latin"
+    if cyrillic > latin:
+        return "cyrillic"
+    return None  # tied — caller should fall back to primary lang
+
+
 def get_language_script(lang_code: str) -> str:
     """Return script family for a configured language: 'latin' or 'cyrillic'.
 
@@ -1072,21 +1105,62 @@ def update_term_usage(config: dict, phrase: str) -> bool:
     return dirty
 
 
+_FAST_DECAY_AGE_DAYS = 14
+_FAST_DECAY_MIN_USE_COUNT = 1  # use_count < 1 means never used
+
+
+def apply_fast_decay(config: dict) -> int:
+    """Deactivate auto-terms that were never useful (use_count=0, older than 14 days).
+
+    Complements apply_decay: catches zero-use clutter before the 60-day slow decay
+    window so it doesn't occupy prompt token budget for weeks.
+    Returns number of terms deactivated.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=_FAST_DECAY_AGE_DAYS)
+    deactivated = 0
+    for _lang, terms in (config.get("user_terms") or {}).items():
+        for item in terms:
+            if not isinstance(item, dict):
+                continue
+            if item.get("source") != "auto":
+                continue
+            if item.get("inactive"):
+                continue
+            if item.get("use_count", 0) >= _FAST_DECAY_MIN_USE_COUNT:
+                continue
+            raw_added = item.get("added_at")
+            if not raw_added:
+                continue
+            try:
+                added_at = datetime.fromisoformat(raw_added)
+            except ValueError:
+                continue
+            if added_at.tzinfo is None:
+                added_at = added_at.replace(tzinfo=timezone.utc)
+            if added_at > cutoff:
+                continue
+            item["inactive"] = True
+            deactivated += 1
+    return deactivated
+
+
 def apply_decay(config: dict, max_age_days: int | None = None) -> int:
     """Mark stale auto/correction terms inactive in initial_prompt.
 
-    Terms are deactivated when ALL of the following hold:
-    - source != "manual"
-    - last_seen older than max_age_days
-    - use_count < 3
+    Runs two passes:
+    1. Fast decay (apply_fast_decay): auto terms with use_count=0 older than 14 days.
+    2. Slow decay: any non-manual term with last_seen older than max_age_days AND use_count < 3.
 
-    Returns number of terms deactivated. Manual terms are never touched.
+    Returns total number of terms deactivated. Manual terms are never touched.
     """
+    n_fast = apply_fast_decay(config)
+
     if max_age_days is None:
         max_age_days = int(config.get("max_dictionary_age_days", 60))
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=max_age_days)
-    deactivated = 0
+    n_slow = 0
     for lang, terms in (config.get("user_terms") or {}).items():
         for item in terms:
             if not isinstance(item, dict):
@@ -1106,8 +1180,8 @@ def apply_decay(config: dict, max_age_days: int | None = None) -> int:
             if last_seen < cutoff and item.get("use_count", 0) < 3:
                 if not item.get("inactive"):
                     item["inactive"] = True
-                    deactivated += 1
-    return deactivated
+                    n_slow += 1
+    return n_fast + n_slow
 
 
 def _run_notification(script: str) -> None:

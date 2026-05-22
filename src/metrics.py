@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections import deque
+from collections import Counter, deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -349,6 +349,64 @@ def append_metrics_history(
     tmp_payload = "\n".join(json.dumps(item, ensure_ascii=False) for item in entries)
     _write_text_atomic(path, tmp_payload + ("\n" if tmp_payload else ""))
     rotate_metrics_history_if_needed(path)
+
+
+def top_helping_terms(dataset_path: Path, limit: int = 5) -> list[dict[str, Any]]:
+    """Return top terms by recognition rate from recent dataset records.
+
+    recognition_rate = times term appeared in raw Whisper output /
+                       times term appeared in user-confirmed final output.
+    A rate near 1.0 means Whisper recognised the term without user correction.
+    Returns [] when no records with vocab tracking exist yet.
+    """
+    records = _read_dataset_tail(dataset_path, 1000)
+    in_raw: Counter[str] = Counter()
+    in_final: Counter[str] = Counter()
+    has_tracking = False
+    for rec in records:
+        if "vocab_terms_in_raw" not in rec:
+            continue
+        has_tracking = True
+        in_raw.update(rec.get("vocab_terms_in_raw") or [])
+        in_final.update(rec.get("vocab_terms_in_final") or [])
+    if not has_tracking or not in_final:
+        return []
+    out: list[dict[str, Any]] = []
+    for term, n_final in in_final.most_common():
+        n_raw = in_raw.get(term, 0)
+        rate = min(1.0, n_raw / n_final) if n_final else 0.0
+        out.append({"term": term, "recognition_rate": rate, "n_final": n_final, "n_raw": n_raw})
+    out.sort(key=lambda x: (-x["recognition_rate"], -x["n_final"]))
+    return out[:limit]
+
+
+def dead_weight_terms(config: dict, days: int = 30) -> list[dict[str, Any]]:
+    """Return active terms with use_count=0 not seen in the last N days.
+
+    These terms were never recognised in transcriptions and haven't been
+    used since they were added — candidates for removal.
+    """
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=days)
+    out: list[dict[str, Any]] = []
+    for lang, items in (config.get("user_terms") or {}).items():
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("inactive"):
+                continue
+            if item.get("source") == "manual":
+                continue
+            if item.get("use_count", 0) > 0:
+                continue
+            added = _parse_iso(item.get("added_at"))
+            if added is None or added > cutoff:
+                continue
+            age_days = (now - added).days
+            out.append({"lang": lang, "term": item["term"], "age_days": age_days,
+                        "source": item.get("source", "manual")})
+    out.sort(key=lambda x: -x["age_days"])
+    return out
 
 
 def _write_text_atomic(path: Path, text: str) -> None:

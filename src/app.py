@@ -1,3 +1,4 @@
+import hashlib
 import json
 import queue
 import subprocess
@@ -40,11 +41,15 @@ from .vocab_provider import (
     collect_replacement_pairs_for_apply,
 )
 from .utils import (
+    _count_prompt_tokens,
+    _term_is_active,
     _term_str,
     apply_decay,
     build_initial_prompt,
     canonical_term_key,
     canonicalize_term,
+    detect_term_script,
+    LANG_NAMES,
     get_allowed_languages,
     get_corrections_file_path,
     get_metrics_history_path,
@@ -83,6 +88,67 @@ def _join_chunks(parts: list[str]) -> str:
             result = result[:-1]
         result += " " + part
     return result.strip()
+
+
+# Whisper's prompt window is capped at 224 tokens; we stay 4 below to be safe.
+_WHISPER_PROMPT_TOKEN_LIMIT = 220
+_WHISPER_PROMPT_CHAR_BUDGET = 700
+# recent_text may occupy at most this fraction of the char budget so vocab is
+# never crowded out by a long transcription history.
+_RECENT_CHARS_RATIO = 0.5
+_MAX_RECENT_CHUNKS = 3
+
+
+def _build_chunk_context(
+    instruction: str,
+    vocab_prompt: str,
+    transcribed_parts: list[str],
+    char_budget: int = _WHISPER_PROMPT_CHAR_BUDGET,
+    token_limit: int = _WHISPER_PROMPT_TOKEN_LIMIT,
+) -> str:
+    """Build the initial_prompt context for one chunk transcription.
+
+    Guarantees:
+    - token count of result <= token_limit (BPE)
+    - len(result) <= char_budget
+    - vocab_prompt preserved whole; recent chunks trimmed first
+    - recent_text <= 50% of char_budget and at most _MAX_RECENT_CHUNKS chunks
+    """
+    base = instruction + vocab_prompt
+    base_tokens = _count_prompt_tokens(base)
+    if base_tokens > token_limit:
+        log_info(
+            f"_build_chunk_context: base exceeds token limit "
+            f"({base_tokens} > {token_limit}); recent_text skipped"
+        )
+
+    available_chars = min(
+        max(0, char_budget - len(base) - 1),
+        int(char_budget * _RECENT_CHARS_RATIO),
+    )
+    available_tokens = max(0, token_limit - base_tokens)
+
+    recent: list[str] = []
+    used_chars = 0
+    used_tokens = 0
+    tail = transcribed_parts[-_MAX_RECENT_CHUNKS:]
+    for chunk in reversed(tail):
+        sep = 1 if recent else 0
+        needed_chars = len(chunk) + sep
+        if used_chars + needed_chars > available_chars:
+            break
+        chunk_tokens = _count_prompt_tokens((" " if sep else "") + chunk)
+        if used_tokens + chunk_tokens > available_tokens:
+            break
+        recent.append(chunk)
+        used_chars += needed_chars
+        used_tokens += chunk_tokens
+    recent.reverse()
+
+    if recent:
+        return base + " " + " ".join(recent)
+    return base
+
 
 # Restart the transcriber child process every N completed sessions.
 # MLX weight tensors are never freed by clear_cache() (they're always referenced);
@@ -239,6 +305,7 @@ class SVoiceRecApp:
         )
         self.is_recording = False
         self.is_processing = False
+        self._restart_pending = False  # Set by _on_recorder_fatal_error; blocks new recordings
         self.last_toggle_time = 0.0
         self.debounce_interval = 0.3  # seconds
 
@@ -282,6 +349,7 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
         self._ai_edited_text = None
         self._ai_editor_status: Optional[str] = None
+        self._detected_transcription_lang: str = ""
         self._needs_buffered_finalization: bool = False
         self._buffered_final_text: Optional[str] = None
         self._last_memory_pressure_notification_ts: float = 0.0
@@ -514,6 +582,10 @@ class SVoiceRecApp:
                 log_info("Still processing previous recording. Please wait.")
                 return
 
+            if self._restart_pending:
+                log_info("Ignoring hotkey: app restart in progress.")
+                return
+
             # Do not start a new recording cycle while warm-up is in progress.
             if (
                 not self.is_recording
@@ -617,11 +689,23 @@ class SVoiceRecApp:
                     log_info("_run_injection: start")
 
                     # Log to dataset (background thread, file I/O — safe)
+                    _detected_lang = self._detected_transcription_lang or get_primary_language(self.config)
+                    _active_terms = [
+                        _term_str(t)
+                        for t in self.config.get("user_terms", {}).get(_detected_lang, [])
+                        if _term_is_active(t)
+                    ]
+                    _prompt_hash = hashlib.md5(
+                        self.config.get("initial_prompt", "").encode()
+                    ).hexdigest()[:12]
                     append_to_dataset(
                         self._raw_whisper_text,
                         self._ai_edited_text,
                         user_text,
                         ai_status=self._ai_editor_status,
+                        lang=_detected_lang,
+                        user_terms_for_lang=_active_terms,
+                        prompt_hash=_prompt_hash,
                     )
                     log_info("_run_injection: dataset saved")
 
@@ -671,8 +755,12 @@ class SVoiceRecApp:
         def _on_add_to_dictionary(term: str) -> bool:
             primary = get_primary_language(self.config)
             additional = list(self.config.get("additional_languages") or [])
-            term_script = "cyrillic" if any(0x0400 <= ord(ch) <= 0x052F for ch in term) else "latin"
-            target_lang = target_lang_for_script_bucket(term_script, primary, additional)
+            term_script = detect_term_script(term)
+            target_lang = (
+                target_lang_for_script_bucket(term_script, primary, additional)
+                if term_script is not None
+                else primary
+            )
             added = add_term_to_user_terms(self.config, target_lang, term, source="manual")
             if not added:
                 return False
@@ -687,7 +775,8 @@ class SVoiceRecApp:
             if mb is not None and hasattr(mb, "_sync_prompt_file"):
                 mb._sync_prompt_file(target_lang)
             log_info(f"Added term to dictionary via popup: {term} -> {target_lang}")
-            return True
+            lang_name = LANG_NAMES.get(target_lang, target_lang.upper())
+            return f'„{term}“ → {lang_name}'
 
         return _on_confirm, _on_cancel, _on_add_to_dictionary
 
@@ -1100,6 +1189,7 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []
         self._ai_edited_text = None
         self._ai_editor_status = None
+        self._detected_transcription_lang = ""
         self._needs_buffered_finalization = False
         self._buffered_final_text = None
         self.stop_worker.clear()
@@ -1327,24 +1417,7 @@ class SVoiceRecApp:
                 self._cached_initial_prompt = build_initial_prompt(self.config)
                 self._initial_prompt_dirty = False
             vocab_prompt = self._cached_initial_prompt
-            if self.transcribed_parts:
-                # Whisper's prompt window is ~224 tokens (~700 chars for mixed text).
-                # Subtract fixed parts to get chars available for recent speech context.
-                _WHISPER_PROMPT_BUDGET = 700
-                available = max(0, _WHISPER_PROMPT_BUDGET - len(instruction) - len(vocab_prompt) - 1)
-                recent: list[str] = []
-                used = 0
-                for chunk in reversed(self.transcribed_parts):
-                    needed = len(chunk) + (1 if recent else 0)
-                    if used + needed > available:
-                        break
-                    recent.append(chunk)
-                    used += needed
-                recent.reverse()
-                recent_text = " ".join(recent)
-                context = instruction + vocab_prompt + (" " + recent_text if recent_text else "")
-            else:
-                context = instruction + vocab_prompt
+            context = _build_chunk_context(instruction, vocab_prompt, self.transcribed_parts)
 
             allowed_languages = get_allowed_languages(self.config)
             condition_on_previous_text = self.config.get(
@@ -1405,6 +1478,10 @@ class SVoiceRecApp:
                 if is_final_chunk:
                     # Build raw_whisper_text from pure Whisper output, not AI-edited parts
                     self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
+                    self._detected_transcription_lang = (
+                        self.transcriber.last_detected_language
+                        or get_primary_language(self.config)
+                    )
 
                 self.transcribed_parts.append(text)
 
@@ -1950,6 +2027,7 @@ class SVoiceRecApp:
 
         Runs on the recorder's background thread — posts restart to main thread.
         """
+        self._restart_pending = True  # Block hotkey immediately, before main-thread restart runs
         def _do_restart():
             if self.menu_bar is not None:
                 self.menu_bar.restart_application()
