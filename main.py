@@ -8,6 +8,8 @@ from pathlib import Path
 
 from src.app import SVoiceRecApp
 from src.menu_bar import ClickNSpeakApp
+from src import i18n as _i18n
+from src.language_picker import show_if_needed as _show_language_picker_if_needed
 from src.permissions import all_permissions_granted, is_setup_done, mark_setup_done
 from src.process_watchdog import (
     ensure_own_process_group,
@@ -17,8 +19,6 @@ from src.process_watchdog import (
 from src.updater import check_for_update
 from src.utils import (
     get_config_path,
-    get_primary_language,
-    get_ui_strings,
     is_accessibility_trusted,
     log_error,
     log_info,
@@ -105,18 +105,24 @@ def main() -> None:
         # Initialize the core application logic
         logic_app = SVoiceRecApp(str(get_config_path()))
 
+        # Load locale BEFORE building the menu so all i18n.t() calls resolve correctly.
+        # language_picker writes primary_language to config on first launch;
+        # on subsequent launches the config already has the chosen language.
+        _i18n.load(logic_app.config.get("primary_language", "en"))
+
         # Initialize the Menu Bar interface
         menu_app = ClickNSpeakApp(logic_app)
 
         # Link them
         logic_app.set_menu_bar(menu_app)
 
-        # First-launch permission wizard: runs after the menu bar is visible.
-        # Schedules on the main thread via menu_bar so NSAlert has an active NSApp.
-        if not is_setup_done():
-            menu_app.schedule_setup_wizard()
-        elif not all_permissions_granted():
-            # Wizard was completed before but permissions were revoked/missing.
+        # First-launch language picker + permission wizard.
+        # Language picker runs before the wizard on first launch; subsequent launches
+        # skip it (language_picker_done=True in config) and jump straight to wizard if needed.
+        need_wizard = not is_setup_done() or not all_permissions_granted()
+        if not logic_app.config.get("language_picker_done"):
+            menu_app.schedule_language_picker(run_wizard_after=need_wizard)
+        elif need_wizard:
             menu_app.schedule_setup_wizard()
 
         # Check current accessibility state (no blocking prompt — wizard handles it).
@@ -214,8 +220,7 @@ def main() -> None:
         logic_app.start_wake_observer()
 
         log_info("Click-n-speak is running in the menu bar...")
-        s = get_ui_strings(get_primary_language(logic_app.config))
-        send_notification("Click-n-speak", s["started_title"], s["started_body"])
+        send_notification("Click-n-speak", _i18n.t("hud.started_title"), _i18n.t("hud.started_body"))
 
         if trusted:
             # Permissions already granted — start hotkeys immediately

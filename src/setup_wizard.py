@@ -16,6 +16,7 @@ import logging
 import threading
 import time
 
+from . import i18n
 from .permissions import (
     check_accessibility,
     check_input_monitoring,
@@ -92,21 +93,19 @@ def _run_wizard() -> None:
     # ── Welcome ──────────────────────────────────────────────────────────────
     permissions_needed = []
     if need_mic:
-        permissions_needed.append("🎙  Microphone — to record your speech")
+        permissions_needed.append(i18n.t("wizard.perm_item_mic"))
     if need_acc:
-        permissions_needed.append("⌨️  Accessibility — to type text into any app")
+        permissions_needed.append(i18n.t("wizard.perm_item_access"))
     if need_im:
-        permissions_needed.append("🔍  Input Monitoring — for the global hotkey (Alt+Space)")
+        permissions_needed.append(i18n.t("wizard.perm_item_input"))
 
     perm_list = "\n".join(f"  • {p}" for p in permissions_needed)
+    perm_word = i18n.plural("wizard.perm_word", total_steps)
 
     clicked = _alert(
-        "Welcome to Click-n-speak",
-        f"The app needs {total_steps} permission{'s' if total_steps > 1 else ''} to work:\n\n"
-        f"{perm_list}\n\n"
-        f"Each step opens System Settings. Follow the on-screen instructions — "
-        f"this takes about a minute.",
-        ["Let's Go", "Skip"],
+        i18n.t("wizard.welcome_title"),
+        i18n.t("wizard.welcome_body", total_steps=total_steps, perm_word=perm_word, perm_list=perm_list),
+        [i18n.t("btn.lets_go"), i18n.t("btn.skip")],
     )
     if clicked != 0:
         log.info("User skipped the setup wizard.")
@@ -118,68 +117,58 @@ def _run_wizard() -> None:
     # ── Step: Microphone ─────────────────────────────────────────────────────
     if need_mic:
         step += 1
-        label = f"Step {step} of {total_steps}"
+        label = i18n.t("wizard.step_label", step=step, total=total_steps)
 
         if mic == "denied":
             clicked = _alert(
-                f"🎙  Microphone Access  ({label})",
-                "Microphone access was previously denied.\n\n"
-                "System Settings will open. Find Click-n-speak under Microphone "
-                "and toggle it ON.",
-                ["Open Settings", "Skip"],
+                i18n.t("wizard.perm_mic_title", label=label),
+                i18n.t("wizard.perm_mic_denied_body"),
+                [i18n.t("btn.open_settings"), i18n.t("btn.skip")],
             )
             if clicked == 0:
                 from .permissions import open_microphone_settings
                 open_microphone_settings()
         else:
             _alert(
-                f"🎙  Microphone Access  ({label})",
-                "Click-n-speak needs to hear your speech.\n\n"
-                "Click \"Request Access\" — macOS will show a permission dialog. "
-                "Click Allow.",
-                ["Request Access"],
+                i18n.t("wizard.perm_mic_title", label=label),
+                i18n.t("wizard.perm_mic_first_body"),
+                [i18n.t("btn.request_access")],
             )
             granted = request_microphone_sync(timeout=30.0)
             if not granted:
                 clicked = _alert(
-                    "Microphone Not Granted",
-                    "Microphone access was not granted. You can enable it later in:\n"
-                    "  System Settings → Privacy & Security → Microphone\n\n"
-                    "Open System Settings to enable it now?",
-                    ["Open Settings", "Continue Anyway"],
+                    i18n.t("wizard.perm_mic_not_granted_title"),
+                    i18n.t("wizard.perm_mic_not_granted_body"),
+                    [i18n.t("btn.open_settings"), i18n.t("btn.continue_anyway")],
                 )
                 if clicked == 0:
                     from .permissions import open_microphone_settings
                     open_microphone_settings()
             else:
                 _alert(
-                    "✅ Microphone Granted",
-                    "Done! Click-n-speak can now hear your speech.",
-                    ["Next →"],
+                    i18n.t("wizard.perm_mic_granted_title"),
+                    i18n.t("wizard.perm_mic_granted_body"),
+                    [i18n.t("btn.next")],
                 )
 
     # ── Step: Accessibility ──────────────────────────────────────────────────
     if need_acc:
         step += 1
-        label = f"Step {step} of {total_steps}"
+        label = i18n.t("wizard.step_label", step=step, total=total_steps)
 
         clicked = _alert(
-            f"⌨️  Accessibility Access  ({label})",
-            "Accessibility lets Click-n-speak type transcribed text into any app.\n\n"
-            "Click \"Open Settings\" — System Settings will open on the Accessibility page.\n\n"
-            "  1. Find Click-n-speak in the list\n"
-            "  2. Toggle it ON\n"
-            "  3. Come back here — this dialog closes automatically.",
-            ["Open Settings", "Skip"],
+            i18n.t("wizard.perm_access_title", label=label),
+            i18n.t("wizard.perm_access_body"),
+            [i18n.t("btn.open_settings"), i18n.t("btn.skip")],
         )
         if clicked == 0:
             open_accessibility_settings()
             _wait_for_permission_with_dialog(
-                title="Waiting for Accessibility…",
+                title=i18n.t("wizard.perm_access_waiting_title"),
                 check_fn=check_accessibility,
                 timeout=_ACCESSIBILITY_WAIT_TIMEOUT,
-                granted_title="✅ Accessibility Granted",
-                granted_body="Accessibility access confirmed. Text injection is now active.",
+                granted_title=i18n.t("wizard.perm_access_granted_title"),
+                granted_body=i18n.t("wizard.perm_access_granted_body"),
             )
         else:
             log.info("User skipped accessibility setup.")
@@ -187,7 +176,7 @@ def _run_wizard() -> None:
     # ── Step: Input Monitoring ───────────────────────────────────────────────
     if need_im:
         step += 1
-        label = f"Step {step} of {total_steps}"
+        label = i18n.t("wizard.step_label", step=step, total=total_steps)
 
         # Trigger the native macOS permission dialog NOW (first CGEventTap attempt).
         # This must happen before we show any wizard instructions, so the system
@@ -201,21 +190,18 @@ def _run_wizard() -> None:
             # Dialog may have just appeared in the background (first-ever request),
             # or was previously denied (dialog won't appear again — go to Settings).
             clicked = _alert(
-                f"🔍  Input Monitoring  ({label})",
-                "Input Monitoring lets Click-n-speak detect the global hotkey (Alt+Space).\n\n"
-                "macOS should be showing a permission dialog right now — click Allow in it.\n\n"
-                "If no dialog appeared (permission was previously denied), "
-                "click \"Open Settings\" to enable it manually.",
-                ["Open Settings", "Skip"],
+                i18n.t("wizard.perm_input_title", label=label),
+                i18n.t("wizard.perm_input_body"),
+                [i18n.t("btn.open_settings"), i18n.t("btn.skip")],
             )
             if clicked == 0:
                 open_input_monitoring_settings()
                 _wait_for_permission_with_dialog(
-                    title="Waiting for Input Monitoring…",
+                    title=i18n.t("wizard.perm_input_waiting_title"),
                     check_fn=check_input_monitoring,
                     timeout=_INPUT_MONITORING_WAIT_TIMEOUT,
-                    granted_title="✅ Input Monitoring Granted",
-                    granted_body="Input Monitoring confirmed. The Alt+Space hotkey is now active.",
+                    granted_title=i18n.t("wizard.perm_input_granted_title"),
+                    granted_body=i18n.t("wizard.perm_input_granted_body"),
                 )
             else:
                 log.info("User skipped input monitoring setup.")
@@ -229,11 +215,9 @@ def _run_wizard() -> None:
         # Permissions were just granted in this session — the pynput listener can't
         # start safely until the process is relaunched (macOS 15+ TSM thread check).
         clicked = _alert(
-            "✅ All Set — One Last Step",
-            "All permissions are granted.\n\n"
-            "Click-n-speak needs to restart once to activate the global hotkey "
-            "(Alt+Space). After the restart, everything will work immediately.",
-            ["Restart Now", "Later"],
+            i18n.t("wizard.all_set_title"),
+            i18n.t("wizard.all_set_body"),
+            [i18n.t("btn.restart_now"), i18n.t("btn.later")],
         )
         mark_setup_done()
         log.info("Setup wizard completed. User chose: %s", "restart" if clicked == 0 else "later")
@@ -244,18 +228,15 @@ def _run_wizard() -> None:
     else:
         missing = []
         if not mic_ok:
-            missing.append("Microphone")
+            missing.append(i18n.t("wizard.missing_mic"))
         if not acc_ok:
-            missing.append("Accessibility")
+            missing.append(i18n.t("wizard.missing_access"))
         if not im_ok:
-            missing.append("Input Monitoring")
+            missing.append(i18n.t("wizard.missing_input"))
         _alert(
-            "⚠️ Setup Incomplete",
-            f"Still missing: {', '.join(missing)}\n\n"
-            f"The app will start, but some features won't work until "
-            f"you grant the remaining permissions.\n\n"
-            f"Retry anytime: menu bar icon → Check Permissions.",
-            ["OK"],
+            i18n.t("wizard.incomplete_title"),
+            i18n.t("wizard.incomplete_body", missing=", ".join(missing)),
+            [i18n.t("btn.ok")],
             style=2,
         )
 
@@ -310,7 +291,7 @@ def _wait_for_permission_with_dialog(
 
         if granted[0]:
             log.info("%s detected.", title)
-            _alert(granted_title, granted_body, ["Next →"])
+            _alert(granted_title, granted_body, [i18n.t("btn.next")])
             return
 
     cancel[0] = True

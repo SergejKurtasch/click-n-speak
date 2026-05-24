@@ -15,7 +15,20 @@ from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
-_LOCALES_DIR = Path(__file__).resolve().parent.parent / "locales"
+def _find_locales_dir() -> Path:
+    # Dev: locales/ sits at the repo root, two levels up from src/i18n.py
+    candidate = Path(__file__).resolve().parent.parent / "locales"
+    if candidate.is_dir():
+        return candidate
+    # py2app bundle: DATA_FILES puts locales/ under Contents/Resources (RESOURCEPATH)
+    import os
+    rp = os.environ.get("RESOURCEPATH")
+    if rp:
+        return Path(rp) / "locales"
+    return candidate
+
+
+_LOCALES_DIR = _find_locales_dir()
 SUPPORTED_LANGS: frozenset[str] = frozenset({"ru", "en", "uk", "de", "es", "fr"})
 _SLAVIC: frozenset[str] = frozenset({"ru", "uk"})
 

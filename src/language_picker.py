@@ -9,7 +9,6 @@ is absent or False in config.
 """
 from __future__ import annotations
 
-import threading
 from typing import Callable
 
 from .utils import log_error, log_info, save_config_to_disk
@@ -31,6 +30,45 @@ _BTN_H = 52
 _BTN_GAP_X = 16
 _BTN_GAP_Y = 12
 _HEADER_H = 56
+
+# ObjC delegate class — created once at module level so the class name is
+# registered in the ObjC runtime only once (PyObjC forbids reregistration).
+# Methods must live inside the class body; post-creation assignment is silently
+# ignored by the runtime.  A _picker attribute stores the owning
+# _LanguagePickerWindow so ObjC callbacks can call back into Python.
+_PickerDelegateClass: type | None = None
+
+
+def _get_picker_delegate_class() -> type:
+    global _PickerDelegateClass
+    if _PickerDelegateClass is not None:
+        return _PickerDelegateClass
+    from objc import objc_method, lookUpClass
+    NSObject = lookUpClass("NSObject")
+
+    class _PickerDelegate(NSObject):  # type: ignore[valid-type]
+        @objc_method(b"v@:@")
+        def langClicked_(self, sender) -> None:
+            owner = getattr(self, "_picker", None)
+            if owner is not None:
+                owner._on_lang_selected(str(sender.identifier()))
+
+        @objc_method(b"v@:")
+        def continueClicked_(self, _sender) -> None:
+            owner = getattr(self, "_picker", None)
+            if owner is not None:
+                owner._on_continue()
+
+        @objc_method(b"v@:@")
+        def windowWillClose_(self, notification) -> None:
+            # Fires when the user closes the window with the × button.
+            # Call _finish so the setup wizard still launches.
+            owner = getattr(self, "_picker", None)
+            if owner is not None:
+                owner._on_window_closed()
+
+    _PickerDelegateClass = _PickerDelegate
+    return _PickerDelegateClass
 
 
 def _detect_system_lang() -> str:
@@ -71,6 +109,7 @@ class _LanguagePickerWindow:
         self._window = None
         self._continue_btn = None
         self._lang_buttons: dict[str, object] = {}
+        self._finished: bool = False
 
     def show(self) -> None:
         try:
@@ -78,7 +117,6 @@ class _LanguagePickerWindow:
                 NSApplication,
                 NSBackingStoreBuffered,
                 NSButton,
-                NSColor,
                 NSFont,
                 NSMakeRect,
                 NSScreen,
@@ -87,9 +125,6 @@ class _LanguagePickerWindow:
                 NSWindowStyleMaskClosable,
                 NSWindowStyleMaskTitled,
             )
-            from objc import objc_method, lookUpClass
-
-            NSObject = lookUpClass("NSObject")
 
             screen = NSScreen.mainScreen()
             sf = screen.visibleFrame()
@@ -124,23 +159,13 @@ class _LanguagePickerWindow:
             start_x = (_WIN_W - (2 * _BTN_W + _BTN_GAP_X)) / 2
             start_y = (_WIN_H - _HEADER_H - (2 * _BTN_H + _BTN_GAP_Y)) / 2 + 28
 
-            # ObjC delegate
-            class _Delegate(NSObject):
-                pass
-
-            @objc_method(b"v@:@")
-            def langClicked_(self_, sender):
-                code = str(sender.identifier())
-                self._on_lang_selected(code)
-
-            @objc_method(b"v@:")
-            def continueClicked_(self_, _sender):
-                self._on_continue()
-
-            _Delegate.langClicked_ = langClicked_
-            _Delegate.continueClicked_ = continueClicked_
-            delegate = _Delegate.alloc().init()
+            # ObjC delegate — class is created once at module level;
+            # _picker attribute gives the ObjC methods access to this window.
+            DelegateClass = _get_picker_delegate_class()
+            delegate = DelegateClass.alloc().init()
+            delegate._picker = self
             self._delegate = delegate
+            self._window.setDelegate_(delegate)  # needed for windowWillClose_
 
             for i, (code, flag, name) in enumerate(_SUPPORTED_LANGS):
                 col = i % 2
@@ -195,7 +220,6 @@ class _LanguagePickerWindow:
 
     def _highlight(self, selected: str) -> None:
         try:
-            from AppKit import NSColor
             for code, btn in self._lang_buttons.items():
                 if code == selected:
                     btn.setKeyEquivalent_("")
@@ -218,7 +242,18 @@ class _LanguagePickerWindow:
         lang = self._selected or "en"
         self._finish(lang)
 
+    def _on_window_closed(self) -> None:
+        # Called by windowWillClose_ when user clicks ×.
+        # The window is already closing, so skip close() and fall through to finish.
+        if self._finished:
+            return
+        self._window = None  # prevent _finish from calling close() on a closing window
+        self._finish(self._selected or "en")
+
     def _finish(self, lang: str) -> None:
+        if self._finished:
+            return
+        self._finished = True
         try:
             if self._window:
                 self._window.close()
