@@ -40,6 +40,7 @@ from .vocab_provider import (
     collect_misrecognitions,
     collect_replacement_pairs_for_apply,
 )
+from . import i18n
 from .utils import (
     _count_prompt_tokens,
     _term_is_active,
@@ -55,7 +56,6 @@ from .utils import (
     get_metrics_history_path,
     get_language_script,
     get_primary_language,
-    get_ui_strings,
     log_error,
     log_exception,
     log_info,
@@ -415,7 +415,7 @@ class SVoiceRecApp:
                     "Download it first by running in your terminal:\n"
                     "  python scripts/download_ai_model.py"
                 )
-                self.notify("AI Editor: Модель не найдена", "Запустите скрипт загрузки и перезапустите приложение.")
+                self.notify(i18n.t("notify.ai_not_found_title"), i18n.t("notify.ai_not_found_body"))
                 return
 
             editor.load()
@@ -424,11 +424,11 @@ class SVoiceRecApp:
                 log_info("AiEditor was disabled during load — discarding.")
                 return
             if editor.is_ready():
-                self.notify("AI Editor Готов", "Умная пунктуация и очистка текста активированы.")
+                self.notify(i18n.t("notify.ai_ready_title"), i18n.t("notify.ai_ready_body_local"))
                 log_info("AiEditor loaded and ready.")
             else:
                 log_error("AiEditor failed to load — editor will be skipped.")
-                self.notify("AI Editor: Ошибка загрузки", "Не удалось загрузить модель. Проверьте логи.")
+                self.notify(i18n.t("notify.ai_load_error_title"), i18n.t("notify.ai_load_error_body"))
         except Exception as e:
             log_exception(f"AiEditor background load failed: {e}")
         finally:
@@ -443,11 +443,11 @@ class SVoiceRecApp:
                 return
             editor.load()
             if editor.is_ready():
-                self.notify("AI Editor Готов", f"Gemini ({editor.model_name}) активирован.")
+                self.notify(i18n.t("notify.ai_ready_title"), i18n.t("notify.ai_ready_body_gemini", model=editor.model_name))
                 log_info(f"GeminiEditor loaded and ready (model={editor.model_name}).")
             else:
                 log_error("GeminiEditor failed to initialise — editor will be skipped.")
-                self.notify("AI Editor: Ошибка", "Не удалось подключиться к Gemini API. Проверьте GOOGLE_API_KEY.")
+                self.notify(i18n.t("notify.ai_connect_error_title"), i18n.t("notify.ai_connect_error_body"))
         except Exception as e:
             log_exception(f"GeminiEditor background load failed: {e}")
         finally:
@@ -460,9 +460,8 @@ class SVoiceRecApp:
             return
 
         self._model_warming = True
-        s = get_ui_strings(get_primary_language(self.config))
         self._ensure_preview_panel()
-        self._preview_panel.show(s["preparing_title"], self._main_thread_queue)
+        self._preview_panel.show(i18n.t("hud.preparing_title"), self._main_thread_queue)
         self._model_warmup_thread = threading.Thread(
             target=self._model_warmup_worker, daemon=True
         )
@@ -489,15 +488,13 @@ class SVoiceRecApp:
             else:
                 log_error("Warmup timed out after 60s — child process may have crashed.")
             log_info("Whisper warm-up finished.")
-            s = get_ui_strings(get_primary_language(self.config))
             if self._preview_panel:
-                self._preview_panel.update_status(s["model_ready_title"], self._main_thread_queue)
+                self._preview_panel.update_status(i18n.t("hud.model_ready_title"), self._main_thread_queue)
                 self._preview_panel.hide(self._main_thread_queue, delay=1.5)
         except Exception as e:
             log_exception(f"Whisper warm-up failed: {e}")
-            s = get_ui_strings(get_primary_language(self.config))
             if self._preview_panel:
-                self._preview_panel.update_status(s["warmup_failed_title"], self._main_thread_queue)
+                self._preview_panel.update_status(i18n.t("hud.warmup_failed_title"), self._main_thread_queue)
                 self._preview_panel.hide(self._main_thread_queue, delay=2.0)
         finally:
             self.model_ready_event.set()
@@ -593,9 +590,8 @@ class SVoiceRecApp:
                 and not self.model_ready_event.is_set()
             ):
                 log_info("Ignoring hotkey: model warm-up in progress.")
-                s = get_ui_strings(get_primary_language(self.config))
                 self._ensure_preview_panel()
-                self._preview_panel.show(s["preparing_wait_title"], self._main_thread_queue)
+                self._preview_panel.show(i18n.t("hud.preparing_wait_title"), self._main_thread_queue)
                 self._preview_panel.hide(self._main_thread_queue, delay=2.0)
                 return
 
@@ -653,9 +649,8 @@ class SVoiceRecApp:
                 log_error(f"Failed to set menu bar status: {e}")
         # Note: append_phrase and submenu refresh are now done in _on_confirm
         # with the user's actual final text, not the raw/AI-processed accumulation.
-        s = get_ui_strings(get_primary_language(self.config))
         if self._preview_panel:
-            self._preview_panel.update_status(s["ready_title"], self._main_thread_queue)
+            self._preview_panel.update_status(i18n.t("hud.ready_title"), self._main_thread_queue)
         log_info("Finish cleanup done. Ready for next recording session.")
         self._completed_sessions += 1
         if self._completed_sessions % TRANSCRIBER_RESTART_AFTER_SESSIONS == 0:
@@ -665,7 +660,7 @@ class SVoiceRecApp:
     def _do_error_cleanup(self) -> None:
         """Run on main thread on stop_recording error: clear status, notify."""
         if self._preview_panel:
-            self._preview_panel.update_status("Ошибка распознавания", self._main_thread_queue)
+            self._preview_panel.update_status(i18n.t("notify.record_error_title"), self._main_thread_queue)
             self._preview_panel.hide(self._main_thread_queue, delay=2.0)
         self.is_processing = False
         mb = self.menu_bar
@@ -1051,7 +1046,10 @@ class SVoiceRecApp:
         save_config_to_disk(self.config)
         self._config_usage_dirty = False
         if n > 0:
-            self.notify("Click-n-speak", f"{n} устаревших терминов деактивировано. Откройте «Manage Terms» для просмотра.")
+            self.notify(
+                i18n.t("notify.dict_title"),
+                i18n.t("notify.decay_body", n=n, term_word=i18n.plural("terms.term_word", n)),
+            )
 
     def run_metrics_if_due(self, force: bool = False) -> dict | None:
         """Compute and persist metrics snapshot at most once per 24 h."""
@@ -1175,9 +1173,8 @@ class SVoiceRecApp:
     def start_recording(self):
         if self.worker_thread is not None and self.worker_thread.is_alive():
             log_info("Previous chunk worker still running; cannot start new recording.")
-            s = get_ui_strings(get_primary_language(self.config))
             if self._preview_panel:
-                self._preview_panel.update_status(s["still_working_title"], self._main_thread_queue)
+                self._preview_panel.update_status(i18n.t("hud.still_working_title"), self._main_thread_queue)
             return
         log_info("Starting recording...")
         # is_recording already set to True in toggle_recording() before this thread started
@@ -1230,10 +1227,9 @@ class SVoiceRecApp:
         log_info("Starting chunk worker thread.")
         self.worker_thread.start()
 
-        s = get_ui_strings(get_primary_language(self.config))
         self._ensure_preview_panel()
         if not self._append_to_popup:
-            self._preview_panel.show(s["recording_title"], self._main_thread_queue)
+            self._preview_panel.show(i18n.t("hud.recording_title"), self._main_thread_queue)
 
         try:
             self.recorder.start(chunk_callback=self.on_chunk_received)
@@ -1259,7 +1255,7 @@ class SVoiceRecApp:
                 if self.menu_bar
                 else None
             )
-            self.notify("Ошибка", "Не удалось начать запись. Проверьте логи.")
+            self.notify(i18n.t("notify.record_error_title"), i18n.t("notify.record_error_body"))
 
     def on_chunk_received(self, audio_data):
         if self.is_recording:
@@ -1372,11 +1368,10 @@ class SVoiceRecApp:
         full_text = self._buffered_final_text or _join_chunks(self.transcribed_parts)
         self._buffered_final_text = None
         if not full_text or self._preview_panel is None:
-            self.notify("Нет речи", "Не удалось записать звук. Попробуйте ещё раз.", delay=3.0)
+            self.notify(i18n.t("notify.no_speech_title"), i18n.t("notify.no_audio_body"), delay=3.0)
             self._submit_for_main_thread(self._do_finish_cleanup)
             return False
 
-        s_ui = get_ui_strings(get_primary_language(self.config))
         if self._append_to_popup and self._preview_panel._is_interactive:
             self._preview_panel.append_text(full_text, self._main_thread_queue)
             self._append_to_popup = False
@@ -1393,11 +1388,11 @@ class SVoiceRecApp:
                 self._main_thread_queue,
                 on_confirm=_on_confirm,
                 on_cancel=_on_cancel,
-                title=s_ui["popup_title_with_hotkey"],
+                title=i18n.t("popup.title_with_hotkey"),
                 on_add_to_dictionary=_on_add_to_dictionary,
-                toast_added_template=s_ui["toast_added"],
-                toast_invalid_term=s_ui["toast_invalid_term"],
-                toast_exists=s_ui["toast_exists"],
+                toast_added_template=i18n.t("toast.added"),
+                toast_invalid_term=i18n.t("toast.invalid_term"),
+                toast_exists=i18n.t("toast.exists"),
             )
             log_info("Buffered finalization: show_interactive queued on main thread")
 
@@ -1410,8 +1405,7 @@ class SVoiceRecApp:
             # Build context: always keep the full vocab prompt, then fill the
             # remaining token budget with whole recent chunks (newest first) so
             # vocabulary terms stay in context for every chunk, not just the first.
-            s = get_ui_strings(get_primary_language(self.config))
-            instruction = s["transcription_instruction"]
+            instruction = i18n.t("hud.transcription_instruction")
             # Use cached prompt — rebuild only when config changed (load_config_data sets dirty flag).
             if self._initial_prompt_dirty:
                 self._cached_initial_prompt = build_initial_prompt(self.config)
@@ -1566,7 +1560,6 @@ class SVoiceRecApp:
 
                     _on_confirm, _on_cancel, _on_add_to_dictionary = self._build_confirm_cancel_callbacks()
 
-                    s_ui = get_ui_strings(get_primary_language(self.config))
                     log_info(
                         f"process_chunk: ready to show interactive popup. "
                         f"full_text_len={len(full_text)}, "
@@ -1585,11 +1578,11 @@ class SVoiceRecApp:
                                 self._main_thread_queue,
                                 on_confirm=_on_confirm,
                                 on_cancel=_on_cancel,
-                                title=s_ui["popup_title_with_hotkey"],
+                                title=i18n.t("popup.title_with_hotkey"),
                                 on_add_to_dictionary=_on_add_to_dictionary,
-                                toast_added_template=s_ui["toast_added"],
-                                toast_invalid_term=s_ui["toast_invalid_term"],
-                                toast_exists=s_ui["toast_exists"],
+                                toast_added_template=i18n.t("toast.added"),
+                                toast_invalid_term=i18n.t("toast.invalid_term"),
+                                toast_exists=i18n.t("toast.exists"),
                             )
                             log_info("process_chunk: show_interactive queued on main thread")
                     elif self._preview_panel:
@@ -1606,12 +1599,11 @@ class SVoiceRecApp:
             else:
                 log_info("Transcriber returned empty text for this chunk.")
                 if is_final_chunk and not self.transcribed_parts and self._session_id == session_id:
-                    self.notify("Нет речи", "Не удалось распознать речь. Попробуйте ещё раз.", delay=2.0)
+                    self.notify(i18n.t("notify.no_speech_title"), i18n.t("notify.no_recognition_body"), delay=2.0)
                 if is_final_chunk and self.transcribed_parts and self._session_id == session_id:
                     full_text = _join_chunks(self.transcribed_parts)
                     if full_text and self._preview_panel:
                         self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
-                        s_ui = get_ui_strings(get_primary_language(self.config))
                         if self._append_to_popup and self._preview_panel._is_interactive:
                             self._preview_panel.append_text(full_text, self._main_thread_queue)
                             self._append_to_popup = False
@@ -1630,11 +1622,11 @@ class SVoiceRecApp:
                                 self._main_thread_queue,
                                 on_confirm=_on_confirm,
                                 on_cancel=_on_cancel,
-                                title=s_ui["popup_title_with_hotkey"],
+                                title=i18n.t("popup.title_with_hotkey"),
                                 on_add_to_dictionary=_on_add_to_dictionary,
-                                toast_added_template=s_ui["toast_added"],
-                                toast_invalid_term=s_ui["toast_invalid_term"],
-                                toast_exists=s_ui["toast_exists"],
+                                toast_added_template=i18n.t("toast.added"),
+                                toast_invalid_term=i18n.t("toast.invalid_term"),
+                                toast_exists=i18n.t("toast.exists"),
                             )
                             log_info("process_chunk: show_interactive queued (final chunk empty, using buffered partials)")
         except Exception as e:
@@ -1652,9 +1644,8 @@ class SVoiceRecApp:
                 else None
             )
 
-            s = get_ui_strings(get_primary_language(self.config))
             if self._preview_panel:
-                self._preview_panel.update_status(s["transcribing_title"], self._main_thread_queue)
+                self._preview_panel.update_status(i18n.t("hud.transcribing_title"), self._main_thread_queue)
 
             # Stop recording and get the last (remaining) chunk
             try:
@@ -1698,9 +1689,8 @@ class SVoiceRecApp:
                     if self._transcription_cycle_id != cycle_id:
                         return
                     if self.worker_thread is not None and self.worker_thread.is_alive():
-                        s = get_ui_strings(get_primary_language(self.config))
                         if self._preview_panel:
-                            self._preview_panel.update_status(s["still_working_title"], self._main_thread_queue)
+                            self._preview_panel.update_status(i18n.t("hud.still_working_title"), self._main_thread_queue)
                 except Exception as e:
                     log_exception(f"Delayed transcription notify failed: {e}")
 
@@ -1737,9 +1727,8 @@ class SVoiceRecApp:
                     # Keep showing "still working" — chunk_worker will submit
                     # _do_finish_cleanup when it actually completes.
                     if self._preview_panel:
-                        s_wt = get_ui_strings(get_primary_language(self.config))
                         self._preview_panel.update_status(
-                            s_wt["still_working_title"], self._main_thread_queue
+                            i18n.t("hud.still_working_title"), self._main_thread_queue
                         )
                 else:
                     log_info(
@@ -1785,7 +1774,7 @@ class SVoiceRecApp:
             lambda: self.menu_bar.set_status(recording=False, processing=True) if self.menu_bar else None
         )
         
-        self.notify("Распознавание файла", f"Обработка {Path(file_path).name}...")
+        self.notify(i18n.t("notify.file_processing_title"), i18n.t("notify.file_processing_body", filename=Path(file_path).name))
         
         threading.Thread(target=self._file_transcription_worker, args=(file_path,), daemon=True).start()
 
@@ -1805,8 +1794,7 @@ class SVoiceRecApp:
                 if self._file_cycle_id != _cycle_id:
                     return
                 if self.is_processing and self._preview_panel:
-                    s = get_ui_strings(get_primary_language(self.config))
-                    self._preview_panel.update_status(s["still_working_title"], self._main_thread_queue)
+                    self._preview_panel.update_status(i18n.t("hud.still_working_title"), self._main_thread_queue)
 
             _file_notify_timer = threading.Timer(self._still_working_delay_seconds, _file_still_working)
             _file_notify_timer.daemon = True
@@ -1823,7 +1811,7 @@ class SVoiceRecApp:
             except FileTranscriptionError as fte:
                 _file_notify_timer.cancel()
                 log_error(f"File transcription error: {fte}")
-                self.notify("Ошибка открытия файла", str(fte))
+                self.notify(i18n.t("notify.file_open_error_title"), str(fte))
                 self._submit_for_main_thread(self._do_finish_cleanup)
                 return
 
@@ -1888,13 +1876,13 @@ class SVoiceRecApp:
                     from .utils import copy_to_clipboard
                     copy_to_clipboard(text)
 
-                    self.notify("Файл распознан", f"Сохранено: {output_file.name} (и скопировано!)", delay=3.0)
+                    self.notify(i18n.t("notify.file_done_title"), i18n.t("notify.file_done_body", filename=output_file.name), delay=3.0)
                 except Exception as write_err:
                     log_error(f"Failed to write markdown file: {write_err}")
-                    self.notify("Ошибка", "Не удалось сохранить файл.")
+                    self.notify(i18n.t("notify.file_save_error_title"), i18n.t("notify.file_save_error_body"))
             else:
                 log_info("File transcription returned empty text.")
-                self.notify("Нет речи", "Не удалось извлечь текст из файла.")
+                self.notify(i18n.t("notify.no_speech_title"), i18n.t("notify.file_no_speech_body"))
 
         except Exception as e:
             if _file_notify_timer is not None:
@@ -2119,8 +2107,8 @@ class SVoiceRecApp:
         self._last_memory_pressure_notification_ts = now
         send_notification(
             "Click-n-speak",
-            "AI-редактор пропущен",
-            "Нехватка памяти. Закройте лишние приложения для ускорения работы.",
+            i18n.t("notify.memory_pressure_title"),
+            i18n.t("notify.memory_pressure_body"),
         )
 
     def start_wake_observer(self) -> None:

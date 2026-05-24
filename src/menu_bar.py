@@ -6,6 +6,7 @@ import threading
 from datetime import datetime, timezone
 
 import rumps
+from . import i18n
 
 # ---------------------------------------------------------------------------
 # Whisper model registry — ordered fastest → most accurate
@@ -380,11 +381,11 @@ try:
 
             self._ns_menu.removeAllItems()
 
-            self._ns_menu.addItem_(self._header_item("Нажмите на фразу, чтобы скопировать"))
+            self._ns_menu.addItem_(self._header_item(i18n.t("menu.history_hint")))
             self._ns_menu.addItem_(NSMenuItem.separatorItem())
 
             if not self._phrases:
-                self._ns_menu.addItem_(self._header_item("Нет сохранённых фраз"))
+                self._ns_menu.addItem_(self._header_item(i18n.t("menu.history_empty")))
                 return
 
             for i, (_ts, text) in enumerate(self._phrases):
@@ -453,7 +454,7 @@ try:
                 NSMakeRect(self._MARGIN, 3, self._VIEW_W - 2 * self._MARGIN, self._ROW_H)
             )
             btn.setButtonType_(NSButtonTypeMomentaryLight)
-            btn.setTitle_("↓   Показать ещё")
+            btn.setTitle_(i18n.t("menu.show_more"))
             btn.setBordered_(True)
             btn.setAlignment_(NSTextAlignmentCenter)
             btn.setTarget_(self)
@@ -507,7 +508,7 @@ try:
             )
             panel.setHasShadow_(True)
             lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 3, W, H - 4))
-            lbl.setStringValue_("Copied")
+            lbl.setStringValue_(i18n.t("popup.copied"))
             lbl.setBezeled_(False)
             lbl.setDrawsBackground_(False)
             lbl.setEditable_(False)
@@ -602,13 +603,10 @@ def _prompt_restart(reason: str) -> None:
         from AppKit import NSAlert  # type: ignore
         alert = NSAlert.alloc().init()
         alert.setAlertStyle_(1)
-        alert.setMessageText_("Restart Click-n-speak")
-        alert.setInformativeText_(
-            f"{reason}\n\nClick-n-speak needs to restart to activate the global "
-            f"hotkey (Alt+Space).\n\nRestart now?"
-        )
-        alert.addButtonWithTitle_("Restart Now")
-        alert.addButtonWithTitle_("Later")
+        alert.setMessageText_(i18n.t("dialog.restart_title"))
+        alert.setInformativeText_(i18n.t("dialog.restart_body", reason=reason))
+        alert.addButtonWithTitle_(i18n.t("btn.restart_now"))
+        alert.addButtonWithTitle_(i18n.t("btn.later"))
         clicked = alert.runModal() - 1000
         if clicked == 0:
             log_info("User accepted restart prompt — relaunching app.")
@@ -631,8 +629,10 @@ class ClickNSpeakApp(rumps.App):
         self._input_monitoring_item = None  # set in setup_menu
         self._microphone_ok: bool | None = None  # None = unknown until first check
         self._microphone_item = None  # set in setup_menu
+        self._model_menu_item = None  # set in setup_menu
         self._permissions_item = None  # parent Permissions menu item
         self._wizard_pending = False
+        self._language_picker_pending = False
         self._suggestion_check_done: bool = False
         self._lang_menu_controller: "_LangMenuController | None" = None
         self._phrase_menu_controller: "_PhraseMenuController | None" = None
@@ -829,13 +829,19 @@ class ClickNSpeakApp(rumps.App):
                             # Legacy ua-file was edited; mirror content to canonical uk-file.
                             self._sync_prompt_file(lang)
                         log_info(f"Initial prompt updated manually for {lang.upper()}.")
-                        self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} обновлена!")
+                        self.main_app.notify(i18n.t("notify.settings_title"), i18n.t("notify.prompt_updated_body", lang=lang.upper()))
             except Exception as e:
                 log_error(f"Error checking prompt file for {lang}: {e}")
 
     # ------------------------------------------------------------------
     # Setup wizard
     # ------------------------------------------------------------------
+
+    def schedule_language_picker(self, run_wizard_after: bool = False) -> None:
+        """Show the language picker on first launch before the setup wizard."""
+        self._language_picker_pending = True
+        if run_wizard_after:
+            self._wizard_pending = True  # will be re-set after picker
 
     def schedule_setup_wizard(self) -> None:
         """Schedule the permission wizard to run after 1 s (once the menu bar is visible)."""
@@ -857,6 +863,24 @@ class ClickNSpeakApp(rumps.App):
         if self._microphone_ok is None:
             self._microphone_ok = check_microphone() == "granted"
             self._update_microphone_item()
+
+        if self._language_picker_pending:
+            self._language_picker_pending = False
+            was_wizard_pending = self._wizard_pending
+            self._wizard_pending = False  # picker callback will re-schedule wizard
+            try:
+                from .language_picker import show_if_needed as _show_lp
+
+                def _after_lang_pick() -> None:
+                    if was_wizard_pending:
+                        self._wizard_pending = True
+
+                _show_lp(self.config, _after_lang_pick)
+            except Exception as exc:
+                log_error(f"Language picker error: {exc}")
+                if was_wizard_pending:
+                    self._wizard_pending = True
+            return  # wizard runs on the next 1s tick
 
         if self._wizard_pending:
             self._wizard_pending = False
@@ -881,10 +905,10 @@ class ClickNSpeakApp(rumps.App):
         if self._microphone_item is None:
             return
         if self._microphone_ok:
-            self._microphone_item.title = "Microphone — Granted"
+            self._microphone_item.title = i18n.t("menu.mic_granted")
             p = get_menu_item_icon_path("microphone-ok")
         else:
-            self._microphone_item.title = "Microphone — Required"
+            self._microphone_item.title = i18n.t("menu.mic_required")
             p = get_menu_item_icon_path("microphone-warn")
         if p:
             self._microphone_item.set_icon(str(p), dimensions=[16, 16], template=False)
@@ -894,7 +918,7 @@ class ClickNSpeakApp(rumps.App):
         if not self._microphone_ok:
             open_microphone_settings()
         else:
-            self.main_app.notify("Доступ", "Доступ к микрофону уже предоставлен.")
+            self.main_app.notify(i18n.t("notify.perm_title"), i18n.t("notify.perm_mic_granted"))
 
     def _refresh_permissions(self) -> None:
         """Refresh all permission indicators. Called at startup and on menu open."""
@@ -938,10 +962,10 @@ class ClickNSpeakApp(rumps.App):
         if self._accessibility_item is None:
             return
         if self._accessibility_granted:
-            self._accessibility_item.title = "Accessibility — Granted"
+            self._accessibility_item.title = i18n.t("menu.access_granted")
             p = get_menu_item_icon_path("accessibility-ok")
         else:
-            self._accessibility_item.title = "Accessibility — Required"
+            self._accessibility_item.title = i18n.t("menu.access_required")
             p = get_menu_item_icon_path("accessibility-warn")
         if p:
             self._accessibility_item.set_icon(str(p), dimensions=[16, 16], template=False)
@@ -951,7 +975,7 @@ class ClickNSpeakApp(rumps.App):
         if not self._accessibility_granted:
             open_accessibility_settings()
         else:
-            self.main_app.notify("Доступ", "Права доступа уже предоставлены.")
+            self.main_app.notify(i18n.t("notify.perm_title"), i18n.t("notify.perm_access_granted"))
 
     # ------------------------------------------------------------------
     # Input Monitoring (macOS 15+ — separate from Accessibility)
@@ -967,21 +991,21 @@ class ClickNSpeakApp(rumps.App):
         self._update_input_monitoring_item()
         if not is_wizard_active():
             send_notification(
-                "Click-n-speak — Hotkeys Disabled",
-                "Add Click-n-speak to Privacy & Security → Input Monitoring to enable hotkeys.",
+                i18n.t("notify.perm_hotkeys_disabled_title"),
+                i18n.t("notify.perm_hotkeys_disabled_body"),
             )
 
     def _update_input_monitoring_item(self) -> None:
         if self._input_monitoring_item is None:
             return
         if self._input_monitoring_ok is None:
-            self._input_monitoring_item.title = "Input Monitoring — Checking…"
+            self._input_monitoring_item.title = i18n.t("menu.input_checking")
             p = get_menu_item_icon_path("input-monitoring-warn")
         elif self._input_monitoring_ok:
-            self._input_monitoring_item.title = "Input Monitoring — Granted"
+            self._input_monitoring_item.title = i18n.t("menu.input_granted")
             p = get_menu_item_icon_path("input-monitoring-ok")
         else:
-            self._input_monitoring_item.title = "Input Monitoring — Required"
+            self._input_monitoring_item.title = i18n.t("menu.input_required")
             p = get_menu_item_icon_path("input-monitoring-warn")
         if p:
             self._input_monitoring_item.set_icon(str(p), dimensions=[16, 16], template=False)
@@ -1003,7 +1027,7 @@ class ClickNSpeakApp(rumps.App):
         if not self._input_monitoring_ok:
             open_input_monitoring_settings()
         else:
-            self.main_app.notify("Доступ", "Input Monitoring уже разрешён.")
+            self.main_app.notify(i18n.t("notify.perm_title"), i18n.t("notify.perm_input_granted"))
 
     def setup_menu(self):
         def _icon(name: str) -> dict:
@@ -1011,7 +1035,7 @@ class ClickNSpeakApp(rumps.App):
             return {"icon": str(p), "dimensions": [16, 16], "template": True} if p else {}
 
         # Permissions parent item with submenu
-        self._permissions_item = rumps.MenuItem("Permissions")
+        self._permissions_item = rumps.MenuItem(i18n.t("menu.permissions"))
         self._microphone_item = rumps.MenuItem("", callback=self._on_microphone_click)
         self._update_microphone_item()
         self._permissions_item.add(self._microphone_item)
@@ -1027,12 +1051,13 @@ class ClickNSpeakApp(rumps.App):
 
         # Model selection submenu
         current_model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
-        self.menu.add(rumps.MenuItem("Model", **_icon("model")))
+        self._model_menu_item = rumps.MenuItem(i18n.t("menu.model"), **_icon("model"))
+        self.menu.add(self._model_menu_item)
 
         if _HAVE_MODEL_ROWS:
             model_ns_menu = _NSMenuRow.alloc().initWithTitle_("Model")
             model_ns_menu.setAutoenablesItems_(False)
-            self.menu["Model"]._menuitem.setSubmenu_(model_ns_menu)
+            self._model_menu_item._menuitem.setSubmenu_(model_ns_menu)
 
             for label, model_id in WHISPER_MODELS:
                 delegate = _ModelRowDelegate.alloc().init().configure(
@@ -1063,10 +1088,10 @@ class ClickNSpeakApp(rumps.App):
                     item.set_icon(str(_dl_icon), dimensions=[16, 16], template=True)
                 if model_id == current_model:
                     item.state = 1
-                self.menu["Model"].add(item)
+                self._model_menu_item.add(item)
 
         # Language selection — native submenu, stays open after clicks via NSMenuItem.setView_()
-        lang_item = rumps.MenuItem("Languages", **_icon("languages"))
+        lang_item = rumps.MenuItem(i18n.t("menu.languages"), **_icon("languages"))
         self.menu.add(lang_item)
         if _HAVE_LANG_MENU:
             try:
@@ -1084,36 +1109,36 @@ class ClickNSpeakApp(rumps.App):
         self.menu.add(None)  # Separator
 
         # AI Editor toggle
-        ai_editor_item = rumps.MenuItem("AI Editor (Punctuation & Cleanup)", **_icon("ai-editor"), callback=self._toggle_ai_editor)
+        ai_editor_item = rumps.MenuItem(i18n.t("menu.ai_editor"), **_icon("ai-editor"), callback=self._toggle_ai_editor)
         ai_editor_item.state = 1 if self.config.get("ai_editor_enabled", False) else 0
         self.menu.add(ai_editor_item)
 
         # AI Editor Backend submenu
-        self._ai_backend_submenu = rumps.MenuItem("AI Editor Backend ▶")
-        self._ai_backend_local_item = rumps.MenuItem("Local (Qwen)", callback=self._on_set_ai_backend_local)
-        self._ai_backend_gemini_item = rumps.MenuItem("Gemini API", callback=self._on_set_ai_backend_gemini)
+        self._ai_backend_submenu = rumps.MenuItem(i18n.t("menu.ai_backend"))
+        self._ai_backend_local_item = rumps.MenuItem(i18n.t("menu.ai_local"), callback=self._on_set_ai_backend_local)
+        self._ai_backend_gemini_item = rumps.MenuItem(i18n.t("menu.ai_gemini"), callback=self._on_set_ai_backend_gemini)
         self._ai_backend_submenu.add(self._ai_backend_local_item)
         self._ai_backend_submenu.add(self._ai_backend_gemini_item)
         self._ai_backend_submenu.add(None)
-        self._ai_backend_submenu.add(rumps.MenuItem("Set Gemini API Key…", callback=self._on_set_gemini_api_key))
+        self._ai_backend_submenu.add(rumps.MenuItem(i18n.t("menu.set_gemini_key"), callback=self._on_set_gemini_api_key))
         self.menu.add(self._ai_backend_submenu)
         self._update_ai_backend_submenu_state()
 
-        self.menu.add(rumps.MenuItem("Download AI Editor Model", **_icon("download-model"), callback=self._download_ai_model))
+        self.menu.add(rumps.MenuItem(i18n.t("menu.download_ai_model"), **_icon("download-model"), callback=self._download_ai_model))
 
         # Initial Prompt submenu
-        self._prompt_menu_item = rumps.MenuItem("Initial Prompt", **_icon("initial-prompt"))
-        self._prompt_menu_item.add(rumps.MenuItem("Edit Terms…", callback=self._on_manage_terms))
-        self._prompt_menu_item.add(rumps.MenuItem("Revert Terms…", callback=self.revert_initial_prompt))
+        self._prompt_menu_item = rumps.MenuItem(i18n.t("menu.initial_prompt"), **_icon("initial-prompt"))
+        self._prompt_menu_item.add(rumps.MenuItem(i18n.t("menu.edit_terms"), callback=self._on_manage_terms))
+        self._prompt_menu_item.add(rumps.MenuItem(i18n.t("menu.revert_terms"), callback=self.revert_initial_prompt))
         self._prompt_menu_item.add(None)
 
         # Auto-update Mode submenu (Suggest / Auto / Disabled)
         self._mode_items = {}
-        mode_menu = rumps.MenuItem("Auto-update Mode")
+        mode_menu = rumps.MenuItem(i18n.t("menu.auto_update_mode"))
         for _mode_key, _mode_label in [
-            ("suggest", "Suggest (по умолчанию)"),
-            ("auto", "Auto"),
-            ("disabled", "Disabled"),
+            ("suggest", i18n.t("menu.mode_suggest")),
+            ("auto", i18n.t("menu.mode_auto")),
+            ("disabled", i18n.t("menu.mode_disabled")),
         ]:
             _item = rumps.MenuItem(
                 _mode_label,
@@ -1126,15 +1151,15 @@ class ClickNSpeakApp(rumps.App):
 
         self._prompt_menu_item.add(None)
 
-        self._suggest_item = rumps.MenuItem("Review Suggestions", callback=self._on_review_suggestions)
+        self._suggest_item = rumps.MenuItem(i18n.t("menu.review_suggestions"), callback=self._on_review_suggestions)
         self._prompt_menu_item.add(self._suggest_item)
-        self._prompt_menu_item.add(rumps.MenuItem("Edit Replacements…", callback=self._on_edit_replacements))
-        self._prompt_menu_item.add(rumps.MenuItem("Statistics…", callback=self._show_statistics_alert))
+        self._prompt_menu_item.add(rumps.MenuItem(i18n.t("menu.edit_replacements"), callback=self._on_edit_replacements))
+        self._prompt_menu_item.add(rumps.MenuItem(i18n.t("menu.statistics"), callback=self._show_statistics_alert))
         self.menu.add(self._prompt_menu_item)
         self.update_suggest_menu_badge()
 
         # Phrase history
-        self._last_phrases_parent = rumps.MenuItem("Last Phrases", **_icon("last-phrases"))
+        self._last_phrases_parent = rumps.MenuItem(i18n.t("menu.last_phrases"), **_icon("last-phrases"))
         self.menu.add(self._last_phrases_parent)
         if _HAVE_PHRASE_MENU:
             try:
@@ -1149,25 +1174,25 @@ class ClickNSpeakApp(rumps.App):
         else:
             self._refresh_last_phrases_submenu()
 
-        self.menu.add(rumps.MenuItem("Transcribe Audio File...", **_icon("transcribe-file"), callback=self.transcribe_audio_file))
+        self.menu.add(rumps.MenuItem(i18n.t("menu.transcribe_file"), **_icon("transcribe-file"), callback=self.transcribe_audio_file))
 
         self.menu.add(None)  # Separator
 
-        self.menu.add(rumps.MenuItem("Check for Updates", **_icon("check-updates"), callback=self.check_for_updates))
+        self.menu.add(rumps.MenuItem(i18n.t("menu.check_updates"), **_icon("check-updates"), callback=self.check_for_updates))
 
         # Autostart
-        autostart_item = rumps.MenuItem("Launch at Login", **_icon("launch-at-login"), callback=self.toggle_autostart)
+        autostart_item = rumps.MenuItem(i18n.t("menu.launch_at_login"), **_icon("launch-at-login"), callback=self.toggle_autostart)
         autostart_item.state = 1 if is_launch_at_login_enabled() else 0
         self.menu.add(autostart_item)
 
         # Advanced submenu
-        advanced_menu = rumps.MenuItem("Advanced", **_icon("advanced"))
-        advanced_menu.add(rumps.MenuItem("Edit Config File", callback=self.open_config))
-        advanced_menu.add(rumps.MenuItem("Open Log File", callback=self.open_log_file))
-        advanced_menu.add(rumps.MenuItem("Reload Configuration", callback=self.reload_config))
+        advanced_menu = rumps.MenuItem(i18n.t("menu.advanced"), **_icon("advanced"))
+        advanced_menu.add(rumps.MenuItem(i18n.t("menu.edit_config"), callback=self.open_config))
+        advanced_menu.add(rumps.MenuItem(i18n.t("menu.open_log"), callback=self.open_log_file))
+        advanced_menu.add(rumps.MenuItem(i18n.t("menu.reload_config"), callback=self.reload_config))
         self.menu.add(advanced_menu)
 
-        self.menu.add(rumps.MenuItem("Restart", **_icon("restart"), callback=self.restart_application))
+        self.menu.add(rumps.MenuItem(i18n.t("menu.restart"), **_icon("restart"), callback=self.restart_application))
         self.menu.add(None)
 
         # Apply the idle icon on startup (overrides CnS.png set in __init__)
@@ -1271,7 +1296,7 @@ class ClickNSpeakApp(rumps.App):
                     if self._model_row_refs:
                         self._update_model_row_view(mid)
                     else:
-                        for item in self.menu["Model"].values():
+                        for item in self._model_menu_item.values():
                             if self._parse_model_title(item.title) == lbl:
                                 new_title = self._render_model_menu_item(mid)
                                 if item.title != new_title:
@@ -1317,7 +1342,7 @@ class ClickNSpeakApp(rumps.App):
         else:
             for label, model_id in WHISPER_MODELS:
                 new_title = self._render_model_menu_item(model_id)
-                for item in self.menu["Model"].values():
+                for item in self._model_menu_item.values():
                     if self._parse_model_title(item.title) == label:
                         if item.title != new_title:
                             item.title = new_title
@@ -1353,11 +1378,10 @@ class ClickNSpeakApp(rumps.App):
                 if free < needed * 1.2:
                     free_gb = free / 1e9
                     need_gb = needed * 1.2 / 1e9
-                    return False, (
-                        f"Недостаточно места на диске.\n\n"
-                        f"Свободно: {free_gb:.1f} ГБ\n"
-                        f"Требуется: {need_gb:.1f} ГБ (с запасом 20%)\n\n"
-                        f"Освободите место и попробуйте снова."
+                    return False, i18n.t(
+                        "dialog.download_no_space",
+                        free_gb=f"{free_gb:.1f}",
+                        need_gb=f"{need_gb:.1f}",
                     )
             except Exception:
                 pass  # disk_usage failed — proceed optimistically
@@ -1444,10 +1468,10 @@ class ClickNSpeakApp(rumps.App):
                 self._update_model_row_view(mid)
         else:
             # Fallback: update rumps item states
-            for item in self.menu["Model"].values():
+            for item in self._model_menu_item.values():
                 if hasattr(item, "state"):
                     item.state = 0
-            for item in self.menu["Model"].values():
+            for item in self._model_menu_item.values():
                 if self._parse_model_title(getattr(item, "title", "")) == label:
                     item.state = 1
                     break
@@ -1499,8 +1523,8 @@ class ClickNSpeakApp(rumps.App):
             from AppKit import NSAlert, NSInformationalAlertStyle  # type: ignore
         except ImportError:
             self.main_app.notify(
-                f"Модель {label} не загружена",
-                f"Запустите: python scripts/download_whisper_model.py --model {model_id}",
+                i18n.t("notify.model_not_downloaded_title", label=label),
+                i18n.t("notify.model_not_downloaded_body", model_id=model_id),
             )
             return
 
@@ -1513,35 +1537,32 @@ class ClickNSpeakApp(rumps.App):
         cache_dir = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface/hub")
         try:
             free_gb = _shutil.disk_usage(cache_dir).free / 1e9
-            disk_info = f"Свободно: {free_gb:.0f} ГБ"
+            disk_info = i18n.t("dialog.download_disk_free", gb=f"{free_gb:.0f}")
         except Exception:
             disk_info = ""
 
         if is_partial and total_bytes:
             done_pct = min(99, int(100 * partial_bytes / total_bytes))
             remaining_mb = max(0, (total_bytes - partial_bytes)) / (1024 * 1024)
-            informative = f"Уже скачано: {done_pct}% · Осталось: ~{remaining_mb:.0f} МБ"
+            informative = i18n.t("dialog.download_progress_body", done_pct=done_pct, remaining_mb=f"{remaining_mb:.0f}")
         else:
-            informative = f"Размер: {size_str}"
+            informative = i18n.t("dialog.download_size_body", size_str=size_str)
         if disk_info:
             informative += f" · {disk_info}"
-        informative += (
-            "\n\nЗагрузка идёт в фоне прямо в приложении."
-            "\nМожно отменить и продолжить позже — скачанные части не потеряются."
-        )
+        informative += i18n.t("dialog.download_info_suffix")
 
         alert = NSAlert.alloc().init()
         alert.setAlertStyle_(NSInformationalAlertStyle)
         if is_partial:
-            alert.setMessageText_(f"Продолжить загрузку «{label}»?")
+            alert.setMessageText_(i18n.t("dialog.download_continue_title", label=label))
         else:
-            alert.setMessageText_(f"Модель «{label}» не загружена")
+            alert.setMessageText_(i18n.t("dialog.download_new_title", label=label))
         alert.setInformativeText_(informative)
-        alert.addButtonWithTitle_("Продолжить" if is_partial else "Загрузить")
-        alert.addButtonWithTitle_("Отмена")
+        alert.addButtonWithTitle_(i18n.t("btn.download_continue") if is_partial else i18n.t("btn.download"))
+        alert.addButtonWithTitle_(i18n.t("btn.cancel"))
 
         response = alert.runModal()
-        # First button (Загрузить) = 1000
+        # First button (Download) = 1000
         if response != 1000:
             return
 
@@ -1550,9 +1571,9 @@ class ClickNSpeakApp(rumps.App):
             from AppKit import NSCriticalAlertStyle  # type: ignore
             err_alert = NSAlert.alloc().init()
             err_alert.setAlertStyle_(NSCriticalAlertStyle)
-            err_alert.setMessageText_("Невозможно начать загрузку")
+            err_alert.setMessageText_(i18n.t("dialog.download_error_title"))
             err_alert.setInformativeText_(err_msg or "")
-            err_alert.addButtonWithTitle_("OK")
+            err_alert.addButtonWithTitle_(i18n.t("btn.ok"))
             err_alert.runModal()
             return
 
@@ -1580,8 +1601,8 @@ class ClickNSpeakApp(rumps.App):
         # to avoid RuntimeError if the download thread mutates _download_state concurrently.
         if any(self._download_state.get(mid) == "downloading" for _, mid in WHISPER_MODELS):
             self.main_app.notify(
-                "Загрузка уже идёт",
-                "Дождитесь завершения текущей загрузки и попробуйте снова.",
+                i18n.t("notify.download_in_progress_title"),
+                i18n.t("notify.download_in_progress_body"),
             )
             return
 
@@ -1631,12 +1652,12 @@ class ClickNSpeakApp(rumps.App):
                     from AppKit import NSAlert, NSCriticalAlertStyle  # type: ignore
                     alert = NSAlert.alloc().init()
                     alert.setAlertStyle_(NSCriticalAlertStyle)
-                    alert.setMessageText_(f"Ошибка загрузки «{label}»")
+                    alert.setMessageText_(i18n.t("dialog.download_error_title", label=label))
                     alert.setInformativeText_(err[:300])
-                    alert.addButtonWithTitle_("OK")
+                    alert.addButtonWithTitle_(i18n.t("btn.ok"))
                     alert.runModal()
                 except Exception:
-                    self.main_app.notify(f"Ошибка загрузки «{label}»", err[:120])
+                    self.main_app.notify(i18n.t("notify.model_download_error", label=label), err[:120])
             q.put_nowait((_apply_error, [], {}))
 
         def on_cancelled() -> None:
@@ -1675,15 +1696,15 @@ class ClickNSpeakApp(rumps.App):
 
         if not self._model_row_refs:
             # Fallback: update rumps item checkmarks
-            for item in self.menu["Model"].values():
+            for item in self._model_menu_item.values():
                 if hasattr(item, "state"):
                     item.state = 0
                 if self._parse_model_title(getattr(item, "title", "")) == label:
                     item.state = 1
 
         self.main_app.notify(
-            f"Модель «{label}» готова",
-            "Модель активирована — можно начинать диктовку.",
+            i18n.t("notify.model_ready_title", label=label),
+            i18n.t("notify.model_ready_body"),
         )
 
     def _confirm_and_delete_model(self, label: str, model_id: str) -> None:
@@ -1692,14 +1713,10 @@ class ClickNSpeakApp(rumps.App):
             from AppKit import NSAlert, NSWarningAlertStyle  # type: ignore
             alert = NSAlert.alloc().init()
             alert.setAlertStyle_(NSWarningAlertStyle)
-            alert.setMessageText_(f"Удалить модель «{label}»?")
-            alert.setInformativeText_(
-                f"Модель будет полностью удалена с диска "
-                f"(освободится ~{WHISPER_MODEL_SIZES.get(model_id, '?')}).\n"
-                "Для использования потребуется повторная загрузка."
-            )
-            alert.addButtonWithTitle_("Удалить")
-            alert.addButtonWithTitle_("Отмена")
+            alert.setMessageText_(i18n.t("dialog.delete_model_title", label=label))
+            alert.setInformativeText_(i18n.t("dialog.delete_model_body", size=WHISPER_MODEL_SIZES.get(model_id, "?")))
+            alert.addButtonWithTitle_(i18n.t("btn.delete"))
+            alert.addButtonWithTitle_(i18n.t("btn.cancel"))
             if alert.runModal() != 1000:
                 return
         except ImportError:
@@ -1721,9 +1738,9 @@ class ClickNSpeakApp(rumps.App):
                 from AppKit import NSAlert, NSCriticalAlertStyle  # type: ignore
                 err = NSAlert.alloc().init()
                 err.setAlertStyle_(NSCriticalAlertStyle)
-                err.setMessageText_(f"Ошибка удаления «{label}»")
+                err.setMessageText_(i18n.t("dialog.delete_model_error_title", label=label))
                 err.setInformativeText_(str(exc)[:300])
-                err.addButtonWithTitle_("OK")
+                err.addButtonWithTitle_(i18n.t("btn.ok"))
                 err.runModal()
             except ImportError:
                 pass
@@ -1759,18 +1776,18 @@ class ClickNSpeakApp(rumps.App):
                 self._refresh_model_menu_titles()
                 fallback_label = next((l for l, mid in WHISPER_MODELS if mid == fallback_id), "")
                 self.main_app.notify(
-                    f"Модель «{label}» удалена",
-                    f"Активирована модель «{fallback_label}».",
+                    i18n.t("notify.model_deleted_title", label=label),
+                    i18n.t("notify.model_deleted_fallback_body", fallback=fallback_label),
                 )
             else:
                 self.main_app.notify(
-                    f"Модель «{label}» удалена",
-                    "Нет загруженных моделей — выберите модель для скачивания.",
+                    i18n.t("notify.model_deleted_title", label=label),
+                    i18n.t("notify.model_deleted_no_models_body"),
                 )
         else:
             self.main_app.notify(
-                f"Модель «{label}» удалена",
-                f"Освобождено ~{WHISPER_MODEL_SIZES.get(model_id, '?')}.",
+                i18n.t("notify.model_deleted_title", label=label),
+                i18n.t("notify.model_deleted_freed_body", size=WHISPER_MODEL_SIZES.get(model_id, "?")),
             )
 
     def _apply_primary_language(self, lang: str) -> None:
@@ -1834,11 +1851,11 @@ class ClickNSpeakApp(rumps.App):
         phrases = candidates[-count:] if has_more else candidates
 
         # Hint header (non-clickable, shown grayed out by macOS)
-        parent.add(rumps.MenuItem("Нажмите на фразу, чтобы скопировать", callback=None))
+        parent.add(rumps.MenuItem(i18n.t("menu.history_hint"), callback=None))
         parent.add(None)
 
         if not phrases:
-            parent.add(rumps.MenuItem("Нет сохранённых фраз", callback=None))
+            parent.add(rumps.MenuItem(i18n.t("menu.history_empty"), callback=None))
             return
 
         max_title_len = 56
@@ -1857,7 +1874,7 @@ class ClickNSpeakApp(rumps.App):
 
         if has_more:
             parent.add(None)
-            parent.add(rumps.MenuItem("↓  Показать ещё", callback=self._show_more_phrases))
+            parent.add(rumps.MenuItem(i18n.t("menu.show_more"), callback=self._show_more_phrases))
 
     def _show_more_phrases(self, _) -> None:
         """Load the next 5 phrases and rebuild the submenu."""
@@ -1890,7 +1907,7 @@ class ClickNSpeakApp(rumps.App):
         """Reloads config from disk and refreshes the menu."""
         self.main_app.load_config(str(get_config_path()))
         self.config = self.main_app.config  # sync reference in case load replaced the dict
-        self.main_app.notify("Конфигурация", "Настройки успешно перезагружены.")
+        self.main_app.notify(i18n.t("notify.config_title"), i18n.t("notify.config_reloaded"))
         self._lang_menu_controller = None  # will be rebuilt in setup_menu()
         self.menu.clear()
         self.setup_menu()
@@ -1973,7 +1990,7 @@ class ClickNSpeakApp(rumps.App):
             NSBackingStoreBuffered,
             False,
         )
-        panel.setTitle_(f"Whisper prompt terms — {lang.upper()}")
+        panel.setTitle_(i18n.t("dialog.whisper_terms_title", lang=lang.upper()))
 
         delegate = _PromptTermsPanelDelegate.alloc().init().configure(self, lang)
         panel.setDelegate_(delegate)
@@ -1983,11 +2000,7 @@ class ClickNSpeakApp(rumps.App):
         cw = bounds.size.width
         ch = bounds.size.height
 
-        hint = NSTextField.wrappingLabelWithString_(
-            "Terms merged into the Whisper initial prompt for this language. "
-            "Separate with commas or new lines. "
-            "Inactive terms stay listed here but are omitted from Whisper until used again."
-        )
+        hint = NSTextField.wrappingLabelWithString_(i18n.t("dialog.whisper_terms_hint"))
         hint.setFrame_(NSMakeRect(12.0, ch - 12.0 - 52.0, cw - 24.0, 52.0))
         hint.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
         content.addSubview_(hint)
@@ -2031,7 +2044,7 @@ class ClickNSpeakApp(rumps.App):
         cancel_btn = NSButton.alloc().initWithFrame_(
             NSMakeRect(cw - 12.0 - btn_w, btn_y, btn_w, btn_h)
         )
-        cancel_btn.setTitle_("Cancel")
+        cancel_btn.setTitle_(i18n.t("btn.cancel"))
         cancel_btn.setTarget_(delegate)
         cancel_btn.setAction_("cancelClicked:")
         cancel_btn.setAutoresizingMask_(NSViewMinYMargin | NSViewMaxXMargin)
@@ -2040,7 +2053,7 @@ class ClickNSpeakApp(rumps.App):
         save_btn = NSButton.alloc().initWithFrame_(
             NSMakeRect(cw - 12.0 - btn_w - 8.0 - btn_w, btn_y, btn_w, btn_h)
         )
-        save_btn.setTitle_("Save")
+        save_btn.setTitle_(i18n.t("btn.save"))
         save_btn.setKeyEquivalent_("\r")
         save_btn.setTarget_(delegate)
         save_btn.setAction_("saveClicked:")
@@ -2051,7 +2064,7 @@ class ClickNSpeakApp(rumps.App):
         delete_btn = NSButton.alloc().initWithFrame_(
             NSMakeRect(12.0, btn_y, del_btn_w, btn_h)
         )
-        delete_btn.setTitle_("Delete Inactive")
+        delete_btn.setTitle_(i18n.t("btn.delete_inactive"))
         delete_btn.setTarget_(delegate)
         delete_btn.setAction_("deleteInactiveClicked:")
         delete_btn.setAutoresizingMask_(NSViewMinYMargin | NSViewMaxXMargin)
@@ -2091,7 +2104,7 @@ class ClickNSpeakApp(rumps.App):
             self.save_config()
             self.main_app.load_config_data(self.config)
             log_info(f"Initial prompt terms updated from in-app editor for {lang.upper()}.")
-            self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} обновлена.")
+            self.main_app.notify(i18n.t("notify.prompt_updated_title"), i18n.t("notify.prompt_updated_body", lang=lang.upper()))
         self._sync_prompt_file(lang)
         prompt_path = self._get_prompt_path(lang)
         try:
@@ -2167,7 +2180,7 @@ class ClickNSpeakApp(rumps.App):
         prev_terms = snapshots.get(lang)
 
         if not prev_terms:
-            self.main_app.notify("Настройки", f"Нет предыдущей версии подсказки для {lang.upper()}.")
+            self.main_app.notify(i18n.t("notify.settings_title"), i18n.t("notify.prompt_no_prev", lang=lang.upper()))
             return
 
         user_terms = dict(self.config.get("user_terms") or {})
@@ -2201,7 +2214,7 @@ class ClickNSpeakApp(rumps.App):
 
         self.save_config()
         self.main_app.load_config_data(self.config)
-        self.main_app.notify("Настройки", f"Подсказка для {lang.upper()} восстановлена.")
+        self.main_app.notify(i18n.t("notify.settings_title"), i18n.t("notify.prompt_restored", lang=lang.upper()))
 
     def _on_manage_terms(self, _) -> None:
         """Open TermsPanel — table view of all user_terms with delete support."""
@@ -2227,7 +2240,7 @@ class ClickNSpeakApp(rumps.App):
                     self.main_app.load_config_data(self.config)
                     for lang_sync in get_allowed_languages(self.config):
                         self._sync_prompt_file(lang_sync)
-                    self.main_app.notify("Словарь", f"{n_removed} терминов удалено.")
+                    self.main_app.notify(i18n.t("notify.dict_title"), i18n.t("notify.terms_deleted", n=n_removed, term_word=i18n.plural("terms.term_word", n_removed)))
 
             if self._terms_panel is None:
                 self._terms_panel = TermsPanel()
@@ -2278,7 +2291,7 @@ class ClickNSpeakApp(rumps.App):
                 self.config["manual_replacements"] = manual_out
                 self.save_config()
                 self.main_app.load_config_data(self.config)
-                self.main_app.notify("Настройки", "Пары автозамены сохранены.")
+                self.main_app.notify(i18n.t("notify.settings_title"), i18n.t("notify.replacements_saved"))
 
             self._replacements_panel = ReplacementsPanel()
             self._replacements_panel.show(rows, commit)
@@ -2295,7 +2308,7 @@ class ClickNSpeakApp(rumps.App):
             if app is not None and hasattr(app, "get_metrics_snapshot"):
                 snapshot = app.get_metrics_snapshot(force=True)
             if not snapshot:
-                self.main_app.notify("Statistics", "Недостаточно данных для метрик.")
+                self.main_app.notify(i18n.t("stats.title"), i18n.t("notify.stats_no_data"))
                 return
 
             def _fmt_pct(value: float | None) -> str:
@@ -2327,53 +2340,53 @@ class ClickNSpeakApp(rumps.App):
             dead = dead_weight_terms(self.config, days=30)
 
             lines = [
-                f"Recent dictionary performance (last {snapshot.get('window_size', 100)} phrases)",
+                i18n.t("stats.performance_header", n=snapshot.get("window_size", 100)),
                 "",
-                f"Edit corrections per phrase    {_fmt_pct(edit)}   {_fmt_delta(edit_delta, positive_good=False)}",
-                f"Dictionary hit rate            {_fmt_pct(hit)}   {_fmt_delta(hit_delta, positive_good=True)}",
+                f"{i18n.t('stats.edit_label'):<35} {_fmt_pct(edit)}   {_fmt_delta(edit_delta, positive_good=False)}",
+                f"{i18n.t('stats.hit_rate_label'):<35} {_fmt_pct(hit)}   {_fmt_delta(hit_delta, positive_good=True)}",
                 (
-                    "Active terms                   "
+                    f"{i18n.t('stats.active_terms_label'):<35}"
                     f"{snapshot.get('active_terms_count', 0)} "
                     f"({snapshot.get('manual_terms_count', 0)} manual / "
                     f"{snapshot.get('auto_terms_count', 0)} auto / "
                     f"{snapshot.get('correction_terms_count', 0)} correction)"
                 ),
                 (
-                    "Acceptance rate                "
+                    f"{i18n.t('stats.acceptance_rate_label'):<35}"
                     f"{_fmt_pct(snapshot.get('acceptance_rate'))} "
                     f"(accepted={snapshot.get('accepted_total', 0)}, rejected={snapshot.get('rejected_total', 0)})"
                 ),
                 (
-                    "Prompt utilisation             "
+                    f"{i18n.t('stats.prompt_util_label'):<35}"
                     f"{_fmt_pct(snapshot.get('prompt_utilisation'))} "
                     f"({snapshot.get('prompt_tokens_used', 0)} of {snapshot.get('prompt_tokens_max', 0)} tokens)"
                 ),
                 "",
-                f"Inactive terms ready to clean: {snapshot.get('inactive_terms_count', 0)}",
+                i18n.t("stats.inactive_clean", n=snapshot.get("inactive_terms_count", 0)),
             ]
 
             # Top helpers section
-            lines += ["", "Whisper узнаёт без правок (топ-5):"]
+            lines += ["", i18n.t("stats.top_helpers_header")]
             if helpers:
                 for h in helpers:
                     pct = f"{h['recognition_rate'] * 100:.0f}%"
                     lines.append(f"  {h['term']:<18} {pct:>5}  ({h['n_raw']}/{h['n_final']})")
             else:
-                lines.append("  — недостаточно данных (нужно больше транскрипций)")
+                lines.append(i18n.t("stats.top_helpers_empty"))
 
             # Dead weight section
             if dead:
-                lines += ["", f"Мёртвый груз (0 появлений за 30+ дней, {len(dead)} шт.):"]
+                lines += ["", i18n.t("stats.dead_weight_header", n=len(dead))]
                 for d in dead[:5]:
                     lines.append(f"  [{d['lang'].upper()}] {d['term']:<16} ({d['age_days']}д)")
                 if len(dead) > 5:
-                    lines.append(f"  … и ещё {len(dead) - 5}")
+                    lines.append(i18n.t("stats.dead_weight_more", n=len(dead) - 5))
 
             # Failed pairs section
             if top_failed:
                 lines += [
                     "",
-                    "Whisper упорно не узнаёт (добавьте в Replacements):",
+                    i18n.t("stats.failed_pairs_header"),
                 ]
                 for fp in top_failed:
                     already = any(
@@ -2385,18 +2398,18 @@ class ClickNSpeakApp(rumps.App):
                     lines.append(f'  "{fp["from"]}" -> "{fp["to"]}" ({fp["count"]}x){mark}')
 
             alert = NSAlert.alloc().init()
-            alert.setMessageText_("Statistics")
+            alert.setMessageText_(i18n.t("stats.title"))
             alert.setInformativeText_("\n".join(lines))
             button_actions: list[str] = []
-            alert.addButtonWithTitle_("OK")
+            alert.addButtonWithTitle_(i18n.t("btn.ok"))
             button_actions.append("ok")
-            alert.addButtonWithTitle_("Open metrics history")
+            alert.addButtonWithTitle_(i18n.t("stats.btn_history"))
             button_actions.append("history")
             if dead:
-                alert.addButtonWithTitle_(f"Удалить мёртвый груз ({len(dead)})")
+                alert.addButtonWithTitle_(i18n.t("stats.btn_delete_dead", n=len(dead)))
                 button_actions.append("delete_dead")
             if top_failed:
-                alert.addButtonWithTitle_("Open Replacements…")
+                alert.addButtonWithTitle_(i18n.t("stats.btn_replacements"))
                 button_actions.append("replacements")
             result = alert.runModal()
             action_idx = result - 1000
@@ -2432,7 +2445,7 @@ class ClickNSpeakApp(rumps.App):
             self.main_app.load_config_data(self.config)
             for lang in get_allowed_languages(self.config):
                 self._sync_prompt_file(lang)
-            self.main_app.notify("Словарь", f"{n_removed} неиспользуемых терминов удалено.")
+            self.main_app.notify(i18n.t("notify.dict_title"), i18n.t("notify.terms_removed_dead", n=n_removed))
 
     def _clear_inactive_terms(self) -> None:
         """Permanently remove all inactive terms from user_terms."""
@@ -2447,7 +2460,7 @@ class ClickNSpeakApp(rumps.App):
         self.save_config()
         self.main_app.load_config_data(self.config)
         if removed > 0:
-            self.main_app.notify("Словарь", f"{removed} неактивных терминов удалено.")
+            self.main_app.notify(i18n.t("notify.dict_title"), i18n.t("notify.terms_removed_inactive", n=removed))
 
     def _update_mode_submenu_state(self) -> None:
         """Sync Auto-update Mode checkmarks with current prompt_update_mode."""
@@ -2461,13 +2474,17 @@ class ClickNSpeakApp(rumps.App):
         self._update_mode_submenu_state()
         self.save_config()
         self.main_app.load_config_data(self.config)
-        labels = {"suggest": "Suggest", "auto": "Auto", "disabled": "Disabled"}
-        self.main_app.notify("Настройки", f"Режим авто-обновления: {labels.get(mode, mode)}")
+        mode_label = {
+            "suggest": i18n.t("menu.mode_suggest"),
+            "auto": i18n.t("menu.mode_auto"),
+            "disabled": i18n.t("menu.mode_disabled"),
+        }.get(mode, mode)
+        self.main_app.notify(i18n.t("notify.settings_title"), i18n.t("notify.update_mode_body", mode=mode_label))
 
     def transcribe_audio_file(self, _: rumps.MenuItem) -> None:
         """Opens a file selection dialog and starts file transcription."""
         if self.main_app.is_recording or self.main_app.is_processing:
-            self.main_app.notify("Занято", "Пожалуйста, дождитесь окончания текущего распознавания.")
+            self.main_app.notify(i18n.t("notify.busy_title"), i18n.t("notify.busy_processing"))
             return
 
         try:
@@ -2484,7 +2501,7 @@ class ClickNSpeakApp(rumps.App):
             pass
         except Exception as e:
             log_error(f"Error selecting audio file: {e}")
-            self.main_app.notify("Ошибка", "Не удалось открыть выбор файла.")
+            self.main_app.notify(i18n.t("notify.record_error_title"), i18n.t("notify.file_open_error"))
 
     # ------------------------------------------------------------------
     # Vocabulary suggestions
@@ -2524,18 +2541,14 @@ class ClickNSpeakApp(rumps.App):
             preview_parts = [f"{i['term']} ({i['count']}×)" for i in all_items[:3]]
             preview = ", ".join(preview_parts)
             if total > 3:
-                preview += f"  и ещё {total - 3}"
+                preview += i18n.t("dialog.suggestions_preview_more", n=total - 3)
 
             alert = NSAlert.alloc().init()
-            alert.setMessageText_("Новые термины для словаря")
-            alert.setInformativeText_(
-                f"Найдено {total} терминов, часто встречающихся в ваших диктовках.\n"
-                f"{preview}\n\n"
-                "Добавление их повысит точность распознавания Whisper."
-            )
-            alert.addButtonWithTitle_("Посмотреть список")
-            alert.addButtonWithTitle_("Напомнить позже")
-            alert.addButtonWithTitle_("Добавлять автоматически")
+            alert.setMessageText_(i18n.t("suggestions.window_title"))
+            alert.setInformativeText_(i18n.t("dialog.suggestions_body_detailed", total=total, preview=preview))
+            alert.addButtonWithTitle_(i18n.t("btn.view"))
+            alert.addButtonWithTitle_(i18n.t("btn.remind_later"))
+            alert.addButtonWithTitle_(i18n.t("btn.auto_mode"))
 
             result = alert.runModal()  # 1000=first, 1001=second, 1002=third
             if result == 1000:
@@ -2567,12 +2580,12 @@ class ClickNSpeakApp(rumps.App):
 
         if phrase_count < 5:
             self.main_app.notify(
-                "Настройки",
-                "История диктовок пока слишком мала. Запишите несколько диктовок и попробуйте снова.",
+                i18n.t("notify.settings_title"),
+                i18n.t("notify.history_too_small"),
             )
             return
 
-        self.main_app.notify("Настройки", "Анализирую историю диктовок…")
+        self.main_app.notify(i18n.t("notify.settings_title"), i18n.t("notify.history_analyzing"))
         self.main_app.request_prompt_analysis(on_complete=self._on_demand_analysis_done)
 
     def _on_demand_analysis_done(self) -> None:
@@ -2584,8 +2597,8 @@ class ClickNSpeakApp(rumps.App):
             self._schedule_open_suggestions_panel()
         else:
             self.main_app.notify(
-                "Настройки",
-                "В истории не найдено терминов, достаточно часто повторяющихся для добавления в словарь.",
+                i18n.t("notify.settings_title"),
+                i18n.t("notify.history_no_new_terms"),
             )
 
     def _schedule_open_suggestions_panel(self) -> None:
@@ -2675,7 +2688,7 @@ class ClickNSpeakApp(rumps.App):
         """Check GitHub for a newer release; notify and open release page if found."""
         if check_for_update(open_url_if_new=True):
             return
-        self.main_app.notify("Обновления", "У вас установлена последняя версия.")
+        self.main_app.notify(i18n.t("notify.updates_title"), i18n.t("notify.latest_version"))
 
     def _toggle_ai_editor(self, sender) -> None:
         """Toggle the AI Editor on/off and persist the setting."""
@@ -2684,9 +2697,9 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.update_config({"ai_editor_enabled": new_state})
         log_info(f"AI Editor {'enabled' if new_state else 'disabled'}.")
         if new_state:
-            self.main_app.notify("AI Editor", "Загрузка модели... Вы получите уведомление о готовности.")
+            self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_downloading"))
         else:
-            self.main_app.notify("AI Editor", "Умная очистка отключена.")
+            self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_disabled"))
 
     def _update_ai_backend_submenu_state(self) -> None:
         """Sync checkmarks on the backend submenu with current config."""
@@ -2698,13 +2711,13 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.update_config({"ai_editor_backend": "local"})
         self._update_ai_backend_submenu_state()
         log_info("AI Editor backend set to: local")
-        self.main_app.notify("AI Editor", "Бэкенд: Local (Qwen). Перезапустите приложение для смены модели.")
+        self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_backend_local"))
 
     def _on_set_ai_backend_gemini(self, _) -> None:
         self.main_app.update_config({"ai_editor_backend": "gemini"})
         self._update_ai_backend_submenu_state()
         log_info("AI Editor backend set to: gemini")
-        self.main_app.notify("AI Editor", "Бэкенд: Gemini API. Перезапустите приложение для смены модели.")
+        self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_backend_gemini"))
 
     # Strict format check: "AIzaSy" + 33 base64url chars = 39 chars total
     _GEMINI_KEY_RE = __import__("re").compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
@@ -2714,12 +2727,12 @@ class ClickNSpeakApp(rumps.App):
         try:
             from AppKit import NSAlert, NSSecureTextField, NSMakeRect, NSApp, NSPasteboard, NSPasteboardTypeString, NSFloatingWindowLevel  # type: ignore
             alert = NSAlert.alloc().init()
-            alert.setMessageText_("Gemini API Key")
+            alert.setMessageText_(i18n.t("dialog.gemini_key_title"))
             existing = get_gemini_api_key()
-            hint = "Уже сохранён (оставьте пустым, чтобы не менять)." if existing else "Введите ключ из console.cloud.google.com."
+            hint = i18n.t("dialog.gemini_key_body_existing") if existing else i18n.t("dialog.gemini_key_body")
             alert.setInformativeText_(hint)
-            alert.addButtonWithTitle_("Сохранить")
-            alert.addButtonWithTitle_("Отмена")
+            alert.addButtonWithTitle_(i18n.t("btn.save"))
+            alert.addButtonWithTitle_(i18n.t("btn.cancel"))
 
             field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
             field.setPlaceholderString_("AIzaSy…")
@@ -2747,10 +2760,10 @@ class ClickNSpeakApp(rumps.App):
                     try:
                         set_gemini_api_key(key)
                         log_info("Gemini API key saved to Keychain.")
-                        self.main_app.notify("AI Editor", "Ключ сохранён в Keychain. Перезапустите приложение.")
+                        self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_key_saved"))
                     except Exception as save_exc:
                         log_error(f"Failed to save Gemini API key to Keychain: {save_exc}")
-                        self.main_app.notify("AI Editor: Ошибка", f"Не удалось сохранить ключ: {save_exc}")
+                        self.main_app.notify(i18n.t("notify.ai_editor_error_title"), i18n.t("notify.ai_key_error", err=str(save_exc)))
         except Exception as exc:
             log_error(f"Set Gemini API key dialog failed: {exc}")
 
@@ -2773,10 +2786,10 @@ class ClickNSpeakApp(rumps.App):
         )
         try:
             subprocess.run(["osascript", "-e", applescript], check=False)
-            self.main_app.notify("AI Editor", "Загрузка начата в Терминале. Перезапустите приложение после завершения.")
+            self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_download_started"))
         except Exception as e:
             log_error(f"Failed to open Terminal for download: {e}")
-            self.main_app.notify("AI Editor", "Запустите вручную: python scripts/download_ai_model.py")
+            self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_download_manual"))
 
     def toggle_autostart(self, sender):
         current_state = sender.state == 1
@@ -2785,12 +2798,12 @@ class ClickNSpeakApp(rumps.App):
             set_launch_at_login(new_state)
             sender.state = 1 if new_state else 0
             if new_state:
-                self.main_app.notify("Автозапуск", "Приложение будет запускаться при входе в систему.")
+                self.main_app.notify(i18n.t("notify.autostart_title"), i18n.t("notify.autostart_enabled"))
             else:
-                self.main_app.notify("Автозапуск", "Автозапуск отключён.")
+                self.main_app.notify(i18n.t("notify.autostart_title"), i18n.t("notify.autostart_disabled"))
         except Exception as e:
             log_error(f"Error toggling autostart: {e}")
-            self.main_app.notify("Ошибка", "Не удалось изменить настройку автозапуска.")
+            self.main_app.notify(i18n.t("notify.record_error_title"), i18n.t("notify.autostart_error"))
 
     def restart_application(self, sender=None):
         log_info("Restart requested — cleaning up before relaunch.")

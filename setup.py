@@ -89,6 +89,7 @@ DATA_FILES = [
     ("", ["assets/CnS.png"]),
     ("icons/menubar", glob.glob("assets/icons/menubar/*.png")),
     ("icons/menu", glob.glob("assets/icons/menu/*.png")),
+    ("locales", glob.glob("locales/*.json")),
 ]
 
 # Build frameworks list dynamically
