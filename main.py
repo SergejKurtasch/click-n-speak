@@ -27,19 +27,24 @@ from src.utils import (
 )
 
 
-def _run_update_check_once() -> None:
-    """Run update check once in background (non-blocking)."""
-    try:
-        check_for_update(open_url_if_new=True)
-    except Exception as e:
-        log_error(f"Update check failed: {e}")
+def _run_update_check_after_model_ready(
+    model_ready_event: threading.Event,
+    logic_app: "SVoiceRecApp",
+) -> None:
+    """Run update check only after Whisper warm-up finishes.
 
-
-def _run_update_check_after_model_ready(model_ready_event: threading.Event) -> None:
-    """Run update check only after Whisper warm-up finishes."""
+    Skipped if a staged update is already waiting for a restart — we already know
+    there is a newer version, no need to hit the network again.
+    """
     try:
         model_ready_event.wait(timeout=600)
-        check_for_update(open_url_if_new=True)
+        menu = logic_app.menu_bar
+        if menu is not None and getattr(menu, "_update_state", "idle") in ("ready", "downloading", "staging"):
+            log_info("Update already staged or in progress — skipping network update check.")
+            return
+        info = check_for_update()
+        if info is not None:
+            logic_app.handle_update_available(info)
     except Exception as e:
         log_error(f"Update check failed: {e}")
 
@@ -159,6 +164,16 @@ def main() -> None:
 
         # Link them
         logic_app.set_menu_bar(menu_app)
+
+        # Check for a staged update before going to the network.
+        # If .app.new is newer than us → show "Restart to apply" banner immediately.
+        from src.app_updater import check_staged_update_on_launch as _check_staged
+        _staged_info = _check_staged()
+        if _staged_info is not None:
+            menu_app.set_update_staged(_staged_info)
+            # Also clear the dedup field in config so the notification fires fresh
+            # if the user skips the restart and later gets another newer version.
+            logic_app.config["last_notified_update_version"] = None
 
         # First-launch language picker + permission wizard.
         # Language picker runs before the wizard on first launch; subsequent launches
@@ -280,7 +295,7 @@ def main() -> None:
         # Check for updates once per session in background (after warm-up).
         threading.Thread(
             target=_run_update_check_after_model_ready,
-            args=(logic_app.model_ready_event,),
+            args=(logic_app.model_ready_event, logic_app),
             daemon=True,
         ).start()
 

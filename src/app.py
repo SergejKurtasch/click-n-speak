@@ -64,6 +64,7 @@ from .utils import (
     migrate_config_to_v4,
     migrate_config_to_v5,
     migrate_config_to_v6,
+    migrate_config_to_v7,
     normalize_ukrainian_lang_codes,
     save_config_to_disk,
     send_notification,
@@ -528,6 +529,7 @@ class SVoiceRecApp:
         data = migrate_config_to_v4(data)
         data = migrate_config_to_v5(data)
         data = migrate_config_to_v6(data)
+        data = migrate_config_to_v7(data)
         data = normalize_ukrainian_lang_codes(data)
         self.config = data
         self.config.setdefault("last_metrics_snapshot_ts", None)
@@ -637,6 +639,38 @@ class SVoiceRecApp:
             if text:
                 self._preview_panel.update_text(text, self._main_thread_queue)
             self._preview_panel.hide(self._main_thread_queue, delay=delay)
+
+    def handle_update_available(self, info: "UpdateInfo") -> None:  # type: ignore[name-defined]
+        """Called from the background update-check thread when a new version is found.
+
+        Sends a macOS notification once per release (deduplicated via config field),
+        then hands the UpdateInfo to the menu bar to show the update banner.
+        Must be safe to call from any thread.
+        """
+        from .updater import _parse_version, get_current_version
+
+        def _on_main_thread():
+            # Reset dedup field if we already caught up to the previously notified version.
+            last_notified = self.config.get("last_notified_update_version")
+            current = get_current_version() or ""
+            if last_notified and _parse_version(last_notified) <= _parse_version(current):
+                self.config["last_notified_update_version"] = None
+                last_notified = None
+
+            # Send one notification per release tag.
+            if info.tag_name != last_notified:
+                send_notification(
+                    i18n.t("notify.update_available_title"),
+                    i18n.t("notify.update_available_body", version=info.version_display),
+                    "",
+                )
+                self.config["last_notified_update_version"] = info.tag_name
+                save_config_to_disk(self.config, self.config_path)
+
+            if self.menu_bar is not None:
+                self.menu_bar.set_update_available(info)
+
+        self._submit_for_main_thread(_on_main_thread)
 
     def _do_finish_cleanup(self) -> None:
         """Run on main thread after worker has finished: clear status, save phrase, notify."""

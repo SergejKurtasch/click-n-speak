@@ -241,6 +241,11 @@
   "menu.last_phrases": "Last Phrases",
   "menu.transcribe_file": "Transcribe Audio File...",
   "menu.check_updates": "Check for Updates",
+  "menu.update_available": "⬆ Update to {version}",
+  "menu.update_downloading": "⬆ Downloading {pct}%",
+  "menu.update_ready": "⬆ Restart to Apply Update",
+  "menu.update_installing": "⬆ Installing…",
+  "menu.update_error": "⚠ Update Failed — Click to Retry",
   "menu.launch_at_login": "Launch at Login",
   "menu.advanced": "Advanced",
   "menu.edit_config": "Edit Config File",
@@ -281,5 +286,7 @@
   "dialog.suggestions_body_detailed": "Found {total} terms frequently appearing in your dictations.\n{preview}\n\nAdding them will improve Whisper recognition.",
   "dialog.suggestions_preview_more": "  and {n} more",
   "notify.already_running_title": "Click-n-speak is already running",
-  "notify.already_running_body": "The app has been brought to the menu bar."
+  "notify.already_running_body": "The app has been brought to the menu bar.",
+  "notify.update_available_title": "Update Available",
+  "notify.update_available_body": "{version} is ready to download. Open the menu to install."
 }
