@@ -243,6 +243,11 @@
   "menu.last_phrases": "Останні фрази",
   "menu.transcribe_file": "Розпізнати аудіофайл...",
   "menu.check_updates": "Перевірити оновлення",
+  "menu.update_available": "⬆ Оновити до {version}",
+  "menu.update_downloading": "⬆ Завантаження {pct}%",
+  "menu.update_ready": "⬆ Перезапустити для встановлення",
+  "menu.update_installing": "⬆ Встановлення…",
+  "menu.update_error": "⚠ Помилка оновлення — натисніть для повтору",
   "menu.launch_at_login": "Запускати при вході",
   "menu.advanced": "Додатково",
   "menu.edit_config": "Редагувати конфіг",
@@ -283,5 +288,7 @@
   "dialog.suggestions_body_detailed": "Знайдено {total} термінів, що часто зустрічаються у ваших диктовках.\n{preview}\n\nДодавання їх покращить розпізнавання Whisper.",
   "dialog.suggestions_preview_more": "  і ще {n}",
   "notify.already_running_title": "Click-n-speak вже запущено",
-  "notify.already_running_body": "Застосунок активовано в рядку меню."
+  "notify.already_running_body": "Застосунок активовано в рядку меню.",
+  "notify.update_available_title": "Доступне оновлення",
+  "notify.update_available_body": "{version} готове до завантаження. Відкрийте меню для встановлення."
 }

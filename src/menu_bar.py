@@ -639,6 +639,16 @@ class ClickNSpeakApp(rumps.App):
         self._phrases_page_count: int = 5  # used only in the rumps fallback path
         self._mode_items: dict = {}
 
+        # In-app update state machine
+        # States: "idle" | "available" | "downloading" | "staging" | "ready" | "installing" | "error"
+        self._update_state: str = "idle"
+        self._update_info: "UpdateInfo | None" = None  # type: ignore[name-defined]
+        self._update_progress_pct: int = 0
+        self._update_downloader: "AppUpdater | None" = None  # type: ignore[name-defined]
+        self._update_item: "rumps.MenuItem | None" = None  # set in setup_menu
+        self._update_last_error: str = ""
+        self._update_last_progress_refresh: float = 0.0
+
         try:
             from .suggestions_panel import SuggestionsPanel
             self._suggestions_panel: "SuggestionsPanel | None" = SuggestionsPanel()
@@ -1033,6 +1043,10 @@ class ClickNSpeakApp(rumps.App):
         def _icon(name: str) -> dict:
             p = get_menu_item_icon_path(name)
             return {"icon": str(p), "dimensions": [16, 16], "template": True} if p else {}
+
+        # Update banner — hidden by default, inserted at top when update is available
+        self._update_item = rumps.MenuItem("", callback=self._on_update_item_clicked)
+        # (not added to menu yet — shown only when state != idle)
 
         # Permissions parent item with submenu
         self._permissions_item = rumps.MenuItem(i18n.t("menu.permissions"))
@@ -2685,10 +2699,218 @@ class ClickNSpeakApp(rumps.App):
         save_config_to_disk(self.config)
 
     def check_for_updates(self, _: rumps.MenuItem) -> None:
-        """Check GitHub for a newer release; notify and open release page if found."""
-        if check_for_update(open_url_if_new=True):
+        """Manual update check — runs in background, shows banner or 'up to date' HUD."""
+        def _run():
+            from .updater import check_for_update as _check
+            info = _check()
+            if info is not None:
+                self.main_app.handle_update_available(info)
+            else:
+                def _notify_latest():
+                    self.main_app.notify(i18n.t("notify.updates_title"), i18n.t("notify.latest_version"))
+                self.main_app._submit_for_main_thread(_notify_latest)
+        import threading as _threading
+        _threading.Thread(target=_run, daemon=True, name="manual-update-check").start()
+
+    # ------------------------------------------------------------------
+    # In-app update state machine
+    # ------------------------------------------------------------------
+
+    def set_update_available(self, info: "UpdateInfo") -> None:  # type: ignore[name-defined]
+        """Called from main thread when update check finds a new version."""
+        if self._update_state in ("downloading", "staging", "ready", "installing"):
+            return  # already in progress
+        self._update_info = info
+        self._update_state = "available"
+        self._refresh_update_item()
+
+    def set_update_staged(self, info: "UpdateInfo") -> None:  # type: ignore[name-defined]
+        """Called at launch when a staged .app.new is found — skip download, go straight to ready."""
+        self._update_info = info
+        self._update_state = "ready"
+        self._refresh_update_item()
+
+    def _refresh_update_item(self) -> None:
+        """Update the title and enabled state of _update_item; insert/remove from menu."""
+        state = self._update_state
+        info = self._update_info
+
+        if state == "idle":
+            self._remove_update_item_from_menu()
             return
-        self.main_app.notify(i18n.t("notify.updates_title"), i18n.t("notify.latest_version"))
+
+        if state == "available" and info:
+            title = i18n.t("menu.update_available", version=info.version_display)
+            enabled = True
+        elif state == "downloading":
+            title = i18n.t("menu.update_downloading", pct=self._update_progress_pct)
+            enabled = False
+        elif state == "staging":
+            title = i18n.t("menu.update_installing")
+            enabled = False
+        elif state == "ready":
+            title = i18n.t("menu.update_ready")
+            enabled = True
+        elif state == "installing":
+            title = i18n.t("menu.update_installing")
+            enabled = False
+        elif state == "error":
+            title = i18n.t("menu.update_error")
+            enabled = True
+        else:
+            return
+
+        if self._update_item is not None:
+            self._update_item.title = title
+            self._update_item.set_callback(self._on_update_item_clicked if enabled else None)
+
+        self._ensure_update_item_in_menu()
+
+    def _ensure_update_item_in_menu(self) -> None:
+        """Insert update banner + separator at position 0 if not already there."""
+        if self._update_item is None:
+            return
+        try:
+            # The item is inserted directly into the underlying NSMenu, not into
+            # rumps' self.menu dict — so check presence by NSMenu index, not by
+            # title. (The title changes on every state transition; a title-based
+            # guard would always miss and re-insert, stacking duplicate items.)
+            ns_menu = self.menu._menu  # type: ignore[attr-defined]
+            ns_item = self._update_item._menuitem  # type: ignore[attr-defined]
+            if ns_menu is None or ns_menu.indexOfItem_(ns_item) < 0:
+                # Insert at position 0: add to a fresh top-position.
+                # rumps doesn't support positional insert directly, so we rebuild
+                # the first two items via NSMenu if available.
+                self._insert_update_item_at_top()
+        except Exception as e:
+            log_error(f"Could not insert update item: {e}")
+
+    def _insert_update_item_at_top(self) -> None:
+        """Low-level NSMenu insertion at index 0."""
+        try:
+            from AppKit import NSMenuItem as _NSMenuItem  # type: ignore
+            ns_menu = self._nsapp.mainMenu() if hasattr(self, "_nsapp") else None
+            # Fallback: use rumps internal menu's NSMenu
+            ns_menu = self.menu._menu  # type: ignore[attr-defined]
+            if ns_menu is None:
+                return
+            ns_sep = _NSMenuItem.separatorItem()
+            ns_menu.insertItem_atIndex_(ns_sep, 0)
+            ns_menu.insertItem_atIndex_(self._update_item._menuitem, 0)  # type: ignore[attr-defined]
+        except Exception as e:
+            log_error(f"NSMenu insert failed, falling back: {e}")
+            # Graceful degradation: add at bottom of menu (still visible)
+            try:
+                self.menu.add(self._update_item)
+            except Exception:
+                pass
+
+    def _remove_update_item_from_menu(self) -> None:
+        """Remove the update banner from NSMenu."""
+        if self._update_item is None:
+            return
+        try:
+            ns_menu = self.menu._menu  # type: ignore[attr-defined]
+            if ns_menu is None:
+                return
+            ns_item = self._update_item._menuitem  # type: ignore[attr-defined]
+            idx = ns_menu.indexOfItem_(ns_item)
+            if idx >= 0:
+                ns_menu.removeItemAtIndex_(idx)
+                # Also remove the separator that follows (index unchanged after removal).
+                if idx < ns_menu.numberOfItems():
+                    candidate = ns_menu.itemAtIndex_(idx)
+                    if candidate and candidate.isSeparatorItem():
+                        ns_menu.removeItemAtIndex_(idx)
+        except Exception as e:
+            log_error(f"Could not remove update item: {e}")
+
+    def _on_update_item_clicked(self, _) -> None:
+        """Dispatch based on current update state."""
+        state = self._update_state
+        info = self._update_info
+
+        if state == "available":
+            from .utils import _get_app_bundle
+            if info and info.dmg_url and _get_app_bundle():
+                self._start_update_download()
+            elif info:
+                import subprocess as _sp
+                try:
+                    _sp.run(["open", info.html_url], check=True)
+                except (OSError, _sp.CalledProcessError) as e:
+                    log_error(f"Could not open release URL: {e}")
+        elif state == "ready":
+            self._install_update_now()
+        elif state == "error":
+            self._update_state = "available"
+            self._refresh_update_item()
+
+    def _start_update_download(self) -> None:
+        """Begin background download + staging."""
+        from .app_updater import AppUpdater
+        info = self._update_info
+        if info is None:
+            return
+
+        self._update_state = "downloading"
+        self._update_progress_pct = 0
+        self._refresh_update_item()
+
+        downloader = AppUpdater()
+        self._update_downloader = downloader
+
+        q = self.main_app._main_thread_queue
+
+        def _on_progress(done: int, total: int) -> None:
+            if total > 0:
+                pct = int(done * 100 / total)
+            else:
+                pct = 0
+            import time as _t
+            now = _t.monotonic()
+            if now - self._update_last_progress_refresh < 0.5:
+                return
+            self._update_last_progress_refresh = now
+            self._update_progress_pct = pct
+            self._update_state = "downloading"
+            self._refresh_update_item()
+
+        def _on_staged() -> None:
+            self._update_state = "ready"
+            self._update_downloader = None
+            self._refresh_update_item()
+            log_info("Update staged — ready to restart.")
+
+        def _on_error(msg: str) -> None:
+            log_error(f"Update download/staging failed: {msg}")
+            self._update_state = "error"
+            self._update_last_error = msg
+            self._update_downloader = None
+            self._refresh_update_item()
+
+        def _on_cancelled() -> None:
+            self._update_state = "available"
+            self._update_downloader = None
+            self._refresh_update_item()
+
+        downloader.start_download_and_stage(
+            info, q,
+            on_progress=_on_progress,
+            on_staged=_on_staged,
+            on_error=_on_error,
+            on_cancelled=_on_cancelled,
+        )
+
+    def _install_update_now(self) -> None:
+        """Launch the swap helper script and quit the app."""
+        from .app_updater import swap_and_launch
+        self._update_state = "installing"
+        self._refresh_update_item()
+        log_info("Installing update — launching helper and quitting.")
+        swap_and_launch()
+        # Quit via normal path so cleanup runs.
+        self.quit_application(None)
 
     def _toggle_ai_editor(self, sender) -> None:
         """Toggle the AI Editor on/off and persist the setting."""

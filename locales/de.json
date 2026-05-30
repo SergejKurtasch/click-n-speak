@@ -241,6 +241,11 @@
   "menu.last_phrases": "Letzte Phrasen",
   "menu.transcribe_file": "Audiodatei transkribieren...",
   "menu.check_updates": "Nach Updates suchen",
+  "menu.update_available": "⬆ Update auf {version}",
+  "menu.update_downloading": "⬆ Herunterladen {pct}%",
+  "menu.update_ready": "⬆ Neu starten zum Installieren",
+  "menu.update_installing": "⬆ Wird installiert…",
+  "menu.update_error": "⚠ Update fehlgeschlagen — zum Wiederholen klicken",
   "menu.launch_at_login": "Bei Anmeldung starten",
   "menu.advanced": "Erweitert",
   "menu.edit_config": "Konfigurationsdatei bearbeiten",
@@ -281,5 +286,7 @@
   "dialog.suggestions_body_detailed": "{total} Begriffe gefunden, die häufig in deinen Diktaten vorkommen.\n{preview}\n\nDas Hinzufügen verbessert die Whisper-Erkennung.",
   "dialog.suggestions_preview_more": "  und {n} weitere",
   "notify.already_running_title": "Click-n-speak läuft bereits",
-  "notify.already_running_body": "Die App wurde in der Menüleiste aktiviert."
+  "notify.already_running_body": "Die App wurde in der Menüleiste aktiviert.",
+  "notify.update_available_title": "Update verfügbar",
+  "notify.update_available_body": "{version} steht zum Download bereit. Menü öffnen zum Installieren."
 }

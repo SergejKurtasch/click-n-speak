@@ -1034,6 +1034,20 @@ def migrate_config_to_v6(config: dict) -> dict:
     return config
 
 
+def migrate_config_to_v7(config: dict) -> dict:
+    """Add last_notified_update_version for update notification deduplication.
+
+    Idempotent when schema_version >= 7.
+    """
+    if config.get("schema_version", 1) >= 7:
+        config.setdefault("last_notified_update_version", None)
+        return config
+
+    config.setdefault("last_notified_update_version", None)
+    config["schema_version"] = 7
+    return config
+
+
 def normalize_ukrainian_lang_codes(config: dict) -> dict:
     """Normalize legacy 'ua' codes to canonical internal 'uk'.
 
