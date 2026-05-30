@@ -18,21 +18,17 @@
   "hud.ready_body": "Transcription complete. You can dictate again.",
   "hud.started_title": "Started",
   "hud.started_body": "Press the hotkey to start recording or use the menu bar icon.",
-
   "menu.recording_status": "● RECORDING",
   "menu.processing_status": "● RECOGNIZING",
   "menu.history_hint": "Click a phrase to copy it",
   "menu.history_empty": "No saved phrases",
   "menu.show_more": "↓  Show more",
-
   "popup.edit_confirm_title": "Edit and press Enter",
   "popup.title_with_hotkey": "Edit · Enter to confirm · ⌘D to add term",
   "popup.copied": "Copied",
-
   "toast.added": "Added: {term}",
   "toast.invalid_term": "Not a valid term",
   "toast.exists": "Already in dictionary",
-
   "notify.ai_not_found_title": "AI Editor: Model not found",
   "notify.ai_not_found_body": "Run the download script and restart the app.",
   "notify.ai_ready_title": "AI Editor Ready",
@@ -42,6 +38,8 @@
   "notify.ai_load_error_body": "Could not load the model. Check the logs.",
   "notify.ai_connect_error_title": "AI Editor: Error",
   "notify.ai_connect_error_body": "Could not connect to Gemini API. Check GOOGLE_API_KEY.",
+  "notify.audio_hang_title": "macOS Audio System Error",
+  "notify.audio_hang_body": "Microphone hung — restarting Click-n-speak.",
   "notify.decay_body": "{n} outdated {term_word} deactivated. Open «Manage Terms» to review.",
   "notify.record_error_title": "Error",
   "notify.record_error_body": "Could not start recording. Check the logs.",
@@ -82,7 +80,6 @@
   "notify.perm_hotkeys_disabled_body": "Add Click-n-speak to Privacy & Security → Input Monitoring to enable hotkeys.",
   "notify.language_changed_title": "Language changed",
   "notify.language_changed_body": "Restart required to apply the new language.",
-
   "dialog.restart_title": "Restart Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak needs to restart. Restart now?",
   "dialog.restart_reason_language": "Interface language changed.",
@@ -104,7 +101,6 @@
   "dialog.gemini_key_title": "Gemini API Key",
   "dialog.gemini_key_body": "Enter your Google Gemini API key:",
   "dialog.gemini_key_body_existing": "A key is already set. Enter a new one to replace it, or leave blank to keep the current key.",
-
   "btn.ok": "OK",
   "btn.cancel": "Cancel",
   "btn.save": "Save",
@@ -126,7 +122,6 @@
   "btn.auto_mode": "Auto mode",
   "btn.add_selected": "Add selected",
   "btn.delete_inactive": "Delete Inactive",
-
   "suggestions.window_title": "New terms for dictionary",
   "suggestions.description": "Select terms to add to Whisper's vocabulary...",
   "suggestions.help_text": "Added words help Whisper recognise them in future recordings.",
@@ -135,7 +130,6 @@
   "suggestions.select_section": "select",
   "suggestions.deselect_section": "deselect",
   "suggestions.show_more": "Show {count} more",
-
   "terms.window_title": "Manage Terms",
   "terms.col_term": "Term",
   "terms.col_lang": "Language",
@@ -158,11 +152,16 @@
   "terms.btn_delete_n": "Delete selected ({n})",
   "terms.dialog_delete_title": "Delete {n} {term_word}?",
   "terms.dialog_delete_body": "Deleted terms will no longer help Whisper.",
-  "terms.term_word": ["term", "terms"],
-
+  "terms.term_word": [
+    "term",
+    "terms"
+  ],
   "wizard.welcome_title": "Welcome to Click-n-speak",
   "wizard.welcome_body": "The app needs {total_steps} {perm_word} to work:\n\n{perm_list}\n\nEach step opens System Settings. Follow the on-screen instructions — this takes about a minute.",
-  "wizard.perm_word": ["permission", "permissions"],
+  "wizard.perm_word": [
+    "permission",
+    "permissions"
+  ],
   "wizard.step_label": "Step {step} of {total}",
   "wizard.perm_mic_title": "🎙  Microphone Access  ({label})",
   "wizard.perm_mic_denied_body": "Microphone access was previously denied.\n\nSystem Settings will open. Find Click-n-speak under Microphone and toggle it ON.",
@@ -191,7 +190,6 @@
   "wizard.missing_mic": "Microphone",
   "wizard.missing_access": "Accessibility",
   "wizard.missing_input": "Input Monitoring",
-
   "stats.title": "Statistics",
   "stats.no_data": "Not enough data for metrics.",
   "stats.performance_header": "Recent dictionary performance (last {n} phrases)",
@@ -212,7 +210,6 @@
   "stats.btn_history": "Open metrics history",
   "stats.btn_delete_dead": "Remove dead weight ({n})",
   "stats.btn_replacements": "Open Replacements…",
-
   "menu.permissions": "Permissions",
   "menu.mic_granted": "Microphone — Granted",
   "menu.mic_required": "Microphone — Required",
@@ -250,7 +247,6 @@
   "menu.open_log": "Open Log File",
   "menu.reload_config": "Reload Configuration",
   "menu.restart": "Restart",
-
   "notify.perm_title": "Access",
   "notify.settings_title": "Settings",
   "notify.dict_title": "Dictionary",
@@ -280,9 +276,10 @@
   "notify.history_no_new_terms": "No new terms found with enough frequency in the history.",
   "notify.terms_removed_dead": "{n} unused terms deleted.",
   "notify.terms_removed_inactive": "{n} inactive terms deleted.",
-
   "dialog.whisper_terms_title": "Whisper prompt terms — {lang}",
   "dialog.whisper_terms_hint": "Terms merged into the Whisper initial prompt for this language. Separate with commas or new lines. Inactive terms stay listed here but are omitted from Whisper until used again.",
   "dialog.suggestions_body_detailed": "Found {total} terms frequently appearing in your dictations.\n{preview}\n\nAdding them will improve Whisper recognition.",
-  "dialog.suggestions_preview_more": "  and {n} more"
+  "dialog.suggestions_preview_more": "  and {n} more",
+  "notify.already_running_title": "Click-n-speak is already running",
+  "notify.already_running_body": "The app has been brought to the menu bar."
 }

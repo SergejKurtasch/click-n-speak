@@ -18,21 +18,17 @@
   "hud.ready_body": "Transcripción completada. Puedes dictar de nuevo.",
   "hud.started_title": "Iniciado",
   "hud.started_body": "Pulsa el atajo para empezar a grabar o usa el icono de la barra de menú.",
-
   "menu.recording_status": "● GRABANDO",
   "menu.processing_status": "● RECONOCIENDO",
   "menu.history_hint": "Haz clic en una frase para copiarla",
   "menu.history_empty": "No hay frases guardadas",
   "menu.show_more": "↓  Mostrar más",
-
   "popup.edit_confirm_title": "Edita y pulsa Enter",
   "popup.title_with_hotkey": "Editar · Enter para confirmar · ⌘D para añadir término",
   "popup.copied": "Copiado",
-
   "toast.added": "Añadido: {term}",
   "toast.invalid_term": "Término no válido",
   "toast.exists": "Ya está en el diccionario",
-
   "notify.ai_not_found_title": "AI Editor: Modelo no encontrado",
   "notify.ai_not_found_body": "Ejecuta el script de descarga y reinicia la app.",
   "notify.ai_ready_title": "AI Editor listo",
@@ -42,6 +38,8 @@
   "notify.ai_load_error_body": "No se pudo cargar el modelo. Revisa los registros.",
   "notify.ai_connect_error_title": "AI Editor: Error",
   "notify.ai_connect_error_body": "No se pudo conectar a la API de Gemini. Comprueba GOOGLE_API_KEY.",
+  "notify.audio_hang_title": "Error del sistema de audio de macOS",
+  "notify.audio_hang_body": "El micrófono se bloqueó — reiniciando Click-n-speak.",
   "notify.decay_body": "{n} {term_word} obsoleto(s) desactivado(s). Abre «Gestionar términos» para revisar.",
   "notify.record_error_title": "Error",
   "notify.record_error_body": "No se pudo iniciar la grabación. Revisa los registros.",
@@ -82,7 +80,6 @@
   "notify.perm_hotkeys_disabled_body": "Añade Click-n-speak a Privacidad y seguridad → Input Monitoring para activar los atajos.",
   "notify.language_changed_title": "Idioma cambiado",
   "notify.language_changed_body": "Se requiere reinicio para aplicar el nuevo idioma.",
-
   "dialog.restart_title": "Reiniciar Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak necesita reiniciarse. ¿Reiniciar ahora?",
   "dialog.restart_reason_language": "Idioma de la interfaz cambiado.",
@@ -104,7 +101,6 @@
   "dialog.gemini_key_title": "Clave API de Gemini",
   "dialog.gemini_key_body": "Introduce tu clave API de Google Gemini:",
   "dialog.gemini_key_body_existing": "Ya hay una clave establecida. Introduce una nueva para reemplazarla o deja el campo vacío.",
-
   "btn.ok": "OK",
   "btn.cancel": "Cancelar",
   "btn.save": "Guardar",
@@ -126,7 +122,6 @@
   "btn.auto_mode": "Modo automático",
   "btn.add_selected": "Añadir seleccionados",
   "btn.delete_inactive": "Eliminar inactivos",
-
   "suggestions.window_title": "Nuevos términos para el diccionario",
   "suggestions.description": "Selecciona términos para añadir al vocabulario de Whisper...",
   "suggestions.help_text": "Las palabras añadidas ayudan a Whisper a reconocerlas en futuras grabaciones.",
@@ -135,7 +130,6 @@
   "suggestions.select_section": "seleccionar",
   "suggestions.deselect_section": "deseleccionar",
   "suggestions.show_more": "Mostrar {count} más",
-
   "terms.window_title": "Gestionar términos",
   "terms.col_term": "Término",
   "terms.col_lang": "Idioma",
@@ -158,11 +152,16 @@
   "terms.btn_delete_n": "Eliminar seleccionados ({n})",
   "terms.dialog_delete_title": "¿Eliminar {n} {term_word}?",
   "terms.dialog_delete_body": "Los términos eliminados ya no ayudarán a Whisper.",
-  "terms.term_word": ["término", "términos"],
-
+  "terms.term_word": [
+    "término",
+    "términos"
+  ],
   "wizard.welcome_title": "Bienvenido a Click-n-speak",
   "wizard.welcome_body": "La app necesita {total_steps} {perm_word} para funcionar:\n\n{perm_list}\n\nCada paso abre los Ajustes del sistema. Sigue las instrucciones en pantalla — tarda aproximadamente un minuto.",
-  "wizard.perm_word": ["permiso", "permisos"],
+  "wizard.perm_word": [
+    "permiso",
+    "permisos"
+  ],
   "wizard.step_label": "Paso {step} de {total}",
   "wizard.perm_mic_title": "🎙  Acceso al micrófono  ({label})",
   "wizard.perm_mic_denied_body": "El acceso al micrófono fue denegado anteriormente.\n\nSe abrirán los Ajustes del sistema. Busca Click-n-speak en Micrófono y actívalo.",
@@ -191,7 +190,6 @@
   "wizard.missing_mic": "Micrófono",
   "wizard.missing_access": "Accesibilidad",
   "wizard.missing_input": "Monitorización de entrada",
-
   "stats.title": "Estadísticas",
   "stats.no_data": "No hay suficientes datos para las métricas.",
   "stats.performance_header": "Rendimiento del diccionario (últimas {n} frases)",
@@ -212,7 +210,6 @@
   "stats.btn_history": "Abrir historial de métricas",
   "stats.btn_delete_dead": "Eliminar peso muerto ({n})",
   "stats.btn_replacements": "Abrir Replacements…",
-
   "menu.permissions": "Permisos",
   "menu.mic_granted": "Micrófono — Concedido",
   "menu.mic_required": "Micrófono — Requerido",
@@ -250,7 +247,6 @@
   "menu.open_log": "Abrir archivo de registro",
   "menu.reload_config": "Recargar configuración",
   "menu.restart": "Reiniciar",
-
   "notify.perm_title": "Acceso",
   "notify.settings_title": "Ajustes",
   "notify.dict_title": "Diccionario",
@@ -280,9 +276,10 @@
   "notify.history_no_new_terms": "No se encontraron nuevos términos con suficiente frecuencia.",
   "notify.terms_removed_dead": "{n} términos sin uso eliminados.",
   "notify.terms_removed_inactive": "{n} términos inactivos eliminados.",
-
   "dialog.whisper_terms_title": "Términos Whisper — {lang}",
   "dialog.whisper_terms_hint": "Términos incluidos en el prompt inicial de Whisper para este idioma. Separa con comas o saltos de línea. Los términos inactivos permanecen listados pero no se pasan a Whisper hasta que se usen de nuevo.",
   "dialog.suggestions_body_detailed": "Se encontraron {total} términos que aparecen frecuentemente en tus dictados.\n{preview}\n\nAgregarlos mejorará el reconocimiento de Whisper.",
-  "dialog.suggestions_preview_more": "  y {n} más"
+  "dialog.suggestions_preview_more": "  y {n} más",
+  "notify.already_running_title": "Click-n-speak ya está en ejecución",
+  "notify.already_running_body": "La app ha sido traída a la barra de menús."
 }

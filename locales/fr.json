@@ -18,21 +18,17 @@
   "hud.ready_body": "Transcription terminée. Tu peux dicter de nouveau.",
   "hud.started_title": "Démarré",
   "hud.started_body": "Appuie sur le raccourci pour commencer l'enregistrement ou utilise l'icône de la barre de menus.",
-
   "menu.recording_status": "● ENREGISTREMENT",
   "menu.processing_status": "● RECONNAISSANCE",
   "menu.history_hint": "Clique sur une phrase pour la copier",
   "menu.history_empty": "Aucune phrase enregistrée",
   "menu.show_more": "↓  Afficher plus",
-
   "popup.edit_confirm_title": "Modifie et appuie sur Entrée",
   "popup.title_with_hotkey": "Modifier · Entrée pour confirmer · ⌘D pour ajouter un terme",
   "popup.copied": "Copié",
-
   "toast.added": "Ajouté : {term}",
   "toast.invalid_term": "Terme non valide",
   "toast.exists": "Déjà dans le dictionnaire",
-
   "notify.ai_not_found_title": "AI Editor : Modèle introuvable",
   "notify.ai_not_found_body": "Lance le script de téléchargement et redémarre l'app.",
   "notify.ai_ready_title": "AI Editor prêt",
@@ -42,6 +38,8 @@
   "notify.ai_load_error_body": "Impossible de charger le modèle. Consulte les journaux.",
   "notify.ai_connect_error_title": "AI Editor : Erreur",
   "notify.ai_connect_error_body": "Impossible de se connecter à l'API Gemini. Vérifie GOOGLE_API_KEY.",
+  "notify.audio_hang_title": "Erreur audio macOS",
+  "notify.audio_hang_body": "Le microphone est bloqué — redémarrage de Click-n-speak.",
   "notify.decay_body": "{n} {term_word} obsolète(s) désactivé(s). Ouvre «Gérer les termes» pour vérifier.",
   "notify.record_error_title": "Erreur",
   "notify.record_error_body": "Impossible de démarrer l'enregistrement. Consulte les journaux.",
@@ -82,7 +80,6 @@
   "notify.perm_hotkeys_disabled_body": "Ajoute Click-n-speak dans Confidentialité et sécurité → Input Monitoring pour activer les raccourcis.",
   "notify.language_changed_title": "Langue modifiée",
   "notify.language_changed_body": "Un redémarrage est nécessaire pour appliquer la nouvelle langue.",
-
   "dialog.restart_title": "Redémarrer Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak doit redémarrer. Redémarrer maintenant ?",
   "dialog.restart_reason_language": "Langue de l'interface modifiée.",
@@ -104,7 +101,6 @@
   "dialog.gemini_key_title": "Clé API Gemini",
   "dialog.gemini_key_body": "Entre ta clé API Google Gemini :",
   "dialog.gemini_key_body_existing": "Une clé est déjà définie. Entre une nouvelle pour la remplacer ou laisse le champ vide.",
-
   "btn.ok": "OK",
   "btn.cancel": "Annuler",
   "btn.save": "Enregistrer",
@@ -126,7 +122,6 @@
   "btn.auto_mode": "Mode automatique",
   "btn.add_selected": "Ajouter la sélection",
   "btn.delete_inactive": "Supprimer les inactifs",
-
   "suggestions.window_title": "Nouveaux termes pour le dictionnaire",
   "suggestions.description": "Sélectionne les termes à ajouter au vocabulaire de Whisper...",
   "suggestions.help_text": "Les mots ajoutés aident Whisper à les reconnaître dans les futurs enregistrements.",
@@ -135,7 +130,6 @@
   "suggestions.select_section": "sélectionner",
   "suggestions.deselect_section": "désélectionner",
   "suggestions.show_more": "Afficher {count} de plus",
-
   "terms.window_title": "Gérer les termes",
   "terms.col_term": "Terme",
   "terms.col_lang": "Langue",
@@ -158,11 +152,16 @@
   "terms.btn_delete_n": "Supprimer la sélection ({n})",
   "terms.dialog_delete_title": "Supprimer {n} {term_word} ?",
   "terms.dialog_delete_body": "Les termes supprimés n'aideront plus Whisper.",
-  "terms.term_word": ["terme", "termes"],
-
+  "terms.term_word": [
+    "terme",
+    "termes"
+  ],
   "wizard.welcome_title": "Bienvenue dans Click-n-speak",
   "wizard.welcome_body": "L'app a besoin de {total_steps} {perm_word} pour fonctionner :\n\n{perm_list}\n\nChaque étape ouvre les Réglages du système. Suis les instructions à l'écran — ça prend environ une minute.",
-  "wizard.perm_word": ["autorisation", "autorisations"],
+  "wizard.perm_word": [
+    "autorisation",
+    "autorisations"
+  ],
   "wizard.step_label": "Étape {step} sur {total}",
   "wizard.perm_mic_title": "🎙  Accès au microphone  ({label})",
   "wizard.perm_mic_denied_body": "L'accès au microphone a été refusé précédemment.\n\nLes Réglages du système vont s'ouvrir. Trouve Click-n-speak sous Microphone et active-le.",
@@ -191,7 +190,6 @@
   "wizard.missing_mic": "Microphone",
   "wizard.missing_access": "Accessibilité",
   "wizard.missing_input": "Surveillance des entrées",
-
   "stats.title": "Statistiques",
   "stats.no_data": "Pas assez de données pour les métriques.",
   "stats.performance_header": "Performances du dictionnaire (dernières {n} phrases)",
@@ -212,7 +210,6 @@
   "stats.btn_history": "Ouvrir l'historique des métriques",
   "stats.btn_delete_dead": "Supprimer le poids mort ({n})",
   "stats.btn_replacements": "Ouvrir Replacements…",
-
   "menu.permissions": "Autorisations",
   "menu.mic_granted": "Microphone — Accordé",
   "menu.mic_required": "Microphone — Requis",
@@ -250,7 +247,6 @@
   "menu.open_log": "Ouvrir le fichier journal",
   "menu.reload_config": "Recharger la configuration",
   "menu.restart": "Redémarrer",
-
   "notify.perm_title": "Accès",
   "notify.settings_title": "Paramètres",
   "notify.dict_title": "Dictionnaire",
@@ -280,9 +276,10 @@
   "notify.history_no_new_terms": "Aucun nouveau terme trouvé avec une fréquence suffisante dans l'historique.",
   "notify.terms_removed_dead": "{n} termes inutilisés supprimés.",
   "notify.terms_removed_inactive": "{n} termes inactifs supprimés.",
-
   "dialog.whisper_terms_title": "Termes Whisper — {lang}",
   "dialog.whisper_terms_hint": "Termes inclus dans le prompt initial de Whisper pour cette langue. Séparez par des virgules ou des sauts de ligne. Les termes inactifs restent listés ici mais ne sont pas transmis à Whisper tant qu'ils ne sont pas à nouveau utilisés.",
   "dialog.suggestions_body_detailed": "{total} termes trouvés apparaissant fréquemment dans vos dictées.\n{preview}\n\nLes ajouter améliorera la reconnaissance de Whisper.",
-  "dialog.suggestions_preview_more": "  et {n} de plus"
+  "dialog.suggestions_preview_more": "  et {n} de plus",
+  "notify.already_running_title": "Click-n-speak est déjà en cours d'exécution",
+  "notify.already_running_body": "L'app a été ramenée dans la barre de menus."
 }

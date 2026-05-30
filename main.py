@@ -2,6 +2,7 @@ import atexit
 import fcntl
 import os
 import signal
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -78,6 +79,48 @@ def _release_instance_lock() -> None:
         _lock_fd = None
 
 
+def _activate_existing_instance() -> None:
+    """Bring the running Click-n-speak instance to the foreground and notify the user."""
+    # Send a macOS notification so the user sees something happened.
+    # i18n is not yet loaded (we exit before initialising the app), so use
+    # the English strings directly — this is a rare edge-case path.
+    send_notification(
+        "Click-n-speak is already running",
+        "The app is active in the menu bar.",
+        "",
+    )
+    # Try to activate via AppKit (works when running as .app bundle).
+    try:
+        from AppKit import NSRunningApplication  # type: ignore
+        bundle_id = "com.sergej.clicknspeak"
+        apps = NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
+        if apps:
+            apps[0].activateWithOptions_(0)
+            return
+    except Exception:
+        pass
+    # Fallback for dev mode: find the process by name via psutil and use osascript.
+    try:
+        import psutil
+        my_pid = os.getpid()
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                if proc.info["pid"] != my_pid and "click" in cmdline.lower() and "speak" in cmdline.lower():
+                    subprocess.run(
+                        ["osascript", "-e",
+                         f'tell application "System Events" to set frontmost of '
+                         f'(first process whose unix id is {proc.info["pid"]}) to true'],
+                        timeout=2,
+                        capture_output=True,
+                    )
+                    return
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
 def main() -> None:
     # Ensure we are in the right directory
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -98,7 +141,8 @@ def main() -> None:
         log_error(f"Startup orphan sweep failed: {e}")
 
     if not _acquire_instance_lock():
-        log_error("Another Click-n-speak instance is already running. Exiting.")
+        log_info("Another Click-n-speak instance is already running. Exiting.")
+        _activate_existing_instance()
         sys.exit(0)
 
     try:

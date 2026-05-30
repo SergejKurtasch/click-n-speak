@@ -163,7 +163,11 @@ class TestAiEditorFallbacks(unittest.TestCase):
         self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_UNCHANGED)
 
     def test_status_timeout_on_slow_llm(self):
+        import time as _time
         editor = self._make_ready_editor()
+        # Simulate a recently-used editor so the normal 8s timeout applies,
+        # not the cold-start 25s timeout (which would let the slow call succeed).
+        editor._last_refine_at = _time.monotonic()
 
         def _slow_call(text, **kw):
             threading.Event().wait(_REFINE_TIMEOUT_SECONDS + 5)

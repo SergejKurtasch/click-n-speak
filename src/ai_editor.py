@@ -21,6 +21,12 @@ _DEFAULT_TEMP = 0.0        # greedy — deterministic and fastest
 # Successful refinements complete in 0.7-3s; 8s gives ample headroom without
 # the 15s penalty that was previously paid on every slow/large input.
 _REFINE_TIMEOUT_SECONDS = 8.0
+# After a long idle (>5 min) Metal weights may be evicted; Qwen 2.5 1.5B 4-bit
+# needs up to ~18s to reload on M1 Air. 25s gives headroom without blocking UX
+# for more than a single "cold" session.
+_REFINE_COLD_TIMEOUT_SECONDS = 25.0
+# If the last successful refine was longer ago than this, use the cold timeout.
+_REFINE_COLD_IDLE_THRESHOLD_S = 300.0  # 5 minutes
 # Qwen 2.5 1.5B context window. Half is reserved for output; system prompt ≈ 400 tokens.
 # Russian ≈ 2.5 chars/token → each chunk can be at most ~40 K chars of input.
 _LOCAL_MODEL_CONTEXT_TOKENS = 32768
@@ -232,6 +238,7 @@ class AiEditor:
         self._lock = threading.Lock()  # Prevent concurrent LLM calls
         self._abort_event = threading.Event()
         self.last_refine_status: str = self.REFINE_STATUS_DISABLED
+        self._last_refine_at: float = 0.0  # monotonic time of last completed refine
 
     # ------------------------------------------------------------------
     # Public API
@@ -314,6 +321,31 @@ class AiEditor:
     def is_ready(self) -> bool:
         return self._ready
 
+    def pre_warm(self) -> None:
+        """Run a minimal dummy inference to keep Metal weights hot.
+
+        Uses the non-blocking lock: if a refine() is already running, skips
+        silently to avoid Metal GPU contention. Runs in ~0.1-0.5s when the
+        model is already warm; ~12-18s on a true cold start (which is exactly
+        the scenario we want to absorb before the first real hotkey press).
+        """
+        if not self._ready:
+            return
+        if not self._lock.acquire(blocking=False):
+            log_info("AiEditor.pre_warm: lock busy — skipping.")
+            return
+        try:
+            import mlx_lm  # type: ignore
+            start = time.monotonic()
+            for _ in mlx_lm.stream_generate(self._model, self._tokenizer, prompt="Warmup", max_tokens=1):
+                pass
+            self._last_refine_at = time.monotonic()
+            log_info(f"AiEditor.pre_warm: done in {time.monotonic() - start:.2f}s.")
+        except Exception as e:
+            log_error(f"AiEditor.pre_warm failed: {e}")
+        finally:
+            self._lock.release()
+
     def refine(
         self,
         text: str,
@@ -353,10 +385,18 @@ class AiEditor:
 
         self._abort_event.clear()
         t = threading.Thread(target=_run, daemon=True)
-        refine_start = time.time()
+        refine_start = time.monotonic()
+        idle = refine_start - self._last_refine_at
+        is_cold = idle > _REFINE_COLD_IDLE_THRESHOLD_S
+        effective_timeout = _REFINE_COLD_TIMEOUT_SECONDS if is_cold else _REFINE_TIMEOUT_SECONDS
+        if is_cold:
+            log_info(
+                f"AiEditor: using cold timeout {effective_timeout:.0f}s "
+                f"(idle {idle:.0f}s > threshold {_REFINE_COLD_IDLE_THRESHOLD_S:.0f}s)."
+            )
         t.start()
         # Give slight padding so the in-loop stream_generate timeout triggers first.
-        t.join(timeout=_REFINE_TIMEOUT_SECONDS + 0.5)
+        t.join(timeout=effective_timeout + 0.5)
 
         if t.is_alive():
             # Signal the streaming loop to break, then wait a little for clean exit.
@@ -371,7 +411,7 @@ class AiEditor:
                 )
             self._lock.release()
             log_error(
-                f"AiEditor: LLM thread timed out after {_REFINE_TIMEOUT_SECONDS + 0.5}s "
+                f"AiEditor: LLM thread timed out after {effective_timeout + 0.5:.1f}s "
                 "— returning original text."
             )
             self.last_refine_status = self.REFINE_STATUS_TIMEOUT
@@ -395,7 +435,8 @@ class AiEditor:
             self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
-        elapsed = time.time() - refine_start
+        self._last_refine_at = time.monotonic()
+        elapsed = time.monotonic() - refine_start
         if cleaned != text:
             self.last_refine_status = self.REFINE_STATUS_OK
         else:

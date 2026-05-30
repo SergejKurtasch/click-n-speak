@@ -306,6 +306,14 @@ class SVoiceRecApp:
         self.is_recording = False
         self.is_processing = False
         self._restart_pending = False  # Set by _on_recorder_fatal_error; blocks new recordings
+        # When fatal recorder error fires while an interactive popup is open, defer the
+        # actual restart until the user confirms / cancels — otherwise the popup is torn
+        # down before the user can press Enter, and the recognised phrase is lost.
+        self._restart_after_popup = False
+        # Last final transcription kept around as a fallback: if we are forced to
+        # restart before the popup is confirmed, we still want the phrase to land in
+        # phrase_history.txt so the user does not lose it entirely.
+        self._last_final_text_for_restart_fallback: Optional[str] = None
         self.last_toggle_time = 0.0
         self.debounce_interval = 0.3  # seconds
 
@@ -741,11 +749,14 @@ class SVoiceRecApp:
 
                 except Exception as e:
                     log_exception(f"_run_injection failed: {e}")
+                finally:
+                    self._maybe_run_deferred_restart()
 
             threading.Thread(target=_run_injection, daemon=True).start()
 
         def _on_cancel():
             log_info("User cancelled edit popup (Escape). Nothing injected.")
+            self._maybe_run_deferred_restart()
 
         def _on_add_to_dictionary(term: str) -> bool:
             primary = get_primary_language(self.config)
@@ -1186,6 +1197,7 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []
         self._ai_edited_text = None
         self._ai_editor_status = None
+        self._last_final_text_for_restart_fallback = None
         self._detected_transcription_lang = ""
         self._needs_buffered_finalization = False
         self._buffered_final_text = None
@@ -1198,6 +1210,19 @@ class SVoiceRecApp:
         # the first real chunk transcription.
         self.transcriber.pre_warm()
         log_info("Pre-warm request sent to transcriber process.")
+
+        # Also warm the local AiEditor if it has been idle long enough to risk
+        # its Metal weights being evicted (threshold: same as the cold-timeout guard).
+        # Runs in a daemon thread so it never delays the start of audio capture.
+        _editor = self.ai_editor
+        if _editor is not None and _editor.is_ready():
+            from .ai_editor import _REFINE_COLD_IDLE_THRESHOLD_S
+            import time as _time
+            if _time.monotonic() - _editor._last_refine_at > _REFINE_COLD_IDLE_THRESHOLD_S:
+                threading.Thread(
+                    target=_editor.pre_warm, daemon=True, name="ai-editor-hotkey-warm"
+                ).start()
+                log_info("AiEditor.pre_warm fired on hotkey (model was idle).")
 
         # Remember active app safely on main thread.
         # In append mode the popup is already open and _previous_app_pid is still correct
@@ -1372,6 +1397,7 @@ class SVoiceRecApp:
             self._submit_for_main_thread(self._do_finish_cleanup)
             return False
 
+        self._last_final_text_for_restart_fallback = full_text
         if self._append_to_popup and self._preview_panel._is_interactive:
             self._preview_panel.append_text(full_text, self._main_thread_queue)
             self._append_to_popup = False
@@ -1567,6 +1593,7 @@ class SVoiceRecApp:
                         f"session_id={session_id}"
                     )
                     if full_text and self._preview_panel:
+                        self._last_final_text_for_restart_fallback = full_text
                         if self._append_to_popup and self._preview_panel._is_interactive:
                             self._preview_panel.append_text(full_text, self._main_thread_queue)
                             self._append_to_popup = False
@@ -1604,6 +1631,7 @@ class SVoiceRecApp:
                     full_text = _join_chunks(self.transcribed_parts)
                     if full_text and self._preview_panel:
                         self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
+                        self._last_final_text_for_restart_fallback = full_text
                         if self._append_to_popup and self._preview_panel._is_interactive:
                             self._preview_panel.append_text(full_text, self._main_thread_queue)
                             self._append_to_popup = False
@@ -1708,8 +1736,21 @@ class SVoiceRecApp:
 
             if self.worker_thread is not None:
                 log_info("Waiting for chunk worker thread to finish...")
+                # Use an extended timeout when Whisper is cold (>5 min idle): the
+                # first chunk can take up to TRANSCRIBER_COLD_START_TIMEOUT_SECONDS
+                # (90s) to return, so a fixed 30s limit would fire prematurely.
+                # Add 15s margin over the transcriber's own timeout so the child
+                # process is guaranteed to respond (or time out internally) before
+                # we force-reset here.
+                _last_returned = getattr(self.transcriber, "_last_transcribe_returned_at", 0.0)
+                _idle = time.time() - _last_returned
+                _worker_join_timeout = (
+                    TRANSCRIBER_COLD_START_TIMEOUT_SECONDS + 15
+                    if _idle > 5 * 60
+                    else 30
+                )
                 try:
-                    self.worker_thread.join(timeout=30)
+                    self.worker_thread.join(timeout=_worker_join_timeout)
                 except Exception as e:
                     log_exception(f"Error while joining worker_thread: {e}")
                 waited = time.time() - wait_start
@@ -1995,6 +2036,13 @@ class SVoiceRecApp:
             else:
                 self.transcriber.pre_warm()
                 log_info("Keep-alive: cache cleared and pre_warm() sent to transcriber process.")
+                # Also warm the local AiEditor so its Metal weights stay hot.
+                # GeminiEditor needs no warming (HTTP, no GPU weights).
+                _editor = self.ai_editor
+                if _editor is not None and _editor.is_ready():
+                    threading.Thread(
+                        target=_editor.pre_warm, daemon=True, name="ai-editor-keepalive-warm"
+                    ).start()
             self._last_transcription_time = time.time()
         except Exception as e:
             log_error(f"Keep-alive warmup failed: {e}")
@@ -2014,12 +2062,81 @@ class SVoiceRecApp:
         """Called by AudioRecorder when the audio stream cannot be recovered.
 
         Runs on the recorder's background thread — posts restart to main thread.
+        Guarded against double-call: the proactive watchdog and start() can both
+        fire; only the first call triggers a restart.
+
+        If an interactive popup is currently open with a recognised phrase,
+        the restart is deferred until the user confirms / cancels. This avoids
+        the case where Whisper successfully recognised speech but the user
+        loses it because the popup is destroyed by an early restart.
         """
+        if self._restart_pending:
+            return
         self._restart_pending = True  # Block hotkey immediately, before main-thread restart runs
+
+        # All popup-state checks and restart decisions run on the main thread so
+        # that _is_interactive is never read from a background thread.
+        def _decide_on_main_thread():
+            popup_open = (
+                self._preview_panel is not None
+                and getattr(self._preview_panel, "_is_interactive", False)
+            )
+            if popup_open:
+                log_info(
+                    "Fatal recorder error while interactive popup is open — "
+                    "deferring restart until user closes the popup."
+                )
+                self._restart_after_popup = True
+                return
+
+            # Fallback save: persist the last recognised final text so it is not
+            # lost if the popup never had a chance to be confirmed.
+            self._save_pending_phrase_before_restart()
+            if self.menu_bar is not None:
+                self.menu_bar.restart_application()
+
+        self._submit_for_main_thread(_decide_on_main_thread)
+
+    def _maybe_run_deferred_restart(self) -> None:
+        """Run a fatal-error restart that was deferred while the popup was open.
+
+        Called from _on_confirm / _on_cancel. If a recorder fatal error fired
+        while the popup was interactive, we set _restart_after_popup=True and
+        kept the app alive long enough for the user to confirm. Now that the
+        popup is closing, perform the actual restart.
+        """
+        if not self._restart_after_popup:
+            return
+        self._restart_after_popup = False
+        log_info("Running deferred restart after popup closed.")
+        # User already had a chance to confirm; no fallback save needed.
+        self._last_final_text_for_restart_fallback = None
         def _do_restart():
             if self.menu_bar is not None:
                 self.menu_bar.restart_application()
         self._submit_for_main_thread(_do_restart)
+
+    def _save_pending_phrase_before_restart(self) -> None:
+        """Persist the last final transcription to phrase_history before restart.
+
+        Called when a fatal recorder error forces a restart and the user has not
+        yet confirmed the popup. Without this, phrase_history.append_phrase()
+        would only run inside _on_confirm — which never fires if the popup is
+        destroyed by the restart.
+        """
+        text = (self._last_final_text_for_restart_fallback or "").strip()
+        if not text:
+            return
+        try:
+            append_phrase(text)
+            log_info(
+                f"Fallback: saved pending phrase to history before restart "
+                f"(len={len(text)})."
+            )
+        except Exception as e:
+            log_error(f"Fallback phrase save failed: {e}")
+        finally:
+            self._last_final_text_for_restart_fallback = None
 
     def _restart_transcriber_for_memory(self) -> None:
         """Restart the transcriber child process to reset accumulated MLX memory.

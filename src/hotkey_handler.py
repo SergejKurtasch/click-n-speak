@@ -3,7 +3,7 @@ import threading
 from pynput import keyboard
 from pynput.keyboard import Key, KeyCode
 
-from .utils import log_error, log_info
+from .utils import log_error, log_info, log_warning
 
 
 class CompatGlobalHotKeys(keyboard.GlobalHotKeys):
@@ -67,10 +67,18 @@ class HotkeyHandler:
             if self.listener and self.listener.running:
                 return  # healthy
         if self.listener and not self.listener.running:
-            log_error(
-                "Hotkey listener exited immediately after start — CGEventTap "
-                "creation likely failed. Add Click-n-speak to "
-                "Privacy & Security → Input Monitoring."
+            try:
+                from .permissions import is_setup_done
+                context = (
+                    "setup wizard will handle this"
+                    if not is_setup_done()
+                    else "re-grant in System Settings → Privacy & Security → Input Monitoring"
+                )
+            except Exception:
+                context = "re-grant in System Settings → Privacy & Security → Input Monitoring"
+            log_warning(
+                f"Hotkey listener exited immediately after start — CGEventTap "
+                f"creation likely failed. Input Monitoring not granted — {context}."
             )
             if self.on_tap_failed:
                 self.on_tap_failed()

@@ -14,6 +14,7 @@ from .utils import (
     play_sound,
     send_notification,
 )
+from . import i18n as _i18n
 
 try:
     import webrtcvad
@@ -178,8 +179,8 @@ class AudioRecorder:
         # lock; creating a new stream while it is still active can deadlock.
         close_thread = self._close_thread
         if close_thread is not None and close_thread.is_alive():
-            log_info("Previous stream close still in progress. Waiting up to 5s…")
-            close_thread.join(timeout=5.0)
+            log_info("Previous stream close still in progress. Waiting up to 12s…")
+            close_thread.join(timeout=12.0)
             if close_thread.is_alive():
                 # The old PortAudio/CoreAudio abort() is stuck — likely because macOS
                 # reconfigured the audio device graph (e.g. Bluetooth connect/disconnect).
@@ -187,14 +188,12 @@ class AudioRecorder:
                 # would either deadlock or produce a stream that captures no audio.
                 # Trigger an auto-restart instead.
                 log_error(
-                    "Previous audio stream close did not complete after 5s. "
+                    "Previous audio stream close did not complete after 12s. "
                     "Triggering automatic restart."
                 )
-                send_notification(
-                    "Сбой аудиосистемы macOS",
-                    "Микрофон завис — перезапускаю Click-n-speak.",
-                    "",
-                )
+                # Notification already sent by the proactive watchdog in
+                # _stop_stream_with_timeout; _on_fatal_error is guarded against
+                # double-call via _restart_pending in SVoiceRecApp.
                 self.stream = None
                 self._close_thread = None
                 if self._on_fatal_error is not None:
@@ -311,3 +310,22 @@ class AudioRecorder:
         t = threading.Thread(target=_do_close, daemon=True)
         self._close_thread = t
         t.start()
+
+        # Proactive watchdog: if the stream close hangs (e.g. macOS Core Audio
+        # deadlocks on sleep/wake or Bluetooth reconnect), trigger an auto-restart
+        # immediately instead of waiting for the next start() call which could be
+        # minutes later.
+        def _watchdog() -> None:
+            t.join(timeout=12.0)
+            if not t.is_alive():
+                return
+            log_error("Audio stream close hung >12s — triggering proactive restart.")
+            send_notification(
+                _i18n.t("notify.audio_hang_title"),
+                _i18n.t("notify.audio_hang_body"),
+                "",
+            )
+            if self._on_fatal_error is not None:
+                self._on_fatal_error()
+
+        threading.Thread(target=_watchdog, daemon=True, name="stream-close-watchdog").start()

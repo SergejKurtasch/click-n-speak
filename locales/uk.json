@@ -18,21 +18,17 @@
   "hud.ready_body": "Транскрипцію завершено. Можна диктувати знову.",
   "hud.started_title": "Запущено",
   "hud.started_body": "Натисни гарячу клавішу, щоб почати запис, або скористайся іконкою в рядку меню.",
-
   "menu.recording_status": "● ЗАПИС",
   "menu.processing_status": "● РОЗПІЗНАВАННЯ",
   "menu.history_hint": "Натисни на фразу, щоб скопіювати",
   "menu.history_empty": "Немає збережених фраз",
   "menu.show_more": "↓  Показати більше",
-
   "popup.edit_confirm_title": "Відредагуй і натисни Enter",
   "popup.title_with_hotkey": "Редагувати · Enter для підтвердження · ⌘D додати термін",
   "popup.copied": "Скопійовано",
-
   "toast.added": "Додано: {term}",
   "toast.invalid_term": "Недійсний термін",
   "toast.exists": "Вже є в словнику",
-
   "notify.ai_not_found_title": "AI Editor: Модель не знайдено",
   "notify.ai_not_found_body": "Запусти скрипт завантаження та перезапусти застосунок.",
   "notify.ai_ready_title": "AI Editor готовий",
@@ -42,6 +38,8 @@
   "notify.ai_load_error_body": "Не вдалося завантажити модель. Перевір журнали.",
   "notify.ai_connect_error_title": "AI Editor: Помилка",
   "notify.ai_connect_error_body": "Не вдалося підключитися до API Gemini. Перевір GOOGLE_API_KEY.",
+  "notify.audio_hang_title": "Збій аудіосистеми macOS",
+  "notify.audio_hang_body": "Мікрофон завис — перезапускаю Click-n-speak.",
   "notify.decay_body": "{n} застарілих {term_word} деактивовано. Відкрий «Керування термінами» для перегляду.",
   "notify.record_error_title": "Помилка",
   "notify.record_error_body": "Не вдалося розпочати запис. Перевір журнали.",
@@ -82,7 +80,6 @@
   "notify.perm_hotkeys_disabled_body": "Додай Click-n-speak до Конфіденційність і безпека → Input Monitoring, щоб увімкнути гарячі клавіші.",
   "notify.language_changed_title": "Мову змінено",
   "notify.language_changed_body": "Для застосування нової мови необхідно перезапустити застосунок.",
-
   "dialog.restart_title": "Перезапустити Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak потрібно перезапустити. Перезапустити зараз?",
   "dialog.restart_reason_language": "Мову інтерфейсу змінено.",
@@ -104,7 +101,6 @@
   "dialog.gemini_key_title": "API-ключ Gemini",
   "dialog.gemini_key_body": "Введи свій API-ключ Google Gemini:",
   "dialog.gemini_key_body_existing": "Ключ вже встановлено. Введи новий, щоб замінити, або залиш поле порожнім.",
-
   "btn.ok": "OK",
   "btn.cancel": "Скасувати",
   "btn.save": "Зберегти",
@@ -126,7 +122,6 @@
   "btn.auto_mode": "Автоматичний режим",
   "btn.add_selected": "Додати вибрані",
   "btn.delete_inactive": "Видалити неактивні",
-
   "suggestions.window_title": "Нові терміни для словника",
   "suggestions.description": "Вибери терміни для додавання до словника Whisper...",
   "suggestions.help_text": "Додані слова допомагають Whisper розпізнавати їх у майбутніх записах.",
@@ -135,7 +130,6 @@
   "suggestions.select_section": "вибрати",
   "suggestions.deselect_section": "зняти вибір",
   "suggestions.show_more": "Показати ще {count}",
-
   "terms.window_title": "Керування термінами",
   "terms.col_term": "Термін",
   "terms.col_lang": "Мова",
@@ -158,11 +152,18 @@
   "terms.btn_delete_n": "Видалити вибрані ({n})",
   "terms.dialog_delete_title": "Видалити {n} {term_word}?",
   "terms.dialog_delete_body": "Видалені терміни більше не допомагатимуть Whisper.",
-  "terms.term_word": ["термін", "терміни", "термінів"],
-
+  "terms.term_word": [
+    "термін",
+    "терміни",
+    "термінів"
+  ],
   "wizard.welcome_title": "Ласкаво просимо до Click-n-speak",
   "wizard.welcome_body": "Застосунку потрібно {total_steps} {perm_word} для роботи:\n\n{perm_list}\n\nКожен крок відкриває Системні параметри. Дотримуйся інструкцій на екрані — це займе близько хвилини.",
-  "wizard.perm_word": ["дозвіл", "дозволи", "дозволів"],
+  "wizard.perm_word": [
+    "дозвіл",
+    "дозволи",
+    "дозволів"
+  ],
   "wizard.step_label": "Крок {step} з {total}",
   "wizard.perm_mic_title": "🎙  Доступ до мікрофона  ({label})",
   "wizard.perm_mic_denied_body": "Доступ до мікрофона раніше було відхилено.\n\nВідкриються Системні параметри. Знайди Click-n-speak у розділі Мікрофон і увімкни його.",
@@ -191,7 +192,6 @@
   "wizard.missing_mic": "Мікрофон",
   "wizard.missing_access": "Спеціальні можливості",
   "wizard.missing_input": "Моніторинг вводу",
-
   "stats.title": "Статистика",
   "stats.no_data": "Недостатньо даних для метрик.",
   "stats.performance_header": "Продуктивність словника (останні {n} фраз)",
@@ -212,7 +212,6 @@
   "stats.btn_history": "Відкрити історію метрик",
   "stats.btn_delete_dead": "Видалити баласт ({n})",
   "stats.btn_replacements": "Відкрити Replacements…",
-
   "menu.permissions": "Дозволи",
   "menu.mic_granted": "Мікрофон — Дозволено",
   "menu.mic_required": "Мікрофон — Потрібно",
@@ -250,7 +249,6 @@
   "menu.open_log": "Відкрити лог",
   "menu.reload_config": "Перезавантажити конфіг",
   "menu.restart": "Перезапустити",
-
   "notify.perm_title": "Доступ",
   "notify.settings_title": "Налаштування",
   "notify.dict_title": "Словник",
@@ -280,9 +278,10 @@
   "notify.history_no_new_terms": "В історії не знайдено термінів з достатньою частотою.",
   "notify.terms_removed_dead": "{n} невикористовуваних термінів видалено.",
   "notify.terms_removed_inactive": "{n} неактивних термінів видалено.",
-
   "dialog.whisper_terms_title": "Терміни Whisper — {lang}",
   "dialog.whisper_terms_hint": "Терміни, додані до початкової підказки Whisper для цієї мови. Розділяйте комами або переносами. Неактивні терміни видно тут, але не передаються Whisper, поки їх не використають знову.",
   "dialog.suggestions_body_detailed": "Знайдено {total} термінів, що часто зустрічаються у ваших диктовках.\n{preview}\n\nДодавання їх покращить розпізнавання Whisper.",
-  "dialog.suggestions_preview_more": "  і ще {n}"
+  "dialog.suggestions_preview_more": "  і ще {n}",
+  "notify.already_running_title": "Click-n-speak вже запущено",
+  "notify.already_running_body": "Застосунок активовано в рядку меню."
 }

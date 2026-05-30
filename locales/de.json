@@ -18,21 +18,17 @@
   "hud.ready_body": "Transkription abgeschlossen. Du kannst erneut diktieren.",
   "hud.started_title": "Gestartet",
   "hud.started_body": "Hotkey drücken um die Aufnahme zu starten oder das Menüleisten-Symbol verwenden.",
-
   "menu.recording_status": "● AUFNAHME",
   "menu.processing_status": "● ERKENNUNG",
   "menu.history_hint": "Phrase anklicken zum Kopieren",
   "menu.history_empty": "Keine gespeicherten Phrasen",
   "menu.show_more": "↓  Mehr anzeigen",
-
   "popup.edit_confirm_title": "Bearbeiten und Enter drücken",
   "popup.title_with_hotkey": "Bearbeiten · Enter zum Bestätigen · ⌘D Begriff hinzufügen",
   "popup.copied": "Kopiert",
-
   "toast.added": "Hinzugefügt: {term}",
   "toast.invalid_term": "Kein gültiger Begriff",
   "toast.exists": "Bereits im Wörterbuch",
-
   "notify.ai_not_found_title": "AI Editor: Modell nicht gefunden",
   "notify.ai_not_found_body": "Download-Skript ausführen und App neu starten.",
   "notify.ai_ready_title": "AI Editor bereit",
@@ -42,6 +38,8 @@
   "notify.ai_load_error_body": "Modell konnte nicht geladen werden. Logs prüfen.",
   "notify.ai_connect_error_title": "AI Editor: Fehler",
   "notify.ai_connect_error_body": "Verbindung zur Gemini API fehlgeschlagen. GOOGLE_API_KEY prüfen.",
+  "notify.audio_hang_title": "macOS Audiofehler",
+  "notify.audio_hang_body": "Mikrofon hängt — Click-n-speak wird neu gestartet.",
   "notify.decay_body": "{n} veraltete {term_word} deaktiviert. «Begriffe verwalten» öffnen zur Überprüfung.",
   "notify.record_error_title": "Fehler",
   "notify.record_error_body": "Aufnahme konnte nicht gestartet werden. Logs prüfen.",
@@ -82,7 +80,6 @@
   "notify.perm_hotkeys_disabled_body": "Click-n-speak zu Datenschutz & Sicherheit → Input Monitoring hinzufügen, um Hotkeys zu aktivieren.",
   "notify.language_changed_title": "Sprache geändert",
   "notify.language_changed_body": "Neustart erforderlich, um die neue Sprache anzuwenden.",
-
   "dialog.restart_title": "Click-n-speak neu starten",
   "dialog.restart_body": "{reason}\n\nClick-n-speak muss neu gestartet werden. Jetzt neu starten?",
   "dialog.restart_reason_language": "Oberflächensprache geändert.",
@@ -104,7 +101,6 @@
   "dialog.gemini_key_title": "Gemini API-Schlüssel",
   "dialog.gemini_key_body": "Google Gemini API-Schlüssel eingeben:",
   "dialog.gemini_key_body_existing": "Ein Schlüssel ist bereits gesetzt. Neuen eingeben zum Ersetzen oder Feld leer lassen.",
-
   "btn.ok": "OK",
   "btn.cancel": "Abbrechen",
   "btn.save": "Speichern",
@@ -126,7 +122,6 @@
   "btn.auto_mode": "Auto-Modus",
   "btn.add_selected": "Auswahl hinzufügen",
   "btn.delete_inactive": "Inaktive löschen",
-
   "suggestions.window_title": "Neue Begriffe für das Wörterbuch",
   "suggestions.description": "Begriffe auswählen, die dem Whisper-Vokabular hinzugefügt werden sollen...",
   "suggestions.help_text": "Hinzugefügte Wörter helfen Whisper, sie in zukünftigen Aufnahmen zu erkennen.",
@@ -135,7 +130,6 @@
   "suggestions.select_section": "auswählen",
   "suggestions.deselect_section": "abwählen",
   "suggestions.show_more": "{count} weitere anzeigen",
-
   "terms.window_title": "Begriffe verwalten",
   "terms.col_term": "Begriff",
   "terms.col_lang": "Sprache",
@@ -158,11 +152,16 @@
   "terms.btn_delete_n": "Auswahl löschen ({n})",
   "terms.dialog_delete_title": "{n} {term_word} löschen?",
   "terms.dialog_delete_body": "Gelöschte Begriffe helfen Whisper nicht mehr.",
-  "terms.term_word": ["Begriff", "Begriffe"],
-
+  "terms.term_word": [
+    "Begriff",
+    "Begriffe"
+  ],
   "wizard.welcome_title": "Willkommen bei Click-n-speak",
   "wizard.welcome_body": "Die App benötigt {total_steps} {perm_word} zum Funktionieren:\n\n{perm_list}\n\nJeder Schritt öffnet die Systemeinstellungen. Folge den Anweisungen auf dem Bildschirm — das dauert etwa eine Minute.",
-  "wizard.perm_word": ["Berechtigung", "Berechtigungen"],
+  "wizard.perm_word": [
+    "Berechtigung",
+    "Berechtigungen"
+  ],
   "wizard.step_label": "Schritt {step} von {total}",
   "wizard.perm_mic_title": "🎙  Mikrofonzugriff  ({label})",
   "wizard.perm_mic_denied_body": "Mikrofonzugriff wurde zuvor verweigert.\n\nDie Systemeinstellungen werden geöffnet. Click-n-speak unter Mikrofon finden und aktivieren.",
@@ -191,7 +190,6 @@
   "wizard.missing_mic": "Mikrofon",
   "wizard.missing_access": "Bedienungshilfen",
   "wizard.missing_input": "Eingabeüberwachung",
-
   "stats.title": "Statistik",
   "stats.no_data": "Nicht genug Daten für Metriken.",
   "stats.performance_header": "Wörterbuch-Leistung (letzte {n} Phrasen)",
@@ -212,7 +210,6 @@
   "stats.btn_history": "Metrikverlauf öffnen",
   "stats.btn_delete_dead": "Toten Ballast entfernen ({n})",
   "stats.btn_replacements": "Replacements öffnen…",
-
   "menu.permissions": "Berechtigungen",
   "menu.mic_granted": "Mikrofon — Gewährt",
   "menu.mic_required": "Mikrofon — Erforderlich",
@@ -250,7 +247,6 @@
   "menu.open_log": "Protokolldatei öffnen",
   "menu.reload_config": "Konfiguration neu laden",
   "menu.restart": "Neu starten",
-
   "notify.perm_title": "Zugriff",
   "notify.settings_title": "Einstellungen",
   "notify.dict_title": "Wörterbuch",
@@ -280,9 +276,10 @@
   "notify.history_no_new_terms": "Keine neuen Begriffe mit ausreichender Häufigkeit gefunden.",
   "notify.terms_removed_dead": "{n} ungenutzte Begriffe gelöscht.",
   "notify.terms_removed_inactive": "{n} inaktive Begriffe gelöscht.",
-
   "dialog.whisper_terms_title": "Whisper-Begriffe — {lang}",
   "dialog.whisper_terms_hint": "Begriffe in der Whisper-Eingabeaufforderung für diese Sprache. Mit Kommas oder Zeilenumbrüchen trennen. Inaktive Begriffe bleiben hier sichtbar, werden aber erst wieder an Whisper übergeben, wenn sie erneut verwendet werden.",
   "dialog.suggestions_body_detailed": "{total} Begriffe gefunden, die häufig in deinen Diktaten vorkommen.\n{preview}\n\nDas Hinzufügen verbessert die Whisper-Erkennung.",
-  "dialog.suggestions_preview_more": "  und {n} weitere"
+  "dialog.suggestions_preview_more": "  und {n} weitere",
+  "notify.already_running_title": "Click-n-speak läuft bereits",
+  "notify.already_running_body": "Die App wurde in der Menüleiste aktiviert."
 }
