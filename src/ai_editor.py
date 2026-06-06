@@ -639,9 +639,11 @@ class AiEditor:
         if not re.search(r'[a-zA-Zа-яА-ЯёЁ0-9]', stripped):
             return True
 
-        # Too short for meaningful editing
+        # Too short for meaningful editing: ≤2 words or ≤60 chars.
+        # Short speech phrases are already well-formed from Whisper; the LLM
+        # adds nothing and costs 0.8–1.0 s.
         words = stripped.split()
-        if len(words) < 3:
+        if len(words) < 3 or len(stripped) <= 60:
             return True
 
         # Consecutive word repeats (3+ times)

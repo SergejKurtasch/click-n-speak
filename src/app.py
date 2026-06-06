@@ -349,6 +349,7 @@ class SVoiceRecApp:
         self._keep_alive_timer: Optional[threading.Timer] = None
         self._keep_alive_lock = threading.Lock()  # atomic guard for keep-alive warmup
         self._completed_sessions: int = 0  # incremented on each finished recording session
+        self._session_had_cold_start: bool = False  # set when first chunk used cold-start timeout
         self._analysis_lock = threading.Lock()  # prevents concurrent prompt-analysis threads
         self._wake_observer = None  # macOS wake observer (set in start_wake_observer)
         self._preview_panel = None  # lazy-init on first use
@@ -698,6 +699,29 @@ class SVoiceRecApp:
         if self._completed_sessions % TRANSCRIBER_RESTART_AFTER_SESSIONS == 0:
             self.flush_dirty_config_if_needed()
             threading.Thread(target=self._restart_transcriber_for_memory, daemon=True).start()
+        if self._session_had_cold_start:
+            self._session_had_cold_start = False
+            threading.Thread(
+                target=self._do_post_cold_start_warmup, daemon=True, name="post-cold-warmup"
+            ).start()
+
+    def _do_post_cold_start_warmup(self) -> None:
+        """Send an extra warmup after a cold-start session to pre-heat GPU for the next session.
+
+        Runs in a background daemon thread. Waits 50 s so the 45 s pre_warm throttle
+        has expired, then calls warmup() (bypasses throttle) if the app is idle.
+        This addresses the pattern where sessions after a 13 h+ idle remain slow for
+        2-3 consecutive recordings because GPU weights are only partially reloaded.
+        """
+        import time as _time
+        _time.sleep(50)
+        if self.is_recording or self.is_processing:
+            return
+        log_info("Post-cold-start warmup: sending extra warmup to accelerate GPU recovery.")
+        try:
+            self.transcriber.warmup()
+        except Exception as e:
+            log_error(f"Post-cold-start warmup failed: {e}")
 
     def _do_error_cleanup(self) -> None:
         """Run on main thread on stop_recording error: clear status, notify."""
@@ -1237,6 +1261,7 @@ class SVoiceRecApp:
         self._buffered_final_text = None
         self.stop_worker.clear()
         self._session_id += 1  # Invalidate any lingering worker from previous session
+        self._session_had_cold_start = False
 
         # Fire-and-forget prewarm: the child transcriber process will run a tiny silent
         # transcription so GPU/MLX weights are warm by the time the first real chunk arrives.
@@ -1489,6 +1514,8 @@ class SVoiceRecApp:
                 or self._is_memory_pressure_high()
             )
             timeout_override = TRANSCRIBER_COLD_START_TIMEOUT_SECONDS if is_cold_start else None
+            if is_cold_start:
+                self._session_had_cold_start = True
 
             log_info(
                 "Processing audio chunk: "
@@ -1571,8 +1598,8 @@ class SVoiceRecApp:
                             self._submit_for_main_thread(self._send_memory_pressure_notification)
                         else:
                             word_count = len(full_text.split())
-                            if word_count <= 3:
-                                log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s)).")
+                            if word_count <= 3 or len(full_text) <= 60:
+                                log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s), {len(full_text)} chars).")
                             elif not is_external_api_editor and self.ai_editor.is_hallucination(full_text):
                                 log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
                             else:
