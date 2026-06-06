@@ -285,7 +285,7 @@ class SVoiceRecApp:
             device_id=self.config.get("device_id"),
             silence_threshold=self.config.get("silence_threshold", 0.01),
             silence_duration=self.config.get("silence_duration", 0.5),
-            target_speech_duration=self.config.get("target_speech_duration", 4.0),
+            target_speech_duration=self.config.get("target_speech_duration", 3.0),
             max_speech_duration=self.config.get("max_speech_duration", 8.0),
             min_speech_duration=self.config.get("min_speech_duration", 0.5),
             on_fatal_error=self._on_recorder_fatal_error,

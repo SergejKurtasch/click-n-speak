@@ -8,7 +8,7 @@
   "gemini_model": "gemini-2.5-flash-lite",
   "model_name": "mlx-community/whisper-large-v3-turbo",
   "silence_duration": 1.0,
-  "target_speech_duration": 4.0,
+  "target_speech_duration": 3.0,
   "max_speech_duration": 8.0,
   "min_speech_duration": 1.0,
   "autostart": false,

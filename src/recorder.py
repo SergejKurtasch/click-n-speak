@@ -31,7 +31,7 @@ class AudioRecorder:
         device_id=None,
         silence_threshold=0.01,
         silence_duration=0.5,
-        target_speech_duration=4.0,
+        target_speech_duration=3.0,
         max_speech_duration=8.0,
         min_speech_duration=0.5,
         on_fatal_error: Optional[Callable[[], None]] = None,
