@@ -282,6 +282,7 @@ class WhisperTranscriber:
         allowed_languages=None,
         condition_on_previous_text=True,
         is_final_chunk=False,
+        on_lang_retry=None,
     ):
         """
         Transcribes audio data using MLX Whisper.
@@ -382,6 +383,8 @@ class WhisperTranscriber:
                             log_info(
                                 f"Segment recognized as '{detected_lang}', retrying transcription with 0.1s padding..."
                             )
+                            if on_lang_retry is not None:
+                                on_lang_retry()
                             # Pad audio with 0.1s of silence (1600 samples at 16kHz) at both ends
                             # to shift the decoding window and potentially change the output language.
                             padded_audio = np.pad(audio_data, (1600, 1600), "constant")
@@ -561,12 +564,16 @@ class TranscriberProcessWrapper:
                         transcriber.transcribe(silence, is_final_chunk=False)
                         self.output_queue.put({"type": "prewarm_done"})
                 elif action == "transcribe":
+                    def _signal_lang_retry(oq=self.output_queue):
+                        oq.put({"type": "lang_retry_started"})
+
                     text = transcriber.transcribe(
                         cmd.get("audio_data"),
                         initial_prompt=cmd.get("initial_prompt"),
                         allowed_languages=cmd.get("allowed_languages"),
                         condition_on_previous_text=cmd.get("condition_on_previous_text", True),
-                        is_final_chunk=cmd.get("is_final_chunk", False)
+                        is_final_chunk=cmd.get("is_final_chunk", False),
+                        on_lang_retry=_signal_lang_retry,
                     )
                     self.output_queue.put({
                         "type": "transcription",
@@ -729,6 +736,10 @@ class TranscriberProcessWrapper:
                     self._last_transcribe_returned_at = time.time()
                     self.last_detected_language = res.get("language", "")
                     return res["text"]
+                elif res["type"] == "lang_retry_started":
+                    # Child is doing a language-mismatch retry — give it a full extra window.
+                    deadline = max(deadline, time.time() + effective_timeout)
+                    log_info("Transcriber: language retry in progress, extending deadline.")
                 elif res["type"] == "error":
                     log_error(f"Transcriber process error: {res['message']}\n{res.get('trace')}")
                     return ""

@@ -148,6 +148,10 @@ _TERM_STOPLIST: frozenset[str] = frozenset({
     "get", "has", "him", "his", "how", "man", "new", "now",
     "old", "see", "two", "way", "who", "its", "let", "put",
     "say", "she", "too", "use",
+    # Common prepositions / particles missing from the original list
+    "to", "in", "on", "of", "at", "be", "do", "go", "up",
+    "as", "an", "by", "if", "or", "so", "we", "my", "me",
+    "no", "is", "it", "he", "us", "ok", "vs", "hi",
 })
 
 # Public aliases for reuse in other analyzers.
@@ -234,6 +238,10 @@ def _collect_english_terms(
                 continue
             if term.count("/") > 1 or term.count(".") > 1:
                 continue
+            if len(term) < 3 and all(c.isalpha() for c in term):
+                continue  # 2-char plain-alpha: common particle (AI, in, on…)
+            if _whisper_token_count(term) == 1:
+                continue  # single BPE token → Whisper already knows it perfectly
             variant_counts[term] += 1
             if lower not in seen_lower_in_record:
                 term_sessions[lower].add(sid)
@@ -308,6 +316,10 @@ def _collect_raw_english_counts(
             if lower in _TERM_STOPLIST or lower in blacklist:
                 continue
             if term.count("/") > 1 or term.count(".") > 1:
+                continue
+            if len(term) < 3 and all(c.isalpha() for c in term):
+                continue
+            if _whisper_token_count(term) == 1:
                 continue
             variant_counts[term] += 1
 
@@ -433,11 +445,23 @@ def _collect_russian_bigrams(texts: Iterable[str]) -> Counter:
     Drops bigrams where either word is a function word, where both words are
     single Whisper BPE tokens (Whisper already knows them; no prompt value),
     or where the two words are identical (Whisper word-repetition hallucination).
+    Also drops bigrams where either word appears in >20% of all phrases — such
+    words are too common for Whisper to need hinting.
     Also drops reverse-duplicate pairs: if both "A B" and "B A" appear with
     similar counts (ratio ≥ 0.4) they are likely hallucinated and both are removed.
     """
+    texts_list = list(texts)
+    total = len(texts_list)
+
+    word_phrase_count: Counter = Counter()
+    for text in texts_list:
+        for w in set(_RUS_WORD_PATTERN.findall(text.lower())):
+            if len(w) >= 3:
+                word_phrase_count[w] += 1
+    max_word_phrases = max(10, total * 0.20)
+
     counter: Counter = Counter()
-    for text in texts:
+    for text in texts_list:
         words = _RUS_WORD_PATTERN.findall(text)
         words = [w.lower() for w in words if len(w) >= 3]
         for i in range(len(words) - 1):
@@ -448,6 +472,8 @@ def _collect_russian_bigrams(texts: Iterable[str]) -> Counter:
                 continue
             if max(_whisper_token_count(w1), _whisper_token_count(w2)) < 3:
                 continue
+            if word_phrase_count.get(w1, 0) > max_word_phrases or word_phrase_count.get(w2, 0) > max_word_phrases:
+                continue  # word too common across phrases → no prompt value
             counter[f"{w1} {w2}"] += 1
 
     # Remove reverse-duplicate pairs — a sign of Whisper generating the same

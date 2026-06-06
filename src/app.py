@@ -665,7 +665,7 @@ class SVoiceRecApp:
                     "",
                 )
                 self.config["last_notified_update_version"] = info.tag_name
-                save_config_to_disk(self.config, self.config_path)
+                save_config_to_disk(self.config)
 
             if self.menu_bar is not None:
                 self.menu_bar.set_update_available(info)
