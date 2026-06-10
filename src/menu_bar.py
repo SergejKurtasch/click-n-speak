@@ -861,8 +861,11 @@ class ClickNSpeakApp(rumps.App):
     @rumps.timer(1.0)
     def _run_wizard_if_pending(self, _) -> None:
         """One-shot timer: runs the setup wizard and checks Input Monitoring on first tick."""
-        # Check Input Monitoring and Microphone once after NSApp has started
-        if self._input_monitoring_ok is None:
+        # Check Input Monitoring only when no wizard/picker is pending.
+        # Calling CGEventTapCreate before the wizard triggers the TCC Input Monitoring
+        # dialog at the wrong time — before the wizard explains what the app needs.
+        # After the wizard runs, we refresh the state explicitly below.
+        if self._input_monitoring_ok is None and not self._wizard_pending and not self._language_picker_pending:
             self._input_monitoring_ok = check_input_monitoring()
             self._update_input_monitoring_item()
             if not self._input_monitoring_ok:
@@ -901,6 +904,11 @@ class ClickNSpeakApp(rumps.App):
                 self._update_accessibility_menu_item()
                 self._microphone_ok = check_microphone() == "granted"
                 self._update_microphone_item()
+                # Refresh Input Monitoring state after wizard — the wizard may have
+                # guided the user through granting it, so the cached False from
+                # before the wizard is now stale.
+                self._input_monitoring_ok = check_input_monitoring()
+                self._update_input_monitoring_item()
             except Exception as exc:
                 log_error(f"Setup wizard error: {exc}")
 
