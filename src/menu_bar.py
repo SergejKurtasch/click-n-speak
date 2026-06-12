@@ -146,6 +146,12 @@ _MODEL_SIZE_BYTES: dict[str, int] = {
 }
 
 from .ai_editor import get_gemini_api_key, set_gemini_api_key
+from .cloud_transcriber import (
+    CLOUD_STT_MODELS,
+    DEFAULT_CLOUD_STT_MODEL,
+    get_openai_api_key,
+    set_openai_api_key,
+)
 from .phrase_history import get_last_phrases
 from .updater import check_for_update
 from .permissions import (
@@ -226,12 +232,14 @@ try:
         """
 
         @_objc.python_method
-        def configure(self, config: dict, on_primary, on_additional) -> None:
+        def configure(self, config: dict, on_primary, on_additional, on_auto=None) -> None:
             self._config = config
             self._on_primary = on_primary
             self._on_additional = on_additional
+            self._on_auto = on_auto
             self._primary_btns: dict = {}
             self._additional_btns: dict = {}
+            self._auto_btn = None
 
         @_objc.python_method
         def build_submenu(self):
@@ -253,6 +261,7 @@ try:
 
             primary = self._config.get("primary_language", "ru")
             additional = list(self._config.get("additional_languages") or [])
+            is_auto = bool(self._config.get("language_auto_detect"))
 
             def _header_item(text: str) -> None:
                 view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, HEADER_H))
@@ -271,6 +280,22 @@ try:
                 mi.setEnabled_(False)
                 menu.addItem_(mi)
 
+            def _auto_item() -> None:
+                view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, ROW_H))
+                btn = NSButton.alloc().initWithFrame_(
+                    NSMakeRect(MARGIN, 1, VIEW_W - 2 * MARGIN, ROW_H - 2)
+                )
+                btn.setButtonType_(NSButtonTypeRadio)
+                btn.setTitle_("Auto — detect language")
+                btn.setState_(NSControlStateValueOn if is_auto else NSControlStateValueOff)
+                btn.setTarget_(self)
+                btn.setAction_("autoClicked:")
+                view.addSubview_(btn)
+                self._auto_btn = btn
+                mi = NSMenuItem.alloc().init()
+                mi.setView_(view)
+                menu.addItem_(mi)
+
             def _radio_item(idx: int, lang: str) -> None:
                 view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, ROW_H))
                 btn = NSButton.alloc().initWithFrame_(
@@ -278,7 +303,7 @@ try:
                 )
                 btn.setButtonType_(NSButtonTypeRadio)
                 btn.setTitle_(LANG_LABELS[lang])
-                btn.setState_(NSControlStateValueOn if lang == primary else NSControlStateValueOff)
+                btn.setState_(NSControlStateValueOn if (lang == primary and not is_auto) else NSControlStateValueOff)
                 btn.setTarget_(self)
                 btn.setAction_("primaryClicked:")
                 btn.setTag_(idx)
@@ -295,7 +320,7 @@ try:
                 )
                 btn.setButtonType_(NSButtonTypeSwitch)
                 btn.setTitle_(LANG_LABELS[lang])
-                btn.setState_(NSControlStateValueOn if lang in additional else NSControlStateValueOff)
+                btn.setState_(NSControlStateValueOn if (lang in additional and not is_auto) else NSControlStateValueOff)
                 btn.setTarget_(self)
                 btn.setAction_("additionalClicked:")
                 btn.setTag_(idx)
@@ -305,6 +330,8 @@ try:
                 mi.setView_(view)
                 menu.addItem_(mi)
 
+            _auto_item()
+            menu.addItem_(NSMenuItem.separatorItem())
             _header_item("Primary Language")
             for i, lang in enumerate(LANGS):
                 _radio_item(i, lang)
@@ -324,17 +351,39 @@ try:
             lang = LANGS[idx]
             for lk, btn in self._primary_btns.items():
                 btn.setState_(NSControlStateValueOn if lk == lang else NSControlStateValueOff)
+            if self._auto_btn is not None:
+                self._auto_btn.setState_(NSControlStateValueOff)
             self._on_primary(lang)
 
         def additionalClicked_(self, sender):
-            from AppKit import NSControlStateValueOn
+            from AppKit import NSControlStateValueOn, NSControlStateValueOff
             idx = sender.tag()
             if idx < 0 or idx >= len(LANGS):
                 return
             lang = LANGS[idx]
+            was_auto = (
+                self._auto_btn is not None
+                and self._auto_btn.state() == NSControlStateValueOn
+            )
+            if self._auto_btn is not None:
+                self._auto_btn.setState_(NSControlStateValueOff)
+            if was_auto:
+                # Restore primary language radio visually when leaving auto mode
+                primary = self._config.get("primary_language", "ru")
+                for lk, btn in self._primary_btns.items():
+                    btn.setState_(NSControlStateValueOn if lk == primary else NSControlStateValueOff)
             # NSButton (Switch type) auto-toggles before the action fires;
             # sender.state() already reflects the new state.
             self._on_additional(lang, sender.state() == NSControlStateValueOn)
+
+        def autoClicked_(self, sender):
+            from AppKit import NSControlStateValueOff
+            for btn in self._primary_btns.values():
+                btn.setState_(NSControlStateValueOff)
+            for btn in self._additional_btns.values():
+                btn.setState_(NSControlStateValueOff)
+            if self._on_auto is not None:
+                self._on_auto()
 
     _HAVE_LANG_MENU = True
 
@@ -1073,6 +1122,8 @@ class ClickNSpeakApp(rumps.App):
 
         # Model selection submenu
         current_model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
+        current_backend = self.config.get("stt_backend", "local")
+        current_cloud_model = self.config.get("stt_cloud_model", DEFAULT_CLOUD_STT_MODEL)
         self._model_menu_item = rumps.MenuItem(i18n.t("menu.model"), **_icon("model"))
         self.menu.add(self._model_menu_item)
 
@@ -1080,6 +1131,49 @@ class ClickNSpeakApp(rumps.App):
             model_ns_menu = _NSMenuRow.alloc().initWithTitle_("Model")
             model_ns_menu.setAutoenablesItems_(False)
             self._model_menu_item._menuitem.setSubmenu_(model_ns_menu)
+
+            def _section_header(text: str):
+                view = _NSViewRow.alloc().initWithFrame_(_NSMakeRectRow(0, 0, _MODEL_ROW_W, 20))
+                lbl = _NSTextFieldRow.alloc().initWithFrame_(_NSMakeRectRow(14, 2, _MODEL_ROW_W - 28, 16))
+                lbl.setStringValue_(text)
+                lbl.setBezeled_(False)
+                lbl.setDrawsBackground_(False)
+                lbl.setEditable_(False)
+                lbl.setSelectable_(False)
+                lbl.setFont_(_NSFontRow.boldSystemFontOfSize_(11))
+                view.addSubview_(lbl)
+                mi = _NSMenuItemRow.alloc().init()
+                mi.setView_(view)
+                mi.setEnabled_(False)
+                return mi
+
+            model_ns_menu.addItem_(_section_header(i18n.t("menu.stt_cloud_section")))
+
+            for backend in ("gemini", "openai"):
+                for label, model_id in CLOUD_STT_MODELS[backend]:
+                    row_key = f"cloud:{backend}:{model_id}"
+                    delegate = _ModelRowDelegate.alloc().init().configure(
+                        ns_menu=model_ns_menu,
+                        switch_fn=lambda b=backend, mid=model_id, lbl=label: self._do_switch_cloud_model(b, mid, lbl),
+                        delete_fn=None,
+                    )
+                    ns_item, icon_view, lbl_field, trash_btn = _build_model_row_ns_item(delegate)
+                    lbl_field.setStringValue_(label)
+                    is_active = current_backend == backend and current_cloud_model == model_id
+                    ns_item.setState_(1 if is_active else 0)
+                    model_ns_menu.addItem_(ns_item)
+
+                    self._model_row_refs[row_key] = {
+                        "ns_item": ns_item,
+                        "icon_view": icon_view,
+                        "label": lbl_field,
+                        "trash_btn": trash_btn,
+                        "delegate": delegate,
+                    }
+                    self._update_model_row_view(row_key)
+
+            model_ns_menu.addItem_(_NSMenuItemRow.separatorItem())
+            model_ns_menu.addItem_(_section_header(i18n.t("menu.stt_local_section")))
 
             for label, model_id in WHISPER_MODELS:
                 delegate = _ModelRowDelegate.alloc().init().configure(
@@ -1090,7 +1184,8 @@ class ClickNSpeakApp(rumps.App):
                 ns_item, icon_view, lbl_field, trash_btn = _build_model_row_ns_item(delegate)
                 size = WHISPER_MODEL_SIZES.get(model_id, "?")
                 lbl_field.setStringValue_(f"{label} · {size}")
-                ns_item.setState_(1 if model_id == current_model else 0)
+                is_active = current_backend == "local" and model_id == current_model
+                ns_item.setState_(1 if is_active else 0)
                 model_ns_menu.addItem_(ns_item)
 
                 self._model_row_refs[model_id] = {
@@ -1102,15 +1197,31 @@ class ClickNSpeakApp(rumps.App):
                 }
         else:
             # Fallback: plain rumps items (no inline trash button)
+            self._cloud_model_label_map: dict[str, tuple[str, str]] = {}
+            for backend in ("gemini", "openai"):
+                for label, model_id in CLOUD_STT_MODELS[backend]:
+                    item = rumps.MenuItem(label, callback=self.change_model_cloud)
+                    if current_backend == backend and current_cloud_model == model_id:
+                        item.state = 1
+                    self._cloud_model_label_map[label] = (backend, model_id)
+                    self._model_menu_item.add(item)
+            self._model_menu_item.add(None)
+
             _dl_icon = get_menu_item_icon_path("download-model")
             for label, model_id in WHISPER_MODELS:
                 size = WHISPER_MODEL_SIZES.get(model_id, "?")
                 item = rumps.MenuItem(f"{label} · {size}", callback=self.change_model)
                 if _dl_icon:
                     item.set_icon(str(_dl_icon), dimensions=[16, 16], template=True)
-                if model_id == current_model:
+                if current_backend == "local" and model_id == current_model:
                     item.state = 1
                 self._model_menu_item.add(item)
+
+        # API Keys submenu — Gemini (AI editor + cloud STT) and OpenAI (cloud STT)
+        api_keys_menu = rumps.MenuItem(i18n.t("menu.api_keys"), **_icon("api-keys"))
+        api_keys_menu.add(rumps.MenuItem(i18n.t("menu.gemini_api_key"), callback=self._on_set_gemini_api_key))
+        api_keys_menu.add(rumps.MenuItem(i18n.t("menu.openai_api_key"), callback=self._on_set_openai_api_key))
+        self.menu.add(api_keys_menu)
 
         # Language selection — native submenu, stays open after clicks via NSMenuItem.setView_()
         lang_item = rumps.MenuItem(i18n.t("menu.languages"), **_icon("languages"))
@@ -1122,6 +1233,7 @@ class ClickNSpeakApp(rumps.App):
                     self.config,
                     self._apply_primary_language,
                     self._apply_additional_language,
+                    self._apply_auto_detect,
                 )
                 ns_submenu = self._lang_menu_controller.build_submenu()
                 lang_item._menuitem.setSubmenu_(ns_submenu)
@@ -1141,8 +1253,6 @@ class ClickNSpeakApp(rumps.App):
         self._ai_backend_gemini_item = rumps.MenuItem(i18n.t("menu.ai_gemini"), callback=self._on_set_ai_backend_gemini)
         self._ai_backend_submenu.add(self._ai_backend_local_item)
         self._ai_backend_submenu.add(self._ai_backend_gemini_item)
-        self._ai_backend_submenu.add(None)
-        self._ai_backend_submenu.add(rumps.MenuItem(i18n.t("menu.set_gemini_key"), callback=self._on_set_gemini_api_key))
         self.menu.add(self._ai_backend_submenu)
         self._update_ai_backend_submenu_state()
 
@@ -1445,9 +1555,26 @@ class ClickNSpeakApp(rumps.App):
         refs = self._model_row_refs.get(model_id)
         if not refs:
             return
+
+        if model_id.startswith("cloud:"):
+            _, backend, cloud_model_id = model_id.split(":", 2)
+            label_name = next(
+                (l for l, mid in CLOUD_STT_MODELS.get(backend, []) if mid == cloud_model_id),
+                cloud_model_id,
+            )
+            is_active = (
+                self.config.get("stt_backend") == backend
+                and self.config.get("stt_cloud_model", DEFAULT_CLOUD_STT_MODEL) == cloud_model_id
+            )
+            refs["label"].setStringValue_(label_name)
+            refs["icon_view"].setImage_(self._get_model_left_nsimage(model_id, is_active, True, None))
+            refs["trash_btn"].setHidden_(True)
+            refs["ns_item"].setState_(1 if is_active else 0)
+            return
+
         label_name = next((l for l, mid in WHISPER_MODELS if mid == model_id), model_id)
         is_cached = self._cached_models.get(model_id, False)
-        is_active = self.config.get("model_name") == model_id
+        is_active = self.config.get("stt_backend", "local") == "local" and self.config.get("model_name") == model_id
         state = self._download_state.get(model_id)
         pct = self._download_progress.get(model_id, 0)
 
@@ -1483,7 +1610,7 @@ class ClickNSpeakApp(rumps.App):
             return
 
         log_info(f"Switching model to {model_id}")
-        self.main_app.update_config({"model_name": model_id})
+        self.main_app.update_config({"model_name": model_id, "stt_backend": "local"})
 
         if self._model_row_refs:
             for mid in self._model_row_refs:
@@ -1506,6 +1633,43 @@ class ClickNSpeakApp(rumps.App):
             log_error(f"change_model: unknown label '{clean_label}'")
             return
         self._do_switch_model(model_id, clean_label)
+
+    def _do_switch_cloud_model(self, backend: str, model_id: str, label: str) -> None:
+        """Switch the STT backend to a cloud provider model.
+
+        Prompts for an API key if none is configured yet; the switch is
+        aborted if the user cancels the key dialog without saving one.
+        """
+        get_key = get_gemini_api_key if backend == "gemini" else get_openai_api_key
+        if not get_key():
+            self._show_api_key_dialog(backend)
+            if not get_key():
+                return
+
+        log_info(f"Switching STT backend to {backend}/{model_id}")
+        self.main_app.update_config({"stt_backend": backend, "stt_cloud_model": model_id})
+
+        if self._model_row_refs:
+            for mid in self._model_row_refs:
+                self._update_model_row_view(mid)
+        else:
+            for item in self._model_menu_item.values():
+                if hasattr(item, "state"):
+                    item.state = 0
+            for item in self._model_menu_item.values():
+                if getattr(item, "title", "") == label:
+                    item.state = 1
+                    break
+
+    def change_model_cloud(self, sender):
+        """Fallback callback used when custom row views are unavailable."""
+        mapping = getattr(self, "_cloud_model_label_map", {})
+        entry = mapping.get(sender.title)
+        if not entry:
+            log_error(f"change_model_cloud: unknown label '{sender.title}'")
+            return
+        backend, model_id = entry
+        self._do_switch_cloud_model(backend, model_id, sender.title)
 
     def _is_whisper_model_cached(self, model_id: str) -> bool:
         """Return True if the model is fully present in the local HuggingFace cache.
@@ -1708,7 +1872,7 @@ class ClickNSpeakApp(rumps.App):
         self._cached_models[model_id] = True
 
         # Switch active model — no restart needed
-        self.main_app.update_config({"model_name": model_id})
+        self.main_app.update_config({"model_name": model_id, "stt_backend": "local"})
 
         # Refresh all rows (icon, trash btn, checkmark)
         self._refresh_model_menu_titles()
@@ -1815,6 +1979,7 @@ class ClickNSpeakApp(rumps.App):
     def _apply_primary_language(self, lang: str) -> None:
         """Apply a primary language change (called from the language panel)."""
         log_info(f"Setting primary language to {lang}")
+        self.config["language_auto_detect"] = False
         self.config["primary_language"] = lang
         self._update_language_hint_and_prompt()
         # update_config saves to disk and calls load_config_data internally —
@@ -1824,6 +1989,7 @@ class ClickNSpeakApp(rumps.App):
 
     def _apply_additional_language(self, lang: str, is_on: bool) -> None:
         """Toggle an additional language (called from the language panel)."""
+        self.config["language_auto_detect"] = False
         additional = list(self.config.get("additional_languages") or [])
         if not additional and isinstance(self.config.get("languages"), list) and len(self.config["languages"]) > 1:
             additional = [str(x).lower().strip() for x in self.config["languages"][1:] if x]
@@ -1834,6 +2000,14 @@ class ClickNSpeakApp(rumps.App):
         self.config["additional_languages"] = additional
         self._update_language_hint_and_prompt()
         log_info(f"Additional languages: {additional}")
+        self.main_app.update_config(self.config)
+
+    def _apply_auto_detect(self) -> None:
+        """Switch to auto-detect mode: Whisper receives no language hint."""
+        log_info("Setting language to auto-detect mode")
+        self.config["language_auto_detect"] = True
+        self.config["additional_languages"] = []
+        self._update_language_hint_and_prompt()
         self.main_app.update_config(self.config)
 
     def _update_language_hint_and_prompt(self):
@@ -2504,25 +2678,16 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.notify(i18n.t("notify.settings_title"), i18n.t("notify.update_mode_body", mode=mode_label))
 
     def transcribe_audio_file(self, _: rumps.MenuItem) -> None:
-        """Opens a file selection dialog and starts file transcription."""
+        """Opens the drop-zone window for audio file selection."""
         if self.main_app.is_recording or self.main_app.is_processing:
             self.main_app.notify(i18n.t("notify.busy_title"), i18n.t("notify.busy_processing"))
             return
 
         try:
-            # osascript dialog to pick a file
-            script = 'set theFile to choose file with prompt "Select Audio File" of type {"public.audio", "wav", "m4a"} \n POSIX path of theFile'
-            result = subprocess.check_output(['osascript', '-e', script])
-            file_path = result.decode('utf-8').strip()
-            
-            if file_path and os.path.exists(file_path):
-                self.main_app.start_file_transcription(file_path)
-            
-        except subprocess.CalledProcessError:
-            # User canceled the dialog
-            pass
+            from .file_drop_panel import FileDropPanel
+            FileDropPanel(self.main_app.start_file_transcription).show()
         except Exception as e:
-            log_error(f"Error selecting audio file: {e}")
+            log_error(f"Error opening file drop panel: {e}")
             self.main_app.notify(i18n.t("notify.record_error_title"), i18n.t("notify.file_open_error"))
 
     # ------------------------------------------------------------------
@@ -2951,26 +3116,43 @@ class ClickNSpeakApp(rumps.App):
 
     # Strict format check: "AIzaSy" + 33 base64url chars = 39 chars total
     _GEMINI_KEY_RE = __import__("re").compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
+    # OpenAI keys: "sk-" prefix followed by at least 10 token chars
+    _OPENAI_KEY_RE = __import__("re").compile(r"^sk-[A-Za-z0-9_\-]{10,}$")
 
     def _on_set_gemini_api_key(self, _) -> None:
-        """Show a dialog to enter and save the Gemini API key to macOS Keychain."""
+        self._show_api_key_dialog("gemini")
+
+    def _on_set_openai_api_key(self, _) -> None:
+        self._show_api_key_dialog("openai")
+
+    def _show_api_key_dialog(self, provider: str) -> None:
+        """Show a dialog to enter and save a cloud API key (Gemini/OpenAI) to macOS Keychain."""
+        if provider == "gemini":
+            title_key, body_key, body_existing_key = "dialog.gemini_key_title", "dialog.gemini_key_body", "dialog.gemini_key_body_existing"
+            placeholder, key_re = "AIzaSy…", self._GEMINI_KEY_RE
+            get_key, set_key = get_gemini_api_key, set_gemini_api_key
+        else:
+            title_key, body_key, body_existing_key = "dialog.openai_key_title", "dialog.openai_key_body", "dialog.openai_key_body_existing"
+            placeholder, key_re = "sk-…", self._OPENAI_KEY_RE
+            get_key, set_key = get_openai_api_key, set_openai_api_key
+
         try:
             from AppKit import NSAlert, NSSecureTextField, NSMakeRect, NSApp, NSPasteboard, NSPasteboardTypeString, NSFloatingWindowLevel  # type: ignore
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(i18n.t("dialog.gemini_key_title"))
-            existing = get_gemini_api_key()
-            hint = i18n.t("dialog.gemini_key_body_existing") if existing else i18n.t("dialog.gemini_key_body")
+            alert.setMessageText_(i18n.t(title_key))
+            existing = get_key()
+            hint = i18n.t(body_existing_key) if existing else i18n.t(body_key)
             alert.setInformativeText_(hint)
             alert.addButtonWithTitle_(i18n.t("btn.save"))
             alert.addButtonWithTitle_(i18n.t("btn.cancel"))
 
             field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
-            field.setPlaceholderString_("AIzaSy…")
+            field.setPlaceholderString_(placeholder)
 
-            # Auto-fill from clipboard only if it matches the exact Gemini key format
+            # Auto-fill from clipboard only if it matches the exact key format for this provider
             pb = NSPasteboard.generalPasteboard()
             candidate = (pb.stringForType_(NSPasteboardTypeString) or "").strip()
-            if self._GEMINI_KEY_RE.match(candidate):
+            if key_re.match(candidate):
                 field.setStringValue_(candidate)
 
             alert.setAccessoryView_(field)
@@ -2988,14 +3170,14 @@ class ClickNSpeakApp(rumps.App):
                 key = field.stringValue().strip()
                 if key:
                     try:
-                        set_gemini_api_key(key)
-                        log_info("Gemini API key saved to Keychain.")
+                        set_key(key)
+                        log_info(f"{provider.capitalize()} API key saved to Keychain.")
                         self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_key_saved"))
                     except Exception as save_exc:
-                        log_error(f"Failed to save Gemini API key to Keychain: {save_exc}")
+                        log_error(f"Failed to save {provider} API key to Keychain: {save_exc}")
                         self.main_app.notify(i18n.t("notify.ai_editor_error_title"), i18n.t("notify.ai_key_error", err=str(save_exc)))
         except Exception as exc:
-            log_error(f"Set Gemini API key dialog failed: {exc}")
+            log_error(f"Set {provider} API key dialog failed: {exc}")
 
     def _download_ai_model(self, _) -> None:
         """Open a new Terminal window and run the download script with visible progress."""

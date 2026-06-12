@@ -33,6 +33,7 @@ from .correction_analyzer import (
     get_correction_candidates,
 )
 from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS, FileTranscriptionError
+from .cloud_transcriber import CloudSTTTranscriber, DEFAULT_CLOUD_STT_MODEL
 from .vocab_provider import (
     add_term_to_user_terms,
     apply_replacements,
@@ -65,6 +66,8 @@ from .utils import (
     migrate_config_to_v5,
     migrate_config_to_v6,
     migrate_config_to_v7,
+    migrate_config_to_v8,
+    migrate_config_to_v9,
     normalize_ukrainian_lang_codes,
     save_config_to_disk,
     send_notification,
@@ -290,9 +293,7 @@ class SVoiceRecApp:
             min_speech_duration=self.config.get("min_speech_duration", 0.5),
             on_fatal_error=self._on_recorder_fatal_error,
         )
-        self.transcriber = TranscriberProcessWrapper(
-            model_name=self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
-        )
+        self.transcriber = self._create_transcriber(self.config)
         # AI Editor: optional LLM post-processing for punctuation and cleanup.
         # Backend is chosen by config["ai_editor_backend"]: "local" (MLX) or "gemini".
         self.ai_editor: Optional[AiEditor] = None
@@ -531,6 +532,8 @@ class SVoiceRecApp:
         data = migrate_config_to_v5(data)
         data = migrate_config_to_v6(data)
         data = migrate_config_to_v7(data)
+        data = migrate_config_to_v8(data)
+        data = migrate_config_to_v9(data)
         data = normalize_ukrainian_lang_codes(data)
         self.config = data
         self.config.setdefault("last_metrics_snapshot_ts", None)
@@ -542,9 +545,20 @@ class SVoiceRecApp:
         if hasattr(self, "recorder"):
             self.update_recorder_settings()
         if hasattr(self, "transcriber"):
-            model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
-            if self.transcriber.model_name != model:
-                self.update_transcriber(model)
+            new_backend = self.config.get("stt_backend", "local")
+            old_backend = getattr(self.transcriber, "backend", "local")
+            if new_backend != old_backend:
+                log_info(f"STT backend changed: {old_backend} -> {new_backend}")
+                self.transcriber.stop()
+                self.transcriber = self._create_transcriber(self.config)
+            elif new_backend == "local":
+                model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
+                if self.transcriber.model_name != model:
+                    self.update_transcriber(model)
+            else:
+                cloud_model = self.config.get("stt_cloud_model", DEFAULT_CLOUD_STT_MODEL)
+                if self.transcriber.model_name != cloud_model:
+                    self.transcriber.update_model(cloud_model)
 
     def update_config(self, updates):
         """Update config with a dict of key-value pairs, save and reload."""
@@ -1220,6 +1234,18 @@ class SVoiceRecApp:
         """Run daily background maintenance tasks (decay + metrics)."""
         self.run_decay_if_due()
         threading.Thread(target=self.run_metrics_if_due, daemon=True).start()
+
+    def _create_transcriber(self, config):
+        """Instantiate the transcriber backend selected by config["stt_backend"]."""
+        backend = config.get("stt_backend", "local")
+        if backend in ("gemini", "openai"):
+            return CloudSTTTranscriber(
+                backend=backend,
+                model_name=config.get("stt_cloud_model", DEFAULT_CLOUD_STT_MODEL),
+            )
+        return TranscriberProcessWrapper(
+            model_name=config.get("model_name", "mlx-community/whisper-large-v3-turbo")
+        )
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")

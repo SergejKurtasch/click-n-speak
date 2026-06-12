@@ -462,7 +462,12 @@ _WHISPER_LANG_CODE: dict[str, str] = {"ua": "uk"}
 
 
 def get_allowed_languages(config: dict) -> list[str]:
-    """Return the list of languages allowed for recognition: primary + additional (no duplicates)."""
+    """Return the list of languages allowed for recognition: primary + additional (no duplicates).
+
+    Returns [] when language_auto_detect is True — Whisper will auto-detect the language.
+    """
+    if config.get("language_auto_detect"):
+        return []
     primary = normalize_lang_code(get_primary_language(config))
     additional = config.get("additional_languages")
     if not isinstance(additional, list):
@@ -803,7 +808,11 @@ def build_initial_prompt(config: dict) -> str:
     Token-accurate truncation: adds terms one-by-one until the BPE token budget
     (_MAX_PROMPT_TOKENS) is reached, so Cyrillic-heavy prompts don't silently
     overflow Whisper's 224-token limit.
+
+    Returns "" when language_auto_detect is True — Whisper receives no hint.
     """
+    if config.get("language_auto_detect"):
+        return ""
     primary = get_primary_language(config)
     additional = list(config.get("additional_languages") or [])
 
@@ -1045,6 +1054,36 @@ def migrate_config_to_v7(config: dict) -> dict:
 
     config.setdefault("last_notified_update_version", None)
     config["schema_version"] = 7
+    return config
+
+
+def migrate_config_to_v8(config: dict) -> dict:
+    """Add language_auto_detect for pure auto-detection mode (no language hint to Whisper).
+
+    Idempotent when schema_version >= 8.
+    """
+    if config.get("schema_version", 1) >= 8:
+        config.setdefault("language_auto_detect", False)
+        return config
+
+    config.setdefault("language_auto_detect", False)
+    config["schema_version"] = 8
+    return config
+
+
+def migrate_config_to_v9(config: dict) -> dict:
+    """Add stt_backend / stt_cloud_model for cloud speech-to-text selection.
+
+    Idempotent when schema_version >= 9.
+    """
+    if config.get("schema_version", 1) >= 9:
+        config.setdefault("stt_backend", "local")
+        config.setdefault("stt_cloud_model", "gemini-2.5-flash-lite")
+        return config
+
+    config.setdefault("stt_backend", "local")
+    config.setdefault("stt_cloud_model", "gemini-2.5-flash-lite")
+    config["schema_version"] = 9
     return config
 
 
