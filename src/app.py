@@ -773,6 +773,25 @@ class SVoiceRecApp:
                     _prompt_hash = hashlib.md5(
                         self.config.get("initial_prompt", "").encode()
                     ).hexdigest()[:12]
+
+                    # Cloud backends (gemini, openai) both use stt_cloud_model
+                    _stt_backend = self.config.get("stt_backend", "local")
+                    _stt_model = (
+                        self.config.get("model_name")
+                        if _stt_backend == "local"
+                        else self.config.get("stt_cloud_model")
+                    )
+
+                    # Only log ai_model when AI Editor is actually enabled
+                    _ai_model = None
+                    if self.config.get("ai_editor_enabled", False):
+                        _ai_backend = self.config.get("ai_editor_backend", "local")
+                        _ai_model = (
+                            self.config.get("gemini_model")
+                            if _ai_backend == "gemini"
+                            else self.config.get("ai_editor_model")
+                        )
+
                     append_to_dataset(
                         self._raw_whisper_text,
                         self._ai_edited_text,
@@ -781,6 +800,8 @@ class SVoiceRecApp:
                         lang=_detected_lang,
                         user_terms_for_lang=_active_terms,
                         prompt_hash=_prompt_hash,
+                        stt_model=_stt_model,
+                        ai_model=_ai_model,
                     )
                     log_info("_run_injection: dataset saved")
 

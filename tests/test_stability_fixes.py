@@ -226,11 +226,6 @@ def test_is_processing_reset_on_worker_timeout():
          patch("src.app.TranscriberProcessWrapper"), \
          patch("src.app.HotkeyHandler"), \
          patch("src.app.send_notification"), \
-         patch("src.app.get_ui_strings", return_value={
-             "transcribing_title": "", "transcribing_body": "",
-             "still_working_title": "", "still_working_body": "",
-             "ready_title": "", "ready_body": "",
-         }), \
          patch("src.app.get_primary_language", return_value="ru"), \
          patch("src.app.log_info"), \
          patch("src.app.log_error"), \
@@ -247,6 +242,7 @@ def test_is_processing_reset_on_worker_timeout():
         app.recorder = MagicMock()
         app.recorder.stop.return_value = None
         app.transcriber = MagicMock()
+        app.transcriber._last_transcribe_returned_at = 0.0
         app.menu_bar = None
         app._main_thread_queue = queue.Queue()
         app._transcription_cycle_id = 0

@@ -85,6 +85,8 @@ def test_record_shape_has_new_fields():
         lang="en",
         user_terms_for_lang=["MLX", "GitHub"],
         prompt_hash="abc123def456",
+        stt_model="mlx-community/whisper-large-v3-turbo",
+        ai_model="gemini-2.5-flash",
     )
 
     record = json.loads(Path(path).read_text(encoding="utf-8").strip())
@@ -96,6 +98,8 @@ def test_record_shape_has_new_fields():
     assert "vocab_terms_in_final" in record
     assert "mlx" in record["vocab_terms_in_raw"]
     assert "mlx" in record["vocab_terms_in_final"]
+    assert record["stt_model"] == "mlx-community/whisper-large-v3-turbo"
+    assert record["ai_model"] == "gemini-2.5-flash"
 
 
 def test_record_shape_without_new_fields():
@@ -115,6 +119,8 @@ def test_record_shape_without_new_fields():
     assert record["prompt_hash"] is None
     assert record["vocab_terms_in_raw"] == []
     assert record["vocab_terms_in_final"] == []
+    assert record["stt_model"] is None
+    assert record["ai_model"] is None
 
 
 def test_record_preserves_existing_fields():
@@ -135,3 +141,42 @@ def test_record_preserves_existing_fields():
     assert record["user_final"] == "final"
     assert record["ai_status"] == "ok"
     assert "timestamp" in record
+
+
+def test_record_model_fields_stored():
+    """stt_model and ai_model are saved in the record when provided."""
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+        path = f.name
+
+    append_to_dataset(
+        raw_text="test",
+        ai_text="test.",
+        user_final_text="test.",
+        ai_status="ok",
+        dataset_path=path,
+        stt_model="mlx-community/whisper-large-v3-turbo",
+        ai_model="mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    )
+
+    record = json.loads(Path(path).read_text(encoding="utf-8").strip())
+    assert record["stt_model"] == "mlx-community/whisper-large-v3-turbo"
+    assert record["ai_model"] == "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+
+
+def test_record_ai_model_none_when_disabled():
+    """ai_model should be None when AI Editor is disabled (mirrors P1 fix)."""
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+        path = f.name
+
+    append_to_dataset(
+        raw_text="test",
+        ai_text=None,
+        user_final_text="test",
+        dataset_path=path,
+        stt_model="mlx-community/whisper-large-v3-turbo",
+        ai_model=None,
+    )
+
+    record = json.loads(Path(path).read_text(encoding="utf-8").strip())
+    assert record["stt_model"] == "mlx-community/whisper-large-v3-turbo"
+    assert record["ai_model"] is None
