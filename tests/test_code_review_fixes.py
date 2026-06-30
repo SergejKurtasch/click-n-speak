@@ -112,6 +112,20 @@ class TestWarmupTimeout(unittest.TestCase):
         self.assertTrue(app.model_ready_event.is_set())
         self.assertFalse(app._model_warming)
 
+    def test_ai_editor_initialization_waits_for_whisper_warmup(self):
+        """Startup must give Whisper GPU priority before loading local Qwen."""
+        app = _make_app()
+        app.config["ai_editor_enabled"] = True
+        app.ai_editor = None
+        app.gemini_editor = None
+        app._init_ai_editor = MagicMock()
+        app.transcriber.output_queue.put({"type": "warmup_done"})
+
+        app._model_warmup_worker()
+
+        app.transcriber.warmup.assert_called_once()
+        app._init_ai_editor.assert_called_once_with()
+
 
 # ---------------------------------------------------------------------------
 # 2. AiEditor load worker race — self.ai_editor set to None mid-load
@@ -170,14 +184,40 @@ class TestDeadConstantRemoved(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestKeepAliveLock(unittest.TestCase):
+    def test_local_mlx_operations_are_serialized(self):
+        """Parent-side gate must prevent overlapping local MLX operations."""
+        app = _make_app()
+        state = {"active": 0, "max_active": 0}
+        state_lock = threading.Lock()
+
+        def _operation():
+            with state_lock:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            time.sleep(0.05)
+            with state_lock:
+                state["active"] -= 1
+
+        threads = [
+            threading.Thread(target=lambda: app._run_local_mlx(_operation), daemon=True)
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1.0)
+
+        self.assertEqual(state["max_active"], 1)
+
     def test_concurrent_warmups_run_only_once(self):
         """Two concurrent _do_keep_alive_warmup calls must send at most one pre_warm."""
         app = _make_app()
         call_count = {"n": 0}
 
-        def _fake_prewarm():
+        def _fake_prewarm(*, wait=False):
             call_count["n"] += 1
             time.sleep(0.1)  # hold the lock while second thread arrives
+            return True
 
         app.transcriber.pre_warm = _fake_prewarm
 
@@ -190,6 +230,53 @@ class TestKeepAliveLock(unittest.TestCase):
         t2.join(timeout=2.0)
 
         self.assertEqual(call_count["n"], 1, "pre_warm() must be called exactly once")
+
+    def test_normal_keepalive_does_not_clear_metal_cache(self):
+        """Confirmed normal prewarm must preserve the existing Metal cache."""
+        app = _make_app()
+        app.transcriber.pre_warm.return_value = True
+
+        app._do_keep_alive_warmup()
+
+        app.transcriber.pre_warm.assert_called_once_with(wait=True)
+        app.transcriber.clear_cache.assert_not_called()
+
+    def test_keepalive_does_not_prewarm_local_editor(self):
+        """Runtime keep-alive must not let Qwen contend with Whisper."""
+        app = _make_app()
+        app.transcriber.pre_warm.return_value = True
+        app.ai_editor = MagicMock()
+        app.ai_editor.is_ready.return_value = True
+
+        app._do_keep_alive_warmup()
+
+        app.ai_editor.pre_warm.assert_not_called()
+
+    def test_start_recording_does_not_enqueue_model_prewarm(self):
+        """Hotkey path must prioritize the first real audio chunk."""
+        app = _make_app()
+        app.worker_thread = None
+        app._preview_panel = MagicMock()
+        app.chunk_worker = MagicMock()
+        app.recorder.recording = True
+        app.ai_editor = MagicMock()
+        app.ai_editor.is_ready.return_value = True
+
+        app.start_recording()
+        if app.worker_thread is not None:
+            app.worker_thread.join(timeout=1.0)
+
+        app.transcriber.pre_warm.assert_not_called()
+        app.ai_editor.pre_warm.assert_not_called()
+
+    def test_memory_pressure_keepalive_clears_without_prewarm(self):
+        """Critical memory pressure should free cache and avoid allocating again."""
+        app = _make_app()
+
+        app._do_keep_alive_warmup(skip_prewarm=True)
+
+        app.transcriber.clear_cache.assert_called_once_with()
+        app.transcriber.pre_warm.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

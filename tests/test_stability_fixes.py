@@ -8,6 +8,8 @@ import pytest
 from unittest.mock import patch, MagicMock, PropertyMock
 
 from src.transcriber import (
+    PREWARM_MAX_TOKENS,
+    REALTIME_MAX_TOKENS,
     WhisperTranscriber,
     TranscriberProcessWrapper,
     MIN_FINAL_CHUNK_SAMPLES,
@@ -119,6 +121,40 @@ def test_long_silent_chunk_not_filtered_by_rms(mock_call):
         result = transcriber.transcribe(long_silence, is_final_chunk=False)
         # Whisper gets called (RMS filter doesn't trigger for long chunks)
         mock_call.assert_called_once()
+
+
+@patch("src.transcriber._call_mlx_transcribe")
+def test_forced_prewarm_bypasses_silence_guard(mock_call):
+    """Forced prewarm must call mlx_whisper even though its input is silence."""
+    mock_call.return_value = {"text": "", "language": "ru"}
+    with patch("src.transcriber.log_info"):
+        transcriber = WhisperTranscriber(model_name="dummy")
+        transcriber.prewarm(language="ru")
+
+    mock_call.assert_called_once()
+    _, kwargs = mock_call.call_args
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["sample_len"] == PREWARM_MAX_TOKENS
+    assert kwargs["condition_on_previous_text"] is False
+    assert kwargs["language"] == "ru"
+
+
+@patch("src.transcriber._call_mlx_transcribe")
+def test_realtime_transcription_has_bounded_decoder(mock_call):
+    """Realtime chunks must disable temperature fallback and cap generated tokens."""
+    mock_call.return_value = {"text": "Hello world", "language": "en"}
+    with patch("src.transcriber.log_info"):
+        transcriber = WhisperTranscriber(model_name="dummy")
+        result = transcriber.transcribe(
+            np.full(16000, 0.1, dtype=np.float32),
+            allowed_languages=["en"],
+            is_final_chunk=False,
+        )
+
+    assert result == "Hello world"
+    _, kwargs = mock_call.call_args
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["sample_len"] == REALTIME_MAX_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +429,52 @@ def test_prewarm_sent_when_model_is_cold():
     )
     cmd = wrapper.input_queue.get_nowait()
     assert cmd["action"] == "prewarm"
+    assert isinstance(cmd["request_id"], int)
+
+
+def test_prewarm_waits_for_matching_confirmation():
+    """Synchronous prewarm must ignore stale acknowledgements and match request id."""
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper._prewarm_result_queue = queue.Queue()
+    wrapper._prewarm_request_id = 4
+    wrapper.model_name = "dummy"
+    wrapper._process = MagicMock()
+    wrapper._last_transcribe_returned_at = 0.0
+
+    wrapper._prewarm_result_queue.put({"request_id": 3, "success": True})
+    wrapper._prewarm_result_queue.put({"request_id": 5, "success": True})
+
+    with patch("src.transcriber.log_info"), patch("src.transcriber.log_error"):
+        assert wrapper.pre_warm(wait=True, timeout=0.5) is True
+
+    cmd = wrapper.input_queue.get_nowait()
+    assert cmd["request_id"] == 5
+
+
+def test_prewarm_timeout_returns_false():
+    """Missing child confirmation must fail without pretending the model is warm."""
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper._prewarm_result_queue = queue.Queue()
+    wrapper._prewarm_request_id = 0
+    wrapper.model_name = "dummy"
+    wrapper._process = MagicMock()
+    wrapper._last_transcribe_returned_at = 0.0
+
+    with patch("src.transcriber.log_error"):
+        assert wrapper.pre_warm(wait=True, timeout=0.01) is False
+
+
+def test_cloud_prewarm_accepts_confirmed_interface():
+    """Cloud STT must remain compatible with local confirmed-prewarm call sites."""
+    from src.cloud_transcriber import CloudSTTTranscriber
+
+    transcriber = CloudSTTTranscriber("openai", "gpt-4o-mini-transcribe")
+
+    assert transcriber.pre_warm(wait=True, timeout=0.01, language="ru") is True
 
 
 def test_last_transcribe_returned_at_updated_after_transcribe():

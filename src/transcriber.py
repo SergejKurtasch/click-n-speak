@@ -24,6 +24,13 @@ TRANSCRIBER_TIMEOUT_SECONDS = 30
 # Extended timeout for the first chunk of a session after long idle or under memory pressure.
 # Cold-GPU (model paged out) typically takes 20-25s; 90s covers even the worst case.
 TRANSCRIBER_COLD_START_TIMEOUT_SECONDS = 90
+PREWARM_TIMEOUT_SECONDS = 30
+
+# Realtime chunks are at most 8 seconds long. Limiting decoder output prevents
+# pathological repetition loops from generating hundreds of tokens before the
+# post-processing filters get a chance to collapse them.
+REALTIME_MAX_TOKENS = 128
+PREWARM_MAX_TOKENS = 8
 
 # Cached result of whether mlx_whisper.transcribe accepts strict threshold kwargs.
 # None = not yet probed; True/False = result of probe.
@@ -172,7 +179,7 @@ def _call_mlx_transcribe(
     verbose=False,
     **extra_kwargs,
 ):
-    """Call mlx_whisper.transcribe, omitting threshold kwargs on older API versions."""
+    """Call mlx_whisper.transcribe with compatible realtime decode options."""
     try:
         import mlx_whisper  # type: ignore
     except ImportError as exc:
@@ -187,13 +194,27 @@ def _call_mlx_transcribe(
     }
     # HF_HUB_OFFLINE=1 is set globally at child-process startup in _run_loop(), so
     # mlx_whisper never makes network calls here.  No per-call save/restore needed.
-    # Use threshold kwargs only when the installed mlx_whisper version supports them.
-    # Probed once via inspect so we never duplicate the expensive transcribe() call.
-    if extra_kwargs and _supports_strict_thresholds():
-        return mlx_whisper.transcribe(audio_data, **base_kw, **extra_kwargs)
-    if extra_kwargs and not _supports_strict_thresholds():
-        log_info("mlx_whisper.transcribe does not accept strict thresholds; using defaults.")
-    return mlx_whisper.transcribe(audio_data, **base_kw)
+    # Threshold parameters were added after the general decode options. Preserve
+    # latency controls such as temperature/sample_len on older versions while
+    # removing only unsupported threshold keys.
+    compatible_kwargs = dict(extra_kwargs)
+    if compatible_kwargs and not _supports_strict_thresholds():
+        removed_threshold = False
+        for key in (
+            "no_speech_threshold",
+            "compression_ratio_threshold",
+            "logprob_threshold",
+        ):
+            removed_threshold = (
+                compatible_kwargs.pop(key, None) is not None
+                or removed_threshold
+            )
+        if removed_threshold:
+            log_info(
+                "mlx_whisper.transcribe does not accept strict thresholds; "
+                "using defaults."
+            )
+    return mlx_whisper.transcribe(audio_data, **base_kw, **compatible_kwargs)
 
 
 class WhisperTranscriber:
@@ -275,6 +296,37 @@ class WhisperTranscriber:
         )
         self._warmup_done = True
 
+    def prewarm(
+        self,
+        duration_seconds: float = 0.5,
+        sample_rate: int = 16000,
+        language: str | None = None,
+    ) -> None:
+        """Run a forced Whisper inference that bypasses realtime silence guards."""
+        audio_len = max(1, int(sample_rate * max(duration_seconds, 0.1)))
+        audio_data = np.zeros((audio_len,), dtype=np.float32)
+        prewarm_kw: dict[str, object] = {
+            "no_speech_threshold": 0.5,
+            "compression_ratio_threshold": 2.0,
+            "temperature": 0.0,
+            "sample_len": PREWARM_MAX_TOKENS,
+        }
+        if language:
+            prewarm_kw["language"] = language
+
+        started_at = time.monotonic()
+        _call_mlx_transcribe(
+            audio_data,
+            model_name=self.model_name,
+            initial_prompt=None,
+            condition_on_previous_text=False,
+            **prewarm_kw,
+        )
+        log_info(
+            f"Whisper forced prewarm finished in "
+            f"{time.monotonic() - started_at:.2f}s."
+        )
+
     def transcribe(
         self,
         audio_data,
@@ -318,7 +370,12 @@ class WhisperTranscriber:
         # Stricter thresholds for short/final chunks to reduce long hallucination decoding (15-27s)
         # Applied to: final chunks, and any audio shorter than ~5s (80000 samples at 16kHz)
         use_strict_thresholds = is_final_chunk or len(audio_data) < 80000
-        whisper_kw: dict = {}
+        whisper_kw: dict[str, object] = {
+            # Realtime dictation favors bounded latency over expensive fallback
+            # passes through temperatures 0.2..1.0.
+            "temperature": 0.0,
+            "sample_len": REALTIME_MAX_TOKENS,
+        }
         if use_strict_thresholds:
             whisper_kw["no_speech_threshold"] = 0.5
             whisper_kw["compression_ratio_threshold"] = 2.0
@@ -502,6 +559,8 @@ class TranscriberProcessWrapper:
     def __init__(self, model_name="mlx-community/whisper-large-v3-turbo"):
         self.input_queue = mp.Queue()
         self.output_queue = mp.Queue()
+        self._prewarm_result_queue = mp.Queue()
+        self._prewarm_request_id = 0
         self.model_name = model_name
         # Epoch time of the last completed transcription in this wrapper.
         # Used to skip prewarm when the model is already warm (recent transcription).
@@ -556,13 +615,27 @@ class TranscriberProcessWrapper:
                             "Prewarm skipped: real transcribe pending in queue "
                             "— model will warm on first real chunk."
                         )
-                        self.output_queue.put({"type": "prewarm_done"})
+                        self._prewarm_result_queue.put({
+                            "request_id": cmd.get("request_id"),
+                            "success": False,
+                            "reason": "transcribe_pending",
+                        })
                     else:
-                        # Run a real short transcription on silence to bring GPU/MLX weights
-                        # back into active memory. Fire-and-forget: result is discarded.
-                        silence = np.zeros(16000, dtype=np.float32)  # 1s at 16kHz
-                        transcriber.transcribe(silence, is_final_chunk=False)
-                        self.output_queue.put({"type": "prewarm_done"})
+                        try:
+                            transcriber.prewarm(language=cmd.get("language"))
+                            self._prewarm_result_queue.put({
+                                "request_id": cmd.get("request_id"),
+                                "success": True,
+                            })
+                        except Exception as prewarm_error:
+                            log_exception(
+                                f"Whisper forced prewarm failed: {prewarm_error}"
+                            )
+                            self._prewarm_result_queue.put({
+                                "request_id": cmd.get("request_id"),
+                                "success": False,
+                                "reason": str(prewarm_error),
+                            })
                 elif action == "transcribe":
                     def _signal_lang_retry(oq=self.output_queue):
                         oq.put({"type": "lang_retry_started"})
@@ -653,18 +726,59 @@ class TranscriberProcessWrapper:
     # Seconds since last transcription below which prewarm is skipped (model still warm).
     _PREWARM_IDLE_THRESHOLD = 45.0
 
-    def pre_warm(self) -> None:
+    def pre_warm(
+        self,
+        *,
+        wait: bool = False,
+        timeout: float = PREWARM_TIMEOUT_SECONDS,
+        language: str | None = None,
+    ) -> bool:
         """Fire-and-forget: push a tiny silent transcription to the child process so
         GPU/MLX model weights are in active memory before the first real chunk arrives.
-        Skipped when the model is already warm (recent transcription within threshold)."""
+        Skipped when the model is already warm (recent transcription within threshold).
+
+        When ``wait`` is true, return only after the child confirms that the forced
+        inference completed. A dedicated result queue prevents acknowledgements
+        from racing with real transcription results.
+        """
         idle = time.time() - self._last_transcribe_returned_at
         if idle < self._PREWARM_IDLE_THRESHOLD:
             log_info(
                 f"Pre-warm skipped: last transcription {idle:.1f}s ago "
                 f"(threshold {self._PREWARM_IDLE_THRESHOLD}s) — model is warm."
             )
-            return
-        self.input_queue.put({"action": "prewarm"})
+            return True
+
+        self._prewarm_request_id = getattr(self, "_prewarm_request_id", 0) + 1
+        request_id = self._prewarm_request_id
+        self.input_queue.put({
+            "action": "prewarm",
+            "request_id": request_id,
+            "language": language,
+        })
+        if not wait:
+            return True
+
+        result_queue = getattr(self, "_prewarm_result_queue", None)
+        if result_queue is None:
+            log_error("Pre-warm result queue is unavailable.")
+            return False
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log_error(
+                    f"Whisper prewarm was not confirmed within {timeout:.0f}s."
+                )
+                return False
+            try:
+                result = result_queue.get(timeout=min(0.1, remaining))
+            except queue.Empty:
+                continue
+            if result.get("request_id") != request_id:
+                continue
+            return bool(result.get("success"))
         
     def clear_cache(self) -> None:
         """Free MLX Metal buffer pool in the child process after a session ends."""
@@ -687,6 +801,7 @@ class TranscriberProcessWrapper:
         # get_nowait() and process restart). New objects guarantee a clean slate.
         self.input_queue = mp.Queue()
         self.output_queue = mp.Queue()
+        self._prewarm_result_queue = mp.Queue()
         self._process = mp.Process(target=self._run_loop, daemon=True)
         self._process.start()
         log_info("Transcriber process restarted.")

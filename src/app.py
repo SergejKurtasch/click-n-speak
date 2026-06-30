@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .hotkey_handler import HotkeyHandler
 from .injector import inject_text
@@ -300,8 +300,10 @@ class SVoiceRecApp:
         self.gemini_editor: Optional[GeminiEditor] = None
         self._ai_editor_loading = False
         self._ai_editor_lock = threading.Lock()  # guards _ai_editor_loading read/write
-        if self.config.get("ai_editor_enabled", False):
-            self._init_ai_editor()
+        # Whisper runs in a child process while local Qwen runs in this process,
+        # but both compete for the same Metal GPU. Parent-side serialization keeps
+        # their blocking inference windows from overlapping.
+        self._mlx_execution_lock = threading.RLock()
         self.hotkey_handler = HotkeyHandler(
             hotkey_str=self.config.get("hotkey", "<alt>+<space>"), on_trigger=self.toggle_recording
         )
@@ -386,6 +388,14 @@ class SVoiceRecApp:
             from .preview_panel import TranscriptionPreviewPanel
             self._preview_panel = TranscriptionPreviewPanel()
 
+    def _run_local_mlx(self, operation: Callable[[], Any]) -> Any:
+        """Run one local MLX operation without overlapping Whisper and Qwen."""
+        lock = getattr(self, "_mlx_execution_lock", None)
+        if lock is None:  # Lightweight test doubles created with __new__.
+            return operation()
+        with lock:
+            return operation()
+
     def _init_ai_editor(self) -> None:
         """Create and load the AI editor backend in a background thread (non-blocking).
 
@@ -429,7 +439,7 @@ class SVoiceRecApp:
                 self.notify(i18n.t("notify.ai_not_found_title"), i18n.t("notify.ai_not_found_body"))
                 return
 
-            editor.load()
+            self._run_local_mlx(editor.load)
             # Guard: user may have disabled AI Editor while load() was running
             if self.ai_editor is None:
                 log_info("AiEditor was disabled during load — discarding.")
@@ -482,7 +492,9 @@ class SVoiceRecApp:
         try:
             log_info("Starting Whisper warm-up in background thread.")
             primary_lang = get_primary_language(self.config)
-            self.transcriber.warmup(language=primary_lang)
+            self._run_local_mlx(
+                lambda: self.transcriber.warmup(language=primary_lang)
+            )
             # Wait for warmup_done with a hard deadline so a crashed child process
             # does not leave _model_warming=True and permanently block all recordings.
             deadline = time.monotonic() + 60.0
@@ -510,6 +522,14 @@ class SVoiceRecApp:
         finally:
             self.model_ready_event.set()
             self._model_warming = False
+            # Whisper owns startup GPU priority. Only after its warmup resolves
+            # (success or bounded failure) may local Qwen load and warm Metal.
+            if (
+                self.config.get("ai_editor_enabled", False)
+                and self.ai_editor is None
+                and self.gemini_editor is None
+            ):
+                self._init_ai_editor()
 
     def load_config(self, path):
         config_path = Path(path)
@@ -723,7 +743,7 @@ class SVoiceRecApp:
         """Send an extra warmup after a cold-start session to pre-heat GPU for the next session.
 
         Runs in a background daemon thread. Waits 50 s so the 45 s pre_warm throttle
-        has expired, then calls warmup() (bypasses throttle) if the app is idle.
+        has expired, then requests a confirmed forced prewarm if the app is idle.
         This addresses the pattern where sessions after a 13 h+ idle remain slow for
         2-3 consecutive recordings because GPU weights are only partially reloaded.
         """
@@ -731,9 +751,14 @@ class SVoiceRecApp:
         _time.sleep(50)
         if self.is_recording or self.is_processing:
             return
-        log_info("Post-cold-start warmup: sending extra warmup to accelerate GPU recovery.")
+        log_info("Post-cold-start warmup: sending forced prewarm to accelerate GPU recovery.")
         try:
-            self.transcriber.warmup()
+            if self._run_local_mlx(
+                lambda: self.transcriber.pre_warm(wait=True)
+            ):
+                log_info("Post-cold-start Whisper prewarm confirmed.")
+            else:
+                log_error("Post-cold-start Whisper prewarm was not confirmed.")
         except Exception as e:
             log_error(f"Post-cold-start warmup failed: {e}")
 
@@ -1310,25 +1335,10 @@ class SVoiceRecApp:
         self._session_id += 1  # Invalidate any lingering worker from previous session
         self._session_had_cold_start = False
 
-        # Fire-and-forget prewarm: the child transcriber process will run a tiny silent
-        # transcription so GPU/MLX weights are warm by the time the first real chunk arrives.
-        # Recording and prewarm run in parallel; if GPU was cold this saves ~15-20s on
-        # the first real chunk transcription.
-        self.transcriber.pre_warm()
-        log_info("Pre-warm request sent to transcriber process.")
-
-        # Also warm the local AiEditor if it has been idle long enough to risk
-        # its Metal weights being evicted (threshold: same as the cold-timeout guard).
-        # Runs in a daemon thread so it never delays the start of audio capture.
-        _editor = self.ai_editor
-        if _editor is not None and _editor.is_ready():
-            from .ai_editor import _REFINE_COLD_IDLE_THRESHOLD_S
-            import time as _time
-            if _time.monotonic() - _editor._last_refine_at > _REFINE_COLD_IDLE_THRESHOLD_S:
-                threading.Thread(
-                    target=_editor.pre_warm, daemon=True, name="ai-editor-hotkey-warm"
-                ).start()
-                log_info("AiEditor.pre_warm fired on hotkey (model was idle).")
+        # Do not enqueue forced prewarm on the hotkey path. A cold prewarm is
+        # serialized by the child and can otherwise sit in front of the user's
+        # first real chunk for 15-20 seconds. Startup, wake, keep-alive, and
+        # post-cold recovery own proactive Whisper warming instead.
 
         # Remember active app safely on main thread.
         # In append mode the popup is already open and _previous_app_pid is still correct
@@ -1463,11 +1473,17 @@ class SVoiceRecApp:
                         if is_external_api_editor:
                             known_terms = collect_known_terms(self.config, languages)
                             misrecognitions = collect_misrecognitions(languages, config=self.config)
-                        refined = _active_editor.refine(
-                            full_text,
-                            languages=languages,
-                            known_terms=known_terms,
-                            misrecognitions=misrecognitions,
+                        def refine_call() -> str:
+                            return _active_editor.refine(
+                                full_text,
+                                languages=languages,
+                                known_terms=known_terms,
+                                misrecognitions=misrecognitions,
+                            )
+                        refined = (
+                            refine_call()
+                            if is_external_api_editor
+                            else self._run_local_mlx(refine_call)
                         )
                         self._ai_edited_text = refined
                         self._ai_editor_status = _active_editor.last_refine_status
@@ -1574,13 +1590,19 @@ class SVoiceRecApp:
                 + (f", cold_start_timeout={timeout_override:.0f}s (idle {idle_since_last:.0f}s)" if is_cold_start else "")
             )
 
-            text = self.transcriber.transcribe(
-                audio_chunk,
-                initial_prompt=context,
-                allowed_languages=allowed_languages,
-                condition_on_previous_text=condition_on_previous_text,
-                is_final_chunk=is_final_chunk,
-                timeout_override=timeout_override,
+            def transcribe_call() -> str:
+                return self.transcriber.transcribe(
+                    audio_chunk,
+                    initial_prompt=context,
+                    allowed_languages=allowed_languages,
+                    condition_on_previous_text=condition_on_previous_text,
+                    is_final_chunk=is_final_chunk,
+                    timeout_override=timeout_override,
+                )
+            text = (
+                self._run_local_mlx(transcribe_call)
+                if self.config.get("stt_backend", "local") == "local"
+                else transcribe_call()
             )
 
             # Update last transcription time for keep-alive tracking
@@ -1658,11 +1680,17 @@ class SVoiceRecApp:
                                     misrecognitions = collect_misrecognitions(
                                         languages, config=self.config
                                     )
-                                refined = _active_editor.refine(
-                                    full_text,
-                                    languages=languages,
-                                    known_terms=known_terms,
-                                    misrecognitions=misrecognitions,
+                                def refine_call() -> str:
+                                    return _active_editor.refine(
+                                        full_text,
+                                        languages=languages,
+                                        known_terms=known_terms,
+                                        misrecognitions=misrecognitions,
+                                    )
+                                refined = (
+                                    refine_call()
+                                    if is_external_api_editor
+                                    else self._run_local_mlx(refine_call)
                                 )
                                 # Always capture what the AI produced and its status so the
                                 # dataset record distinguishes "AI ran but unchanged" from
@@ -1952,10 +1980,16 @@ class SVoiceRecApp:
             self._last_transcription_time = time.time()
 
             try:
-                text = self.transcriber.transcribe_file(
-                    file_path,
-                    initial_prompt=context,
-                    allowed_languages=allowed_languages,
+                def transcribe_file_call() -> str:
+                    return self.transcriber.transcribe_file(
+                        file_path,
+                        initial_prompt=context,
+                        allowed_languages=allowed_languages,
+                    )
+                text = (
+                    self._run_local_mlx(transcribe_file_call)
+                    if self.config.get("stt_backend", "local") == "local"
+                    else transcribe_file_call()
                 )
             except FileTranscriptionError as fte:
                 _file_notify_timer.cancel()
@@ -1987,11 +2021,17 @@ class SVoiceRecApp:
                         misrecognitions = collect_misrecognitions(
                             allowed_languages, config=self.config
                         )
-                    text = active_editor.refine_file_text(
-                        text,
-                        languages=allowed_languages,
-                        known_terms=known_terms,
-                        misrecognitions=misrecognitions,
+                    def refine_file_call() -> str:
+                        return active_editor.refine_file_text(
+                            text,
+                            languages=allowed_languages,
+                            known_terms=known_terms,
+                            misrecognitions=misrecognitions,
+                        )
+                    text = (
+                        refine_file_call()
+                        if isinstance(active_editor, ExternalApiEditor)
+                        else self._run_local_mlx(refine_file_call)
                     )
                     apply_direct_replacements = _should_apply_direct_replacements_after_refine(
                         active_editor.last_refine_status,
@@ -2125,32 +2165,32 @@ class SVoiceRecApp:
             self._schedule_keep_alive()
 
     def _do_keep_alive_warmup(self, *, skip_prewarm: bool = False) -> None:
-        """Clear MLX Metal cache and optionally pre-warm the model.
+        """Keep Whisper warm, clearing Metal only under critical memory pressure.
 
-        clear_cache() is always sent — it releases Metal buffers from MLX's internal
-        caching allocator and is the main mechanism preventing memory growth.
-        pre_warm() is skipped under memory pressure because it loads data into memory;
-        skipping it avoids adding load when the system is already constrained.
+        Normal keep-alive must not clear a healthy Metal cache before an unconfirmed
+        warmup. Per-transcription cleanup and periodic process restarts already bound
+        memory growth. Under critical pressure, freeing cache takes priority and
+        prewarm is deliberately skipped.
         """
         if not self._keep_alive_lock.acquire(blocking=False):
             log_info("Keep-alive: previous warmup still running — skipping.")
             return
         try:
-            self.transcriber.clear_cache()
             if skip_prewarm:
+                self.transcriber.clear_cache()
                 log_info(
                     "Keep-alive: memory pressure high — cache cleared, pre_warm skipped."
                 )
             else:
-                self.transcriber.pre_warm()
-                log_info("Keep-alive: cache cleared and pre_warm() sent to transcriber process.")
-                # Also warm the local AiEditor so its Metal weights stay hot.
-                # GeminiEditor needs no warming (HTTP, no GPU weights).
-                _editor = self.ai_editor
-                if _editor is not None and _editor.is_ready():
-                    threading.Thread(
-                        target=_editor.pre_warm, daemon=True, name="ai-editor-keepalive-warm"
-                    ).start()
+                if not self._run_local_mlx(
+                    lambda: self.transcriber.pre_warm(wait=True)
+                ):
+                    log_error(
+                        "Keep-alive: Whisper prewarm was not confirmed; "
+                        "Metal cache left untouched."
+                    )
+                    return
+                log_info("Keep-alive: Whisper forced prewarm confirmed.")
             self._last_transcription_time = time.time()
         except Exception as e:
             log_error(f"Keep-alive warmup failed: {e}")
@@ -2262,14 +2302,18 @@ class SVoiceRecApp:
             f"(session {self._completed_sessions} of {TRANSCRIBER_RESTART_AFTER_SESSIONS})."
         )
         try:
-            self.transcriber._restart_process()
+            self._run_local_mlx(self.transcriber._restart_process)
             # Immediately pre-warm to reload model weights into GPU before next hotkey.
             # Force-bypass the idle threshold: after restart _last_transcribe_returned_at
             # is stale (still the time of the last transcription before restart), so the
             # idle guard might wrongly skip pre_warm. Reset it to a distant past value.
             self.transcriber._last_transcribe_returned_at = 0.0
-            self.transcriber.pre_warm()
-            log_info("Transcriber restarted and pre_warm sent.")
+            if self._run_local_mlx(
+                lambda: self.transcriber.pre_warm(wait=True)
+            ):
+                log_info("Transcriber restarted and forced prewarm confirmed.")
+            else:
+                log_error("Transcriber restarted but forced prewarm was not confirmed.")
         except Exception as e:
             log_error(f"Transcriber restart failed: {e}")
 

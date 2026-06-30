@@ -190,8 +190,16 @@ class CloudSTTTranscriber:
     def _restart_process(self) -> None:
         pass
 
-    def pre_warm(self) -> None:
-        pass
+    def pre_warm(
+        self,
+        *,
+        wait: bool = False,
+        timeout: float = 30.0,
+        language: Optional[str] = None,
+    ) -> bool:
+        """Return immediately because cloud STT has no local model to warm."""
+        _ = wait, timeout, language
+        return True
 
     def clear_cache(self) -> None:
         pass
