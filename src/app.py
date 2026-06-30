@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .hotkey_handler import HotkeyHandler
-from .injector import inject_text
+from .injector import InjectionResult, inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
 try:
@@ -71,12 +71,16 @@ from .utils import (
     normalize_ukrainian_lang_codes,
     save_config_to_disk,
     send_notification,
+    copy_to_clipboard,
     target_lang_for_script_bucket,
     update_term_usage,
 )
 
 # Keep-alive interval in seconds (15 minutes)
 KEEP_ALIVE_INTERVAL_SECONDS = 15 * 60
+FOCUS_RESTORE_TIMEOUT_SECONDS = 1.5
+FOCUS_RESTORE_POLL_SECONDS = 0.05
+FOCUS_RESTORE_STABLE_CHECKS = 2
 
 
 def _join_chunks(parts: list[str]) -> str:
@@ -395,6 +399,84 @@ class SVoiceRecApp:
             return operation()
         with lock:
             return operation()
+
+    def _start_injection_worker(self, text: str) -> None:
+        """Inject outside the AppKit main thread after focus is confirmed."""
+        def _worker() -> None:
+            result: InjectionResult = inject_text(text)
+            if not result.success:
+                log_error(
+                    f"Injection worker failed: method={result.method} "
+                    f"chars={result.char_count} error={result.error}"
+                )
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="text-injection",
+        ).start()
+
+    def _activate_previous_app_and_inject(self, prev_pid: int | None, text: str) -> None:
+        """Activate the captured app and wait for stable frontmost focus."""
+        if not prev_pid or NSRunningApplication is None or NSWorkspace is None:
+            log_error("Cannot restore target app focus; copied text to clipboard.")
+            threading.Thread(target=copy_to_clipboard, args=(text,), daemon=True).start()
+            send_notification(
+                "Click-n-speak",
+                "Text copied",
+                "Could not restore the target app. Paste the text manually.",
+            )
+            return
+
+        running_app = NSRunningApplication.runningApplicationWithProcessIdentifier_(prev_pid)
+        if running_app is None:
+            log_error(f"Target app pid={prev_pid} is no longer running; copied text.")
+            threading.Thread(target=copy_to_clipboard, args=(text,), daemon=True).start()
+            return
+
+        log_info(f"Focus activation requested: target_pid={prev_pid}")
+        running_app.activateWithOptions_(0)
+        deadline = time.monotonic() + FOCUS_RESTORE_TIMEOUT_SECONDS
+        state = {"stable_checks": 0}
+
+        def _poll_focus_on_main() -> None:
+            frontmost = NSWorkspace.sharedWorkspace().frontmostApplication()
+            frontmost_pid = frontmost.processIdentifier() if frontmost else None
+            if frontmost_pid == prev_pid:
+                state["stable_checks"] += 1
+            else:
+                state["stable_checks"] = 0
+
+            if state["stable_checks"] >= FOCUS_RESTORE_STABLE_CHECKS:
+                log_info(f"Focus confirmed: target_pid={prev_pid}")
+                self._start_injection_worker(text)
+                return
+
+            if time.monotonic() >= deadline:
+                log_error(
+                    f"Focus restore timed out: target_pid={prev_pid} "
+                    f"frontmost_pid={frontmost_pid}; copied text to clipboard."
+                )
+                threading.Thread(
+                    target=copy_to_clipboard,
+                    args=(text,),
+                    daemon=True,
+                ).start()
+                send_notification(
+                    "Click-n-speak",
+                    "Text copied",
+                    "The target app did not regain focus. Paste the text manually.",
+                )
+                return
+
+            timer = threading.Timer(
+                FOCUS_RESTORE_POLL_SECONDS,
+                lambda: self._submit_for_main_thread(_poll_focus_on_main),
+            )
+            timer.daemon = True
+            timer.start()
+
+        _poll_focus_on_main()
 
     def _init_ai_editor(self) -> None:
         """Create and load the AI editor backend in a background thread (non-blocking).
@@ -846,24 +928,15 @@ class SVoiceRecApp:
                     prev_pid = self._previous_app_pid
                     text_to_inject = user_text + " "
 
-                    def _restore_focus():
-                        if prev_pid and NSRunningApplication is not None:
-                            running_app = NSRunningApplication.runningApplicationWithProcessIdentifier_(prev_pid)
-                            if running_app:
-                                log_info("_restore_focus: activating previous app")
-                                running_app.activateWithOptions_(0)
-                        # Now wait for activation, then inject on main thread.
-                        def _wait_then_inject():
-                            time.sleep(0.4)
-                            log_info("_wait_then_inject: submitting inject_text to main thread")
-                            self._submit_for_main_thread(lambda: inject_text(text_to_inject))
-                        threading.Thread(target=_wait_then_inject, daemon=True).start()
-
                     # Small initial sleep so the panel's orderOut_ is fully
                     # processed by the main run loop before we activate another app.
                     time.sleep(0.2)
-                    self._submit_for_main_thread(_restore_focus)
-                    log_info("_run_injection: _restore_focus queued on main thread")
+                    self._submit_for_main_thread(
+                        self._activate_previous_app_and_inject,
+                        prev_pid,
+                        text_to_inject,
+                    )
+                    log_info("_run_injection: focus restore queued on main thread")
 
                 except Exception as e:
                     log_exception(f"_run_injection failed: {e}")
