@@ -12,6 +12,7 @@ from .injector import InjectionResult, inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
 from .runtime_telemetry import AudioChunk, collect_process_metrics, emit_runtime_event
+from .runtime_health import RestartDecision, TranscriberHealthMonitor
 try:
     from AppKit import NSWorkspace, NSRunningApplication
 except ImportError:
@@ -340,6 +341,11 @@ class SVoiceRecApp:
         self._worker_watchdog: threading.Thread | None = None
         self._chunk_index_lock = threading.Lock()
         self._next_chunk_index = 0
+        self._transcriber_health = TranscriberHealthMonitor()
+        self._pending_transcriber_restart_reason: str | None = None
+        self._transcriber_restart_guard = threading.Lock()
+        self._health_decision_lock = threading.Lock()
+        self._transcriber_restart_scheduled = False
         # Session ID incremented on each new recording; workers capture it at start
         # and skip injection if the ID no longer matches (new session started).
         self._session_id = 0
@@ -820,6 +826,51 @@ class SVoiceRecApp:
 
         self._submit_for_main_thread(_on_main_thread)
 
+    def _apply_health_decision(self, decision: RestartDecision) -> None:
+        if not decision.should_restart or not decision.reason:
+            return
+        if self.config.get("stt_backend", "local") != "local":
+            return
+        decision_lock = getattr(self, "_health_decision_lock", None)
+        if decision_lock is None:
+            decision_lock = threading.Lock()
+            self._health_decision_lock = decision_lock
+        with decision_lock:
+            if self._pending_transcriber_restart_reason is None:
+                self._pending_transcriber_restart_reason = decision.reason
+                emit_runtime_event(
+                    "transcriber_health_degraded",
+                    session_id=self._session_id,
+                    reason=decision.reason,
+                )
+
+    def _record_prewarm_health(self, started_at: float, success: bool) -> None:
+        monitor = getattr(self, "_transcriber_health", None)
+        if monitor is None or self.config.get("stt_backend", "local") != "local":
+            return
+        self._apply_health_decision(
+            monitor.record_prewarm(
+                time.monotonic() - started_at,
+                success=success,
+            )
+        )
+        self._schedule_pending_transcriber_restart()
+
+    def _schedule_pending_transcriber_restart(self) -> None:
+        if self.is_recording or self.is_processing:
+            return
+        with self._health_decision_lock:
+            reason = self._pending_transcriber_restart_reason
+            if not reason or self._transcriber_restart_scheduled:
+                return
+            self._transcriber_restart_scheduled = True
+        threading.Thread(
+            target=self._restart_transcriber,
+            args=(reason,),
+            daemon=True,
+            name="adaptive-transcriber-restart",
+        ).start()
+
     def _do_finish_cleanup(self) -> None:
         """Run on main thread after worker has finished: clear status, save phrase, notify."""
         log_info("Finish cleanup started (main thread): clearing status, saving phrase, notifying.")
@@ -852,7 +903,10 @@ class SVoiceRecApp:
         self._completed_sessions += 1
         if self._completed_sessions % TRANSCRIBER_RESTART_AFTER_SESSIONS == 0:
             self.flush_dirty_config_if_needed()
-            threading.Thread(target=self._restart_transcriber_for_memory, daemon=True).start()
+            with self._health_decision_lock:
+                if self._pending_transcriber_restart_reason is None:
+                    self._pending_transcriber_restart_reason = "periodic_memory_reset"
+        self._schedule_pending_transcriber_restart()
         if self._session_had_cold_start:
             self._session_had_cold_start = False
             threading.Thread(
@@ -872,15 +926,22 @@ class SVoiceRecApp:
         if self.is_recording or self.is_processing:
             return
         log_info("Post-cold-start warmup: sending forced prewarm to accelerate GPU recovery.")
+        started_at = time.monotonic()
+        success = False
         try:
-            if self._run_local_mlx(
-                lambda: self.transcriber.pre_warm(wait=True)
-            ):
+            success = bool(
+                self._run_local_mlx(
+                    lambda: self.transcriber.pre_warm(wait=True)
+                )
+            )
+            if success:
                 log_info("Post-cold-start Whisper prewarm confirmed.")
             else:
                 log_error("Post-cold-start Whisper prewarm was not confirmed.")
         except Exception as e:
             log_error(f"Post-cold-start warmup failed: {e}")
+        finally:
+            self._record_prewarm_health(started_at, success)
 
     def _do_error_cleanup(self) -> None:
         """Run on main thread on stop_recording error: clear status, notify."""
@@ -1802,15 +1863,27 @@ class SVoiceRecApp:
                 # interrupts the call, control jumps to the exception handler and
                 # this flag deliberately remains set.
                 self._needs_buffered_finalization = False
+            decode_duration = time.monotonic() - transcribe_started
             emit_runtime_event(
                 "transcribe_finished",
                 session_id=session_id,
                 chunk_index=chunk_index,
                 is_final=is_final_chunk,
-                duration_seconds=round(time.monotonic() - transcribe_started, 6),
+                duration_seconds=round(decode_duration, 6),
                 char_count=len(text or ""),
                 success=bool(text),
             )
+            health_monitor = getattr(self, "_transcriber_health", None)
+            if (
+                self.config.get("stt_backend", "local") == "local"
+                and health_monitor is not None
+            ):
+                self._apply_health_decision(
+                    health_monitor.record_decode(
+                        decode_duration,
+                        cold_start=is_cold_start,
+                    )
+                )
 
             # Update last transcription time for keep-alive tracking
             self._last_transcription_time = time.time()
@@ -2481,9 +2554,14 @@ class SVoiceRecApp:
                     "Keep-alive: memory pressure high — cache cleared, pre_warm skipped."
                 )
             else:
-                if not self._run_local_mlx(
-                    lambda: self.transcriber.pre_warm(wait=True)
-                ):
+                started_at = time.monotonic()
+                success = bool(
+                    self._run_local_mlx(
+                        lambda: self.transcriber.pre_warm(wait=True)
+                    )
+                )
+                self._record_prewarm_health(started_at, success)
+                if not success:
                     log_error(
                         "Keep-alive: Whisper prewarm was not confirmed; "
                         "Metal cache left untouched."
@@ -2585,27 +2663,28 @@ class SVoiceRecApp:
         finally:
             self._last_final_text_for_restart_fallback = None
 
-    def _restart_transcriber_for_memory(self) -> None:
-        """Restart the transcriber child process to reset accumulated MLX memory.
-
-        clear_cache() only frees unreferenced Metal buffers. The model weight tensors
-        (WhisperTranscriber._model) are always referenced and never freed. After many
-        sessions the child grows to 6+ GB; a full restart brings it back to ~2 GB.
-        Called in a daemon thread so it does not block the main thread.
-        """
+    def _restart_transcriber(self, reason: str) -> None:
+        """Restart and confirm prewarm for a periodic or health-triggered reset."""
         if self.is_recording or self.is_processing:
             log_info("Transcriber restart skipped: session in progress.")
+            with self._health_decision_lock:
+                self._pending_transcriber_restart_reason = reason
+                self._transcriber_restart_scheduled = False
             return
-        log_info(
-            f"Restarting transcriber for memory reset "
-            f"(session {self._completed_sessions} of {TRANSCRIBER_RESTART_AFTER_SESSIONS})."
-        )
-        emit_runtime_event(
-            "transcriber_restart_requested",
-            session_id=self._session_id,
-            reason="periodic_memory_reset",
-        )
+        if not self._transcriber_restart_guard.acquire(blocking=False):
+            with self._health_decision_lock:
+                self._pending_transcriber_restart_reason = reason
+                self._transcriber_restart_scheduled = False
+            return
         try:
+            with self._health_decision_lock:
+                self._pending_transcriber_restart_reason = None
+            log_info(f"Restarting transcriber: reason={reason}.")
+            emit_runtime_event(
+                "transcriber_restart_requested",
+                session_id=self._session_id,
+                reason=reason,
+            )
             self._run_local_mlx(self.transcriber._restart_process)
             # Immediately pre-warm to reload model weights into GPU before next hotkey.
             # Force-bypass the idle threshold: after restart _last_transcribe_returned_at
@@ -2619,19 +2698,27 @@ class SVoiceRecApp:
                 emit_runtime_event(
                     "transcriber_restart_finished",
                     session_id=self._session_id,
-                    reason="periodic_memory_reset",
+                    reason=reason,
                     success=True,
                 )
+                self._transcriber_health.mark_restarted()
             else:
                 log_error("Transcriber restarted but forced prewarm was not confirmed.")
                 emit_runtime_event(
                     "transcriber_restart_finished",
                     session_id=self._session_id,
-                    reason="periodic_memory_reset",
+                    reason=reason,
                     success=False,
                 )
+                self._transcriber_health.mark_restarted()
         except Exception as e:
             log_error(f"Transcriber restart failed: {e}")
+            with self._health_decision_lock:
+                self._pending_transcriber_restart_reason = reason
+        finally:
+            with self._health_decision_lock:
+                self._transcriber_restart_scheduled = False
+            self._transcriber_restart_guard.release()
 
     def _is_memory_pressure_high(self) -> bool:
         """Return True only when macOS reports CRITICAL memory pressure (level 4).
