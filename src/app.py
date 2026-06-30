@@ -11,6 +11,7 @@ from .hotkey_handler import HotkeyHandler
 from .injector import InjectionResult, inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
+from .runtime_telemetry import AudioChunk, collect_process_metrics, emit_runtime_event
 try:
     from AppKit import NSWorkspace, NSRunningApplication
 except ImportError:
@@ -337,6 +338,8 @@ class SVoiceRecApp:
         self.stop_worker = threading.Event()
         self._worker_overdue = False
         self._worker_watchdog: threading.Thread | None = None
+        self._chunk_index_lock = threading.Lock()
+        self._next_chunk_index = 0
         # Session ID incremented on each new recording; workers capture it at start
         # and skip injection if the ID no longer matches (new session started).
         self._session_id = 0
@@ -410,7 +413,15 @@ class SVoiceRecApp:
     def _start_injection_worker(self, text: str) -> None:
         """Inject outside the AppKit main thread after focus is confirmed."""
         def _worker() -> None:
+            emit_runtime_event("injection_started", char_count=len(text))
             result: InjectionResult = inject_text(text)
+            emit_runtime_event(
+                "injection_finished",
+                success=result.success,
+                method=result.method,
+                char_count=result.char_count,
+                duration_seconds=round(result.duration_seconds, 6),
+            )
             if not result.success:
                 log_error(
                     f"Injection worker failed: method={result.method} "
@@ -442,6 +453,8 @@ class SVoiceRecApp:
             return
 
         log_info(f"Focus activation requested: target_pid={prev_pid}")
+        activation_started = time.monotonic()
+        emit_runtime_event("focus_activation_requested", target_pid=prev_pid)
         running_app.activateWithOptions_(0)
         deadline = time.monotonic() + FOCUS_RESTORE_TIMEOUT_SECONDS
         state = {"stable_checks": 0}
@@ -456,6 +469,11 @@ class SVoiceRecApp:
 
             if state["stable_checks"] >= FOCUS_RESTORE_STABLE_CHECKS:
                 log_info(f"Focus confirmed: target_pid={prev_pid}")
+                emit_runtime_event(
+                    "focus_confirmed",
+                    target_pid=prev_pid,
+                    duration_seconds=round(time.monotonic() - activation_started, 6),
+                )
                 self._start_injection_worker(text)
                 return
 
@@ -463,6 +481,12 @@ class SVoiceRecApp:
                 log_error(
                     f"Focus restore timed out: target_pid={prev_pid} "
                     f"frontmost_pid={frontmost_pid}; copied text to clipboard."
+                )
+                emit_runtime_event(
+                    "focus_timeout",
+                    target_pid=prev_pid,
+                    frontmost_pid=frontmost_pid,
+                    duration_seconds=round(time.monotonic() - activation_started, 6),
                 )
                 threading.Thread(
                     target=copy_to_clipboard,
@@ -818,6 +842,13 @@ class SVoiceRecApp:
         if self._preview_panel:
             self._preview_panel.update_status(i18n.t("hud.ready_title"), self._main_thread_queue)
         log_info("Finish cleanup done. Ready for next recording session.")
+        child_process = getattr(self.transcriber, "_process", None)
+        child_pid = getattr(child_process, "pid", None)
+        emit_runtime_event(
+            "session_cleanup_finished",
+            session_id=self._session_id,
+            **collect_process_metrics(child_pid),
+        )
         self._completed_sessions += 1
         if self._completed_sessions % TRANSCRIBER_RESTART_AFTER_SESSIONS == 0:
             self.flush_dirty_config_if_needed()
@@ -1415,7 +1446,10 @@ class SVoiceRecApp:
         self._buffered_final_text = None
         self.stop_worker.clear()
         self._session_id += 1  # Invalidate any lingering worker from previous session
+        with self._chunk_index_lock:
+            self._next_chunk_index = 0
         self._session_had_cold_start = False
+        emit_runtime_event("recording_started", session_id=self._session_id)
 
         # Do not enqueue forced prewarm on the hotkey path. A cold prewarm is
         # serialized by the child and can otherwise sit in front of the user's
@@ -1480,19 +1514,61 @@ class SVoiceRecApp:
             )
             self.notify(i18n.t("notify.record_error_title"), i18n.t("notify.record_error_body"))
 
+    def _build_audio_chunk(self, audio_data: Any, *, is_final: bool) -> AudioChunk:
+        chunk_index_lock = getattr(self, "_chunk_index_lock", None)
+        if chunk_index_lock is None:
+            chunk_index_lock = threading.Lock()
+            self._chunk_index_lock = chunk_index_lock
+        with chunk_index_lock:
+            self._next_chunk_index = getattr(self, "_next_chunk_index", 0) + 1
+            chunk_index = self._next_chunk_index
+        now = time.monotonic()
+        return AudioChunk(
+            session_id=self._session_id,
+            index=chunk_index,
+            audio=audio_data,
+            is_final=is_final,
+            captured_at=now,
+            enqueued_at=now,
+        )
+
     def on_chunk_received(self, audio_data):
         if self.is_recording:
             try:
-                self.chunk_queue.put_nowait((audio_data, False))
+                chunk = self._build_audio_chunk(audio_data, is_final=False)
+                self.chunk_queue.put_nowait(chunk)
             except queue.Full:
                 log_error("chunk_queue full — dropping audio chunk (transcriber may be hung).")
+                return
+            # This runs directly on the raw sounddevice/PortAudio callback thread
+            # (see recorder.py's _trigger_chunk), which has no surrounding try/except.
+            # Telemetry must never be allowed to raise here, or it can abort the audio stream.
+            try:
+                emit_runtime_event(
+                    "chunk_captured",
+                    session_id=chunk.session_id,
+                    chunk_index=chunk.index,
+                    is_final=False,
+                    sample_count=len(audio_data),
+                )
+            except Exception as e:
+                log_error(f"Failed to emit chunk_captured telemetry: {e}")
 
     def chunk_worker(self):
         my_session_id = self._session_id
         log_info("Chunk worker started.")
         while not self.stop_worker.is_set() or not self.chunk_queue.empty():
             try:
-                audio_chunk, is_final_chunk = self.chunk_queue.get(timeout=0.5)
+                queued_item = self.chunk_queue.get(timeout=0.5)
+                if isinstance(queued_item, AudioChunk):
+                    chunk = queued_item
+                else:
+                    # Compatibility for queued items created before an in-process update
+                    # and focused unit tests that exercise the worker directly.
+                    audio_data, is_final = queued_item
+                    chunk = self._build_audio_chunk(audio_data, is_final=is_final)
+                audio_chunk = chunk.audio
+                is_final_chunk = chunk.is_final
                 remaining = self.chunk_queue.qsize()
                 drain_note = (
                     " (draining queue after stop)"
@@ -1503,8 +1579,23 @@ class SVoiceRecApp:
                     f"Chunk worker received audio chunk of length={len(audio_chunk)}, "
                     f"is_final={is_final_chunk}, chunks_remaining_in_queue={remaining}{drain_note}"
                 )
+                queue_wait = max(0.0, time.monotonic() - chunk.enqueued_at)
+                emit_runtime_event(
+                    "chunk_dequeued",
+                    session_id=chunk.session_id,
+                    chunk_index=chunk.index,
+                    is_final=chunk.is_final,
+                    queue_wait_seconds=round(queue_wait, 6),
+                    queue_remaining=remaining,
+                )
 
-                self.process_chunk(audio_chunk, is_final_chunk=is_final_chunk, session_id=my_session_id)
+                self.process_chunk(
+                    audio_chunk,
+                    is_final_chunk=is_final_chunk,
+                    session_id=my_session_id,
+                    chunk_index=chunk.index,
+                    queue_wait_seconds=queue_wait,
+                )
                 self.chunk_queue.task_done()
             except queue.Empty:
                 continue
@@ -1630,7 +1721,14 @@ class SVoiceRecApp:
         self._submit_for_main_thread(self._do_finish_cleanup)
         return True
 
-    def process_chunk(self, audio_chunk, is_final_chunk: bool = False, session_id: int = 0):
+    def process_chunk(
+        self,
+        audio_chunk,
+        is_final_chunk: bool = False,
+        session_id: int = 0,
+        chunk_index: int = 0,
+        queue_wait_seconds: float = 0.0,
+    ):
         """Transcribe a single audio chunk, accumulate result, and show popup on final chunk."""
         try:
             # Build context: always keep the full vocab prompt, then fill the
@@ -1673,6 +1771,17 @@ class SVoiceRecApp:
                 + (f", cold_start_timeout={timeout_override:.0f}s (idle {idle_since_last:.0f}s)" if is_cold_start else "")
             )
 
+            transcribe_started = time.monotonic()
+            emit_runtime_event(
+                "transcribe_started",
+                session_id=session_id,
+                chunk_index=chunk_index,
+                is_final=is_final_chunk,
+                sample_count=len(audio_chunk),
+                queue_wait_seconds=round(queue_wait_seconds, 6),
+                cold_start=is_cold_start,
+            )
+
             def transcribe_call() -> str:
                 return self.transcriber.transcribe(
                     audio_chunk,
@@ -1693,6 +1802,15 @@ class SVoiceRecApp:
                 # interrupts the call, control jumps to the exception handler and
                 # this flag deliberately remains set.
                 self._needs_buffered_finalization = False
+            emit_runtime_event(
+                "transcribe_finished",
+                session_id=session_id,
+                chunk_index=chunk_index,
+                is_final=is_final_chunk,
+                duration_seconds=round(time.monotonic() - transcribe_started, 6),
+                char_count=len(text or ""),
+                success=bool(text),
+            )
 
             # Update last transcription time for keep-alive tracking
             self._last_transcription_time = time.time()
@@ -1836,6 +1954,11 @@ class SVoiceRecApp:
                                 toast_invalid_term=i18n.t("toast.invalid_term"),
                                 toast_exists=i18n.t("toast.exists"),
                             )
+                            emit_runtime_event(
+                                "popup_shown",
+                                session_id=session_id,
+                                char_count=len(full_text),
+                            )
                             log_info("process_chunk: show_interactive queued on main thread")
                     elif self._preview_panel:
                         self._append_to_popup = False
@@ -1907,13 +2030,33 @@ class SVoiceRecApp:
             f"Chunk worker exceeded hard timeout ({hard_timeout:.1f}s); "
             "restarting transcriber process."
         )
+        emit_runtime_event(
+            "transcriber_restart_requested",
+            session_id=session_id,
+            processing_cycle_id=cycle_id,
+            reason="worker_hard_timeout",
+        )
         self._needs_buffered_finalization = True
         try:
             # The stuck transcribe call owns _mlx_execution_lock. Restarting the
             # wrapper increments its generation and releases that caller.
             self.transcriber._restart_process()
+            emit_runtime_event(
+                "transcriber_restart_finished",
+                session_id=session_id,
+                processing_cycle_id=cycle_id,
+                reason="worker_hard_timeout",
+                success=True,
+            )
         except Exception as e:
             log_exception(f"Hard-timeout transcriber restart failed: {e}")
+            emit_runtime_event(
+                "transcriber_restart_finished",
+                session_id=session_id,
+                processing_cycle_id=cycle_id,
+                reason="worker_hard_timeout",
+                success=False,
+            )
 
     def _start_overdue_worker_watchdog(
         self,
@@ -1963,14 +2106,26 @@ class SVoiceRecApp:
 
             if last_audio is not None and len(last_audio) > 0:
                 try:
-                    self.chunk_queue.put_nowait((last_audio, True))
-                    log_info(
-                        "Final audio chunk added to queue (worker will process it in order)."
-                    )
-                except Exception:
+                    final_chunk = self._build_audio_chunk(last_audio, is_final=True)
+                    self.chunk_queue.put_nowait(final_chunk)
+                except queue.Full:
                     log_error("Chunk queue full — final audio chunk dropped.")
                     if self._session_id == my_session_id:
                         self._needs_buffered_finalization = True
+                else:
+                    try:
+                        emit_runtime_event(
+                            "chunk_captured",
+                            session_id=final_chunk.session_id,
+                            chunk_index=final_chunk.index,
+                            is_final=True,
+                            sample_count=len(last_audio),
+                        )
+                    except Exception as e:
+                        log_error(f"Failed to emit final chunk telemetry: {e}")
+                    log_info(
+                        "Final audio chunk added to queue (worker will process it in order)."
+                    )
             elif self._session_id == my_session_id:
                 self._needs_buffered_finalization = True
 
@@ -1983,6 +2138,13 @@ class SVoiceRecApp:
             # cancellation in _do_finish_cleanup or _cancel_delayed_timer (main thread).
             self._transcription_cycle_id += 1
             cycle_id = self._transcription_cycle_id
+            emit_runtime_event(
+                "recording_stopped",
+                session_id=my_session_id,
+                processing_cycle_id=cycle_id,
+                queue_size=queue_size,
+                has_final_chunk=last_audio is not None,
+            )
 
             def _delayed_notify() -> None:
                 try:
@@ -2438,6 +2600,11 @@ class SVoiceRecApp:
             f"Restarting transcriber for memory reset "
             f"(session {self._completed_sessions} of {TRANSCRIBER_RESTART_AFTER_SESSIONS})."
         )
+        emit_runtime_event(
+            "transcriber_restart_requested",
+            session_id=self._session_id,
+            reason="periodic_memory_reset",
+        )
         try:
             self._run_local_mlx(self.transcriber._restart_process)
             # Immediately pre-warm to reload model weights into GPU before next hotkey.
@@ -2449,8 +2616,20 @@ class SVoiceRecApp:
                 lambda: self.transcriber.pre_warm(wait=True)
             ):
                 log_info("Transcriber restarted and forced prewarm confirmed.")
+                emit_runtime_event(
+                    "transcriber_restart_finished",
+                    session_id=self._session_id,
+                    reason="periodic_memory_reset",
+                    success=True,
+                )
             else:
                 log_error("Transcriber restarted but forced prewarm was not confirmed.")
+                emit_runtime_event(
+                    "transcriber_restart_finished",
+                    session_id=self._session_id,
+                    reason="periodic_memory_reset",
+                    success=False,
+                )
         except Exception as e:
             log_error(f"Transcriber restart failed: {e}")
 

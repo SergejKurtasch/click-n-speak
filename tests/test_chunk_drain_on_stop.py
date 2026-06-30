@@ -113,6 +113,24 @@ def test_process_chunk_no_longer_skips_non_final_on_stop():
     assert "слово" in app.transcribed_parts
 
 
+def test_final_chunk_survives_telemetry_failure():
+    """Telemetry must not turn a successfully queued final chunk into a drop."""
+    app = _make_app()
+    final_audio = np.zeros(16000, dtype=np.float32)
+    app.recorder.stop.return_value = final_audio
+
+    with patch(
+        "src.app.emit_runtime_event",
+        side_effect=[RuntimeError("telemetry failed"), None],
+    ):
+        app.stop_recording_and_process()
+
+    queued = app.chunk_queue.get_nowait()
+    assert queued.is_final is True
+    assert queued.audio is final_audio
+    assert app._needs_buffered_finalization is False
+
+
 def test_worker_finalizes_buffered_partials_after_no_final_audio_timeout():
     """If stop() had no final chunk, late partials must still open the popup after drain."""
     app = _make_app()
