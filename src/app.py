@@ -32,7 +32,12 @@ from .correction_analyzer import (
     update_corrections_index,
     get_correction_candidates,
 )
-from .transcriber import TranscriberProcessWrapper, TRANSCRIBER_COLD_START_TIMEOUT_SECONDS, FileTranscriptionError
+from .transcriber import (
+    FileTranscriptionError,
+    TRANSCRIBER_COLD_START_TIMEOUT_SECONDS,
+    TranscriberProcessWrapper,
+    TranscriberRestartedError,
+)
 from .cloud_transcriber import CloudSTTTranscriber, DEFAULT_CLOUD_STT_MODEL
 from .vocab_provider import (
     add_term_to_user_terms,
@@ -330,6 +335,8 @@ class SVoiceRecApp:
         self.transcribed_parts = []
         self.worker_thread = None  # type: threading.Thread | None
         self.stop_worker = threading.Event()
+        self._worker_overdue = False
+        self._worker_watchdog: threading.Thread | None = None
         # Session ID incremented on each new recording; workers capture it at start
         # and skip injection if the ID no longer matches (new session started).
         self._session_id = 0
@@ -1387,6 +1394,8 @@ class SVoiceRecApp:
     def start_recording(self):
         if self.worker_thread is not None and self.worker_thread.is_alive():
             log_info("Previous chunk worker still running; cannot start new recording.")
+            self.is_recording = False
+            self.is_processing = True
             if self._preview_panel:
                 self._preview_panel.update_status(i18n.t("hud.still_working_title"), self._main_thread_queue)
             return
@@ -1503,6 +1512,7 @@ class SVoiceRecApp:
                 log_exception(f"Error in chunk worker loop: {e}")
         log_info("Chunk worker stopped (queue empty, ready for next session).")
         if self._session_id == my_session_id:
+            self._worker_overdue = False
             if self._needs_buffered_finalization:
                 # Run AI editor + replacements on the worker thread before handing off to main.
                 self._apply_ai_and_replacements_for_buffered(my_session_id)
@@ -1677,6 +1687,12 @@ class SVoiceRecApp:
                 if self.config.get("stt_backend", "local") == "local"
                 else transcribe_call()
             )
+            if is_final_chunk:
+                # A successful return (including a legitimate empty final chunk)
+                # supersedes watchdog buffered-finalization fallback. If restart
+                # interrupts the call, control jumps to the exception handler and
+                # this flag deliberately remains set.
+                self._needs_buffered_finalization = False
 
             # Update last transcription time for keep-alive tracking
             self._last_transcription_time = time.time()
@@ -1866,8 +1882,55 @@ class SVoiceRecApp:
                                 toast_exists=i18n.t("toast.exists"),
                             )
                             log_info("process_chunk: show_interactive queued (final chunk empty, using buffered partials)")
+        except TranscriberRestartedError as e:
+            log_error(f"Transcription interrupted by watchdog restart: {e}")
+            if self._session_id == session_id and self.transcribed_parts:
+                self._needs_buffered_finalization = True
         except Exception as e:
             log_exception(f"Unhandled exception in process_chunk: {e}")
+
+    def _watch_overdue_worker(
+        self,
+        worker: threading.Thread,
+        session_id: int,
+        cycle_id: int,
+        hard_timeout: float,
+    ) -> None:
+        """Restart a genuinely stuck transcriber while the session stays blocked."""
+        worker.join(timeout=hard_timeout)
+        if not worker.is_alive():
+            return
+        if self._session_id != session_id or self._transcription_cycle_id != cycle_id:
+            return
+
+        log_error(
+            f"Chunk worker exceeded hard timeout ({hard_timeout:.1f}s); "
+            "restarting transcriber process."
+        )
+        self._needs_buffered_finalization = True
+        try:
+            # The stuck transcribe call owns _mlx_execution_lock. Restarting the
+            # wrapper increments its generation and releases that caller.
+            self.transcriber._restart_process()
+        except Exception as e:
+            log_exception(f"Hard-timeout transcriber restart failed: {e}")
+
+    def _start_overdue_worker_watchdog(
+        self,
+        worker: threading.Thread,
+        session_id: int,
+        cycle_id: int,
+        pending_chunks: int,
+    ) -> None:
+        hard_timeout = min(300.0, max(105.0, pending_chunks * 35.0 + 20.0))
+        watchdog = threading.Thread(
+            target=self._watch_overdue_worker,
+            args=(worker, session_id, cycle_id, hard_timeout),
+            daemon=True,
+            name=f"chunk-worker-watchdog-{session_id}",
+        )
+        self._worker_watchdog = watchdog
+        watchdog.start()
 
     def stop_recording_and_process(self):
         log_info("Stopping recording and finalizing transcription...")
@@ -1966,20 +2029,21 @@ class SVoiceRecApp:
                 if self.worker_thread.is_alive():
                     log_error(
                         f"Worker thread did not finish within timeout. "
-                        f"Waited {waited:.1f}s. Force-resetting is_processing."
+                        f"Waited {waited:.1f}s. Keeping session blocked."
                     )
-                    # Force-reset so hotkeys are not permanently blocked.
-                    # We do NOT invalidate the session here: the worker is still
-                    # running and will show the popup once transcription finishes.
-                    # The session is only invalidated when the user starts a new
-                    # recording (via start_recording → _session_id += 1).
-                    self.is_processing = False
+                    self._worker_overdue = True
                     # Keep showing "still working" — chunk_worker will submit
                     # _do_finish_cleanup when it actually completes.
                     if self._preview_panel:
                         self._preview_panel.update_status(
                             i18n.t("hud.still_working_title"), self._main_thread_queue
                         )
+                    self._start_overdue_worker_watchdog(
+                        self.worker_thread,
+                        my_session_id,
+                        cycle_id,
+                        queue_size + (1 if last_audio is not None else 0) + 1,
+                    )
                 else:
                     log_info(
                         f"Worker thread finished. Waited {waited:.1f}s. "

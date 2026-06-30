@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import multiprocessing as mp
 import queue
@@ -17,6 +18,10 @@ from .utils import log_error, log_exception, log_info
 
 class FileTranscriptionError(Exception):
     """Raised when audio file loading or transcription fails in the child process."""
+
+
+class TranscriberRestartedError(RuntimeError):
+    """Raised when a blocking request is invalidated by process restart."""
 
 # Maximum seconds to wait for transcriber process to respond before killing it.
 # A shorter default keeps the UI responsive; cold starts use TRANSCRIBER_COLD_START_TIMEOUT_SECONDS.
@@ -561,6 +566,8 @@ class TranscriberProcessWrapper:
         self.output_queue = mp.Queue()
         self._prewarm_result_queue = mp.Queue()
         self._prewarm_request_id = 0
+        self._generation = 0
+        self._restart_lock = threading.Lock()
         self.model_name = model_name
         # Epoch time of the last completed transcription in this wrapper.
         # Used to skip prewarm when the model is already warm (recent transcription).
@@ -791,20 +798,26 @@ class TranscriberProcessWrapper:
         
     def _restart_process(self) -> None:
         """Kill the child process and start a fresh one (timeout recovery or memory reset)."""
-        log_info("Restarting transcriber process...")
-        try:
-            self._process.kill()
-            self._process.join(timeout=2.0)
-        except Exception as e:
-            log_error(f"Error killing transcriber process: {e}")
-        # Replace queues entirely — draining is racy (new items can arrive between
-        # get_nowait() and process restart). New objects guarantee a clean slate.
-        self.input_queue = mp.Queue()
-        self.output_queue = mp.Queue()
-        self._prewarm_result_queue = mp.Queue()
-        self._process = mp.Process(target=self._run_loop, daemon=True)
-        self._process.start()
-        log_info("Transcriber process restarted.")
+        restart_lock = getattr(self, "_restart_lock", None)
+        if restart_lock is None:
+            restart_lock = threading.Lock()
+            self._restart_lock = restart_lock
+        with restart_lock:
+            log_info("Restarting transcriber process...")
+            self._generation = getattr(self, "_generation", 0) + 1
+            try:
+                self._process.kill()
+                self._process.join(timeout=2.0)
+            except Exception as e:
+                log_error(f"Error killing transcriber process: {e}")
+            # Replace queues entirely — draining is racy (new items can arrive between
+            # get_nowait() and process restart). New objects guarantee a clean slate.
+            self.input_queue = mp.Queue()
+            self.output_queue = mp.Queue()
+            self._prewarm_result_queue = mp.Queue()
+            self._process = mp.Process(target=self._run_loop, daemon=True)
+            self._process.start()
+            log_info("Transcriber process restarted.")
 
     def transcribe(
         self,
@@ -824,6 +837,7 @@ class TranscriberProcessWrapper:
         Pass timeout_override=TRANSCRIBER_COLD_START_TIMEOUT_SECONDS for the first chunk
         after a long idle period to avoid killing the process before GPU weights reload.
         """
+        request_generation = getattr(self, "_generation", 0)
         self.input_queue.put({
             "action": "transcribe",
             "audio_data": audio_data,
@@ -836,6 +850,10 @@ class TranscriberProcessWrapper:
         # Wait for result with a hard timeout to prevent infinite hangs
         deadline = time.time() + effective_timeout
         while True:
+            if getattr(self, "_generation", 0) != request_generation:
+                raise TranscriberRestartedError(
+                    "Transcription request was cancelled by process restart."
+                )
             remaining = deadline - time.time()
             if remaining <= 0:
                 log_error(

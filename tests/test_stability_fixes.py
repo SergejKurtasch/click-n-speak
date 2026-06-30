@@ -250,12 +250,12 @@ def test_transcriber_timeout_returns_empty():
 
 
 # ---------------------------------------------------------------------------
-# Fix 4: is_processing reset on worker timeout
+# Fix 4: processing remains blocked on worker timeout
 # ---------------------------------------------------------------------------
 
 
-def test_is_processing_reset_on_worker_timeout():
-    """is_processing must be False after worker_thread.join() times out."""
+def test_is_processing_remains_true_on_worker_timeout():
+    """Soft timeout must not allow a new session while the worker is alive."""
     from src.app import SVoiceRecApp
 
     with patch("src.app.AudioRecorder"), \
@@ -286,6 +286,8 @@ def test_is_processing_reset_on_worker_timeout():
         app._timer_lock = threading.Lock()
         app._preview_panel = None
         app._still_working_delay_seconds = 999  # don't fire during test
+        app._worker_overdue = False
+        app._start_overdue_worker_watchdog = MagicMock()
 
         # Create a worker thread that never finishes
         never_done = threading.Event()
@@ -299,8 +301,86 @@ def test_is_processing_reset_on_worker_timeout():
         with patch.object(threading.Thread, 'join', fast_join):
             app.stop_recording_and_process()
 
-        assert app.is_processing is False, "is_processing should be reset after worker timeout"
+        assert app.is_processing is True
+        assert app._worker_overdue is True
+        app._start_overdue_worker_watchdog.assert_called_once()
         never_done.set()  # cleanup
+
+
+def test_start_recording_repairs_flags_when_previous_worker_is_alive():
+    """Rejected recording start must not leave a false recording state."""
+    from src.app import SVoiceRecApp
+
+    app = SVoiceRecApp.__new__(SVoiceRecApp)
+    app.is_recording = True
+    app.is_processing = False
+    app.worker_thread = MagicMock()
+    app.worker_thread.is_alive.return_value = True
+    app._preview_panel = None
+
+    app.start_recording()
+
+    assert app.is_recording is False
+    assert app.is_processing is True
+
+
+def test_transcribe_detects_generation_change() -> None:
+    """A process restart must wake an old blocking transcription request."""
+    from src.transcriber import TranscriberProcessWrapper, TranscriberRestartedError
+
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper._generation = 1
+    wrapper._last_transcribe_returned_at = 0.0
+
+    def _change_generation() -> None:
+        time.sleep(0.03)
+        wrapper._generation = 2
+
+    threading.Thread(target=_change_generation, daemon=True).start()
+    with pytest.raises(TranscriberRestartedError):
+        wrapper.transcribe(np.zeros(1600, dtype=np.float32), timeout_override=1.0)
+
+
+def test_overdue_worker_watchdog_restarts_current_session() -> None:
+    """Hard timeout must restart the child without clearing processing state."""
+    from src.app import SVoiceRecApp
+
+    app = SVoiceRecApp.__new__(SVoiceRecApp)
+    app._session_id = 3
+    app._transcription_cycle_id = 8
+    app.is_processing = True
+    app.transcribed_parts = ["partial"]
+    app._needs_buffered_finalization = False
+    app.transcriber = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.return_value = True
+
+    app._watch_overdue_worker(worker, 3, 8, 0.01)
+
+    worker.join.assert_called_once_with(timeout=0.01)
+    app.transcriber._restart_process.assert_called_once_with()
+    assert app._needs_buffered_finalization is True
+    assert app.is_processing is True
+
+
+def test_overdue_worker_without_partials_requests_buffered_finalization() -> None:
+    """An interrupted final request must finish with a user-visible no-audio path."""
+    from src.app import SVoiceRecApp
+
+    app = SVoiceRecApp.__new__(SVoiceRecApp)
+    app._session_id = 3
+    app._transcription_cycle_id = 8
+    app.transcribed_parts = []
+    app._needs_buffered_finalization = False
+    app.transcriber = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.return_value = True
+
+    app._watch_overdue_worker(worker, 3, 8, 0.01)
+
+    assert app._needs_buffered_finalization is True
 
 
 # ---------------------------------------------------------------------------
