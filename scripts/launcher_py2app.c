@@ -46,6 +46,9 @@ int main(int argc, char *argv[]) {
      * overriding the compiled-in venv paths baked into libpython. */
     setenv("RESOURCEPATH",       resources, 1);
     setenv("PYTHONHOME",         resources, 1);
+    /* A signed bundle is immutable. Import-time .pyc writes under Resources
+     * invalidate the code-signing seal after the first launch. */
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
     setenv("ARGVZERO",           exe,       1);  /* py2app: basename used as argv[0] in sys.argv */
     setenv("CLICK_N_SPEAK_APP",  bundle,    1);
 

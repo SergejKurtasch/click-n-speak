@@ -222,6 +222,34 @@ def test_hallucination_generic_subtitry_filtered(mock_call):
 # ---------------------------------------------------------------------------
 
 
+def test_transcriber_spawn_target_does_not_capture_wrapper():
+    """The macOS spawn target must not pickle locks stored on the wrapper."""
+    input_queue = MagicMock(name="input_queue")
+    output_queue = MagicMock(name="output_queue")
+    prewarm_queue = MagicMock(name="prewarm_queue")
+    process = MagicMock(name="process")
+
+    with (
+        patch(
+            "src.transcriber.mp.Queue",
+            side_effect=[input_queue, output_queue, prewarm_queue],
+        ),
+        patch("src.transcriber.mp.Process", return_value=process) as process_cls,
+    ):
+        wrapper = TranscriberProcessWrapper(model_name="dummy/model")
+
+    _, process_kwargs = process_cls.call_args
+    assert process_kwargs["target"] is TranscriberProcessWrapper._run_loop
+    assert process_kwargs["args"] == (
+        input_queue,
+        output_queue,
+        prewarm_queue,
+        "dummy/model",
+    )
+    assert wrapper not in process_kwargs["args"]
+    process.start.assert_called_once_with()
+
+
 def test_transcriber_timeout_returns_empty():
     """TranscriberProcessWrapper.transcribe() should return '' after timeout if process hangs."""
     wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)

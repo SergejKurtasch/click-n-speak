@@ -127,15 +127,59 @@ fi
 # Step 4: Re-sign the bundle (copying new files invalidates the signature)
 # Sign each .so/.dylib individually first — --deep misses some nested binaries on macOS 15+
 echo "Step 4: Re-signing bundle..."
+
+repair_liblzma() {
+    local target="$1"
+    local source
+
+    source=$("${PYTHON_EXEC}" -c '
+from pathlib import Path
+import PIL
+
+candidate = Path(PIL.__file__).parent / ".dylibs" / "liblzma.5.dylib"
+if candidate.is_file():
+    print(candidate)
+')
+    if [ -z "${source}" ] || [ ! -f "${source}" ]; then
+        echo "  ERROR: Could not locate a clean Pillow liblzma.5.dylib" >&2
+        return 1
+    fi
+
+    echo "  Repairing malformed py2app liblzma from ${source}"
+    cp "${source}" "${target}"
+    xattr -d com.apple.provenance "${target}" 2>/dev/null || true
+    codesign --remove-signature "${target}" 2>/dev/null || true
+    install_name_tool \
+        -id "@executable_path/../Frameworks/$(basename "${target}")" \
+        "${target}"
+    codesign --force --sign - "${target}"
+}
+
 failed=0
 while IFS= read -r f; do
     if ! codesign --force --sign - "$f" 2>&1; then
-        echo "  WARNING: failed to sign $f" >&2
-        failed=$((failed + 1))
+        if [[ "$(basename "$f")" == liblzma*.dylib ]] && repair_liblzma "$f"; then
+            echo "  ✅ Repaired and signed $f"
+        else
+            echo "  ERROR: failed to sign $f" >&2
+            failed=$((failed + 1))
+        fi
     fi
 done < <(find "${BUNDLE}" \( -name "*.so" -o -name "*.dylib" \))
-[ "$failed" -gt 0 ] && echo "  ⚠️  $failed binary/binaries failed to sign" >&2
-codesign --force --sign - "${BUNDLE}" || echo "  Warning: bundle codesign failed (non-critical for local use)"
+if [ "$failed" -gt 0 ]; then
+    echo "  ERROR: ${failed} binary/binaries failed to sign" >&2
+    exit 1
+fi
+
+# py2app may modify its multiprocessing helper after the linker applies an
+# ad-hoc signature. Re-sign every Mach-O launcher/helper before sealing the app.
+while IFS= read -r executable; do
+    codesign --force --sign - "${executable}"
+done < <(find "${BUNDLE}/Contents/MacOS" -type f -perm +111)
+
+codesign --force --sign - "${BUNDLE}"
+codesign --verify --deep --strict --verbose=2 "${BUNDLE}"
+echo "  ✅ Bundle signature verified"
 
 # Step 5: Verify
 echo ""

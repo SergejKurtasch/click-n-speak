@@ -1,19 +1,31 @@
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
-
-from pynput.keyboard import Controller, Key
+from typing import Any, Protocol
 
 from .utils import is_accessibility_trusted, log_error, log_info, send_notification
 
 try:
     from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString
     from Foundation import NSData
+    from Quartz import (
+        CGEventCreateKeyboardEvent,
+        CGEventKeyboardSetUnicodeString,
+        CGEventPost,
+        CGEventSetFlags,
+        kCGEventFlagMaskCommand,
+        kCGHIDEventTap,
+    )
 except ImportError:  # pragma: no cover - exercised on non-macOS CI only
     NSPasteboard = None
     NSPasteboardItem = None
     NSPasteboardTypeString = None
     NSData = None
+    CGEventCreateKeyboardEvent = None
+    CGEventKeyboardSetUnicodeString = None
+    CGEventPost = None
+    CGEventSetFlags = None
+    kCGEventFlagMaskCommand = None
+    kCGHIDEventTap = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,12 @@ class ClipboardAdapter(Protocol):
         snapshot: PasteboardSnapshot,
         expected_change_count: int,
     ) -> bool: ...
+
+
+class KeyboardAdapter(Protocol):
+    def paste(self) -> None: ...
+
+    def type_text(self, text: str) -> None: ...
 
 
 class MacPasteboardAdapter:
@@ -106,21 +124,44 @@ class MacPasteboardAdapter:
         return True
 
 
-def _paste_with_keyboard(keyboard: Controller) -> None:
-    keyboard.press(Key.cmd)
-    try:
-        keyboard.press("v")
-        keyboard.release("v")
-    finally:
-        keyboard.release(Key.cmd)
+class QuartzKeyboardAdapter:
+    """Post keyboard events without querying Text Services from a worker thread."""
 
+    _VIRTUAL_KEY_V = 9
+    _VIRTUAL_KEY_A = 0
 
-def _type_with_keyboard(keyboard: Controller, text: str, delay: float) -> None:
-    for modifier in (Key.alt, Key.cmd, Key.shift, Key.ctrl):
-        keyboard.release(modifier)
-    for char in text:
-        keyboard.type(char)
-        time.sleep(delay)
+    def _require_quartz(self) -> None:
+        if any(
+            value is None
+            for value in (
+                CGEventCreateKeyboardEvent,
+                CGEventPost,
+                CGEventSetFlags,
+                kCGEventFlagMaskCommand,
+                kCGHIDEventTap,
+            )
+        ):
+            raise RuntimeError("Quartz keyboard events are unavailable")
+
+    def paste(self) -> None:
+        self._require_quartz()
+        for is_key_down in (True, False):
+            event = CGEventCreateKeyboardEvent(None, self._VIRTUAL_KEY_V, is_key_down)
+            if event is None:
+                raise RuntimeError("Could not create Quartz paste event")
+            CGEventSetFlags(event, kCGEventFlagMaskCommand)
+            CGEventPost(kCGHIDEventTap, event)
+
+    def type_text(self, text: str) -> None:
+        self._require_quartz()
+        if CGEventKeyboardSetUnicodeString is None:
+            raise RuntimeError("Quartz Unicode keyboard events are unavailable")
+        for is_key_down in (True, False):
+            event = CGEventCreateKeyboardEvent(None, self._VIRTUAL_KEY_A, is_key_down)
+            if event is None:
+                raise RuntimeError("Could not create Quartz Unicode event")
+            CGEventKeyboardSetUnicodeString(event, len(text), text)
+            CGEventPost(kCGHIDEventTap, event)
 
 
 def inject_text(
@@ -128,9 +169,8 @@ def inject_text(
     pre_delay: float = 0.0,
     *,
     clipboard: ClipboardAdapter | None = None,
-    keyboard_factory: Callable[[], Controller] = Controller,
+    keyboard: KeyboardAdapter | None = None,
     restore_delay: float = 0.35,
-    typing_delay: float = 0.006,
 ) -> InjectionResult:
     """Paste text atomically, falling back to throttled character typing."""
     started_at = time.monotonic()
@@ -156,7 +196,7 @@ def inject_text(
     if pre_delay > 0:
         time.sleep(pre_delay)
 
-    keyboard = keyboard_factory()
+    keyboard_adapter = keyboard or QuartzKeyboardAdapter()
     pasteboard = clipboard or MacPasteboardAdapter()
     paste_sent = False
     snapshot: PasteboardSnapshot | None = None
@@ -166,7 +206,7 @@ def inject_text(
             snapshot = pasteboard.snapshot()
             change_count = pasteboard.set_text(text)
             log_info(f"Attempting atomic text injection: chars={len(text)}")
-            _paste_with_keyboard(keyboard)
+            keyboard_adapter.paste()
             paste_sent = True
             time.sleep(max(0.0, restore_delay))
             pasteboard.restore_if_unchanged(snapshot, change_count)
@@ -190,7 +230,7 @@ def inject_text(
 
     try:
         log_info(f"Attempting typed text injection: chars={len(text)}")
-        _type_with_keyboard(keyboard, text, typing_delay)
+        keyboard_adapter.type_text(text)
         elapsed = time.monotonic() - started_at
         log_info(
             f"Text injection successful: method=typing chars={len(text)} "

@@ -14,11 +14,17 @@ Main thread (rumps/AppKit event loop)
 Hotkey thread (pynput)
   └─ toggle_recording() → spawns stop_recording_and_process thread
 
+Injection worker thread (per confirmation)
+  └─ waits for main-thread frontmost-PID confirmation → temporary pasteboard text → Cmd+V → conditional pasteboard restore
+
 Audio stream thread (sounddevice callback)
   └─ _callback() → triggers chunk via chunk_callback
 
 Chunk worker thread (per session)
   └─ chunk_worker() → calls process_chunk() → calls transcriber.transcribe() (blocks)
+
+Overdue worker watchdog thread (only after soft timeout)
+  └─ keeps `is_processing=True`; at the bounded hard deadline restarts the child and lets generation invalidation release the blocked request
 
 Transcriber child process (multiprocessing)
   └─ _run_loop(): processes input_queue serially (warmup / prewarm / transcribe)
@@ -59,13 +65,15 @@ ModelDownloader child process (per download, at most one active)
 | `src/suggestions_panel.py` | Resizable NSWindow for reviewing pending candidates; scrollable checkbox list | `SuggestionsPanel` |
 | `src/menu_bar.py` | rumps menu bar, settings; Permissions submenu; Initial Prompt submenu includes **Statistics…**; hourly daily maintenance + 60s dirty-config flush timers | `ClickNSpeakApp` |
 | `src/hotkey_handler.py` | pynput global hotkey listener | `HotkeyHandler`, `CompatGlobalHotKeys` |
-| `src/injector.py` | Types text into active app via pynput | `inject_text()` |
+| `src/injector.py` | Atomic pasteboard/⌘V injection with full clipboard preservation; throttled pynput typing fallback | `inject_text()`, `InjectionResult`, `MacPasteboardAdapter` |
 | `src/permissions.py` | macOS TCC permission checks and requests | `check_accessibility()`, `check_input_monitoring()`, `check_microphone()`, `all_permissions_granted()`, `is_setup_done()`, `mark_setup_done()` |
 | `src/setup_wizard.py` | First-launch NSAlert wizard for all permissions | `run_setup_wizard()`, `is_wizard_active()` |
 | `src/utils.py` | Logging, config paths, notifications, UI strings, language helpers, term metadata helpers, atomic text writes | `setup_logging()`, `get_config_path()`, `get_allowed_languages()`, `get_language_script()`, `target_lang_for_script_bucket()`, `get_metrics_history_path()`, `write_text_atomic()`, `build_initial_prompt()`, `migrate_config_to_v5()`, `update_term_usage()`, `apply_decay()`, `_term_str()`, `_term_is_active()` |
 | `src/phrase_history.py` | Append-only phrase log (TSV) | `append_phrase()`, `get_last_phrases()`, `count_phrases()` — cached via `_phrase_count` |
-| `src/dataset_logger.py` | JSONL dataset for fine-tuning | `append_to_dataset()` — records `ai_status` field per entry |
+| `src/dataset_logger.py` | JSONL dataset for fine-tuning | `append_to_dataset()` — records `ai_status`, `stt_model`, and `ai_model` per entry |
 | `src/metrics.py` | Dictionary/quality metrics from dataset + corrections + config; daily history snapshots (JSONL append + optional rotation) | `compute_metrics()`, `append_metrics_history()`, `load_metrics_history()` |
+| `src/runtime_telemetry.py` | Privacy-safe structured runtime events, typed audio chunk envelope, parent/child RSS snapshots | `AudioChunk`, `emit_runtime_event()`, `collect_process_metrics()` |
+| `src/runtime_health.py` | Rolling warm-decode/prewarm health window; cooldown-protected adaptive restart decisions | `TranscriberHealthMonitor`, `RestartDecision` |
 | `src/vocab_provider.py` | Feeds external API editors: ranked known terms from `user_terms`, misrecognition pairs from `corrections.json`; popup **Add to Dictionary** inserts via `add_term_to_user_terms()` | `collect_known_terms()`, `collect_misrecognitions()`, `add_term_to_user_terms()` |
 | `src/correction_analyzer.py` | Extracts correction-driven term candidates from user edits; `corrections.json` uses script buckets `latin`/`cyrillic` (schema v2) | `update_corrections_index()`, `get_correction_candidates()`, `has_fresh_strong_correction_signal()` |
 | `src/log_analyzer.py` | Phrase-history vocabulary candidates (`latin`/`cyrillic` script buckets); merge/remap in `app.py` uses `get_language_script()` | `get_frequent_terms()`, `get_prompt_candidates()` |
@@ -112,16 +120,21 @@ IDLE  (_do_finish_cleanup on main thread)
 | `_session_id` | int | Increments on each `start_recording()`; worker checks this before showing popup to avoid stale injection |
 | `stop_worker` | threading.Event | Set when stop is requested; worker drains queue then exits |
 | `_append_to_popup` | bool | Set when hotkey fires while popup is open; causes new transcription to append instead of replacing |
+| `_worker_overdue` | bool | Soft join timeout elapsed; hotkey remains blocked until worker exit or watchdog recovery |
 
 ---
 
 ## Critical thread-safety rules
 
 - **All NSPanel/UI calls must go through `_submit_for_main_thread()`** which puts them in `_main_thread_queue`, drained on main thread by rumps 0.3s timer.
+- Text injection starts only after two stable frontmost-PID checks on the main thread; actual paste/typing runs on `text-injection`, never on the AppKit main thread.
+- `MacPasteboardAdapter` restores the captured clipboard only when `changeCount` still matches the temporary injection write, so a new user copy is never overwritten.
 - **Exception:** `preview_panel.update_status(text, queue)` accepts `_main_thread_queue` as a parameter and dispatches AppKit operations internally — safe to call from worker threads.
 - `chunk_worker` and `process_chunk` run on the worker thread — they only touch `self.transcribed_parts`, `self._session_id`, and queue jobs to main thread.
 - `transcriber.transcribe()` is a **blocking call** — it waits for the child process to respond. The child process is single-threaded and serializes all requests.
-- `AiEditor.refine()` uses a non-blocking lock — if a previous LLM call is still running, refinement is skipped entirely (Metal GPU conflict avoidance). `last_refine_status` is set in every code path (`ok`/`unchanged`/`timeout`/`skipped`/`error`/`disabled`).
+- A worker soft timeout never clears `is_processing`; `_watch_overdue_worker()` owns the hard deadline. `TranscriberProcessWrapper._generation` invalidates an in-flight blocking request when the child restarts.
+- `TranscriberHealthMonitor` ignores one cold decode, but sustained warm slowdown or failed/severely slow prewarm sets one deferred restart reason; `_restart_transcriber()` executes it only while idle and applies a 20-min cooldown.
+- Local Whisper and Qwen inference are serialized by `SVoiceRecApp._mlx_execution_lock`; `AiEditor.refine()` also keeps its own non-blocking lock so overlapping editor calls are skipped. `last_refine_status` is set in every code path (`ok`/`unchanged`/`timeout`/`skipped`/`error`/`disabled`).
 - `GeminiEditor` (and any future `ExternalApiEditor`) uses the same non-blocking lock pattern. On timeout the lock stays held by the daemon thread until the HTTP request finishes — preventing concurrent API calls. Uses `REFINE_STATUS_SKIPPED` (not `DISABLED`) when the lock is busy.
 - **Memory-pressure skip** applies only to the local MLX `AiEditor`, not to `ExternalApiEditor` — cloud backends do not contend for the Whisper GPU weights.
 - **`update_term_usage()`** runs on the main thread (`_apply_term_usage_on_main` via `_submit_for_main_thread` after injection); `_config_usage_dirty` is flushed by `flush_dirty_config_if_needed()` on a 60s menu-bar timer and before periodic transcriber restarts.
@@ -130,7 +143,8 @@ IDLE  (_do_finish_cleanup on main thread)
 - `get_allowed_languages()` in `utils.py` normalises internal lang codes to ISO 639-1 via `_WHISPER_LANG_CODE` before passing to Whisper (e.g. `"ua"` → `"uk"`). When adding a new language with a non-standard internal code, add a mapping there.
 - `get_gemini_api_key()` / `set_gemini_api_key()` read/write the Gemini API key from env vars (`GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY`) or macOS Keychain (`click-n-speak` / `google_api_key`). Keychain writes call `/usr/bin/security` via subprocess.
 - `save_config_to_disk()` writes atomically via sibling tmp file + `os.replace` + `fsync` — `config.json` is never corrupted by SIGKILL mid-write.
-- `chunk_queue.put_nowait()` is used throughout — never the blocking `put()` — to avoid deadlocking the stop sequence.
+- `chunk_queue.put_nowait()` carries `AudioChunk(session_id, index, timestamps, audio)` — never use blocking `put()`; `chunk_index` must remain monotonic within a session.
+- Structured `runtime_event` fields must never contain transcript, prompt, or clipboard content; `scripts/analyze_runtime_log.py` is the canonical 14-day latency/order report.
 - **`ModelDownloader` callbacks never mutate `_download_state`/`_download_progress` directly** — `on_error` and `on_cancelled` post `_apply_error`/`_apply_cancel` closures to `_main_thread_queue`. The guard in `_start_whisper_model_download` iterates `WHISPER_MODELS` (constant list), not `_download_state.values()`, to avoid `RuntimeError` from concurrent `.pop()`.
 - `_call_mlx_transcribe()` sets `HF_HUB_OFFLINE=1` around every `mlx_whisper.transcribe()` call and restores the previous value in `finally` — prevents the transcriber child from triggering a network download mid-transcription when mlx_whisper probes for model updates.
 - On macOS 15+, **never auto-start pynput listener after permission grant** — `TSMGetInputSourceProperty` crashes unless the process was started with permissions already held. Require app restart instead.
@@ -176,11 +190,11 @@ audio_chunk (numpy float32, 16kHz)
 | Trigger | Method | Effect |
 |---|---|---|
 | App startup | `start_model_warmup()` → `transcriber.warmup()` | One-time silence transcription in child process |
-| Every 15 min (or any tick under memory pressure) | `_keep_alive_tick()` → `_do_keep_alive_warmup()` | `clear_cache()` always; `pre_warm()` only when no memory pressure |
+| Every 15 min (or any tick under memory pressure) | `_keep_alive_tick()` → `_do_keep_alive_warmup()` | Confirmed Whisper-only `pre_warm()`; under critical pressure only `clear_cache()` runs |
 | After every transcription | `_run_loop` (child process) | `mlx.core.metal.clear_cache()` + `gc.collect()` — releases mel/attention/logit Metal buffers immediately |
 | macOS wake from sleep | `start_wake_observer()` | Triggers `_do_keep_alive_warmup()` |
-| Each hotkey press | `start_recording()` → `transcriber.pre_warm()` | Real silence transcription bypassing `_warmup_done` guard; **skipped** if last transcription returned < 45s ago (`_last_transcribe_returned_at`) |
-| Every 20 completed sessions | `_do_finish_cleanup()` → `_restart_transcriber_for_memory()` (daemon thread) | Full child-process restart + immediate `pre_warm()`; resets model weight tensors that `clear_cache()` cannot free |
+| Each hotkey press | `start_recording()` | No forced warmup; the first real chunk has priority over synthetic Whisper/Qwen work |
+| Health degradation or every 20 completed sessions | `TranscriberHealthMonitor` / `_do_finish_cleanup()` → `_restart_transcriber(reason)` | Idle-only child restart + confirmed prewarm; 20 sessions remains the fallback memory reset |
 
 ---
 
@@ -334,6 +348,7 @@ All NSPanel calls are posted as `(fn, args, kwargs)` tuples to `_main_thread_que
 | Corrections index | `~/Click-n-speak/corrections.json` (dev) | `~/Library/Application Support/Click-n-speak/corrections.json` |
 | Prompt files (per lang) | `~/Library/Application Support/Click-n-speak/initial_prompt_{lang}.txt` | same |
 | Dev CLI `scripts/print_metrics.py` | repo `scripts/print_metrics.py` (запуск из корня с активированным venv) | — |
+| Dev CLI `scripts/analyze_runtime_log.py` | repo `scripts/analyze_runtime_log.py --days 14` (запуск из корня с активированным venv) | — |
 
 ---
 
@@ -343,7 +358,7 @@ All NSPanel calls are posted as `(fn, args, kwargs)` tuples to `_main_thread_que
 |---|---|---|---|
 | First chunk collected | ~4-5s | ~8s | Depends on pauses in speech |
 | Whisper transcription (warm) | 2-4s | 6s | Per chunk |
-| Whisper transcription (cold GPU) | 15-21s | 25s | After long idle; `pre_warm()` on hotkey mitigates |
+| Whisper transcription (cold GPU) | 15-21s | 25s | After long idle; startup/wake/keep-alive prewarm mitigates |
 | AI Editor (Qwen 2.5 1.5B 4-bit) | 0.7-0.9s | 8s | Final chunk only; has timeout + abort fallback |
 | Popup appears after stop | ~4-6s | ~20s | = queued chunks drain + last chunk + AI editor |
 
@@ -351,7 +366,7 @@ All NSPanel calls are posted as `(fn, args, kwargs)` tuples to `_main_thread_que
 - Queued non-final chunks are now **all processed** on stop — no longer dropped; no speech is lost.
 - Short silent chunks (<3s, RMS<0.005) rejected before Whisper — avoids 14-22s tail-decode.
 - Final chunks ≤0.5s (8000 samples) skipped — prevents 0.30s boundary artefact reaching Whisper.
-- `pre_warm()` skipped when last transcription < 45s ago — eliminates 15-22s cold-start penalty on rapid re-recordings.
+- Hotkey no longer queues forced Whisper/Qwen prewarm ahead of the first real chunk; local MLX inference is serialized by the parent.
 
 **Latency sources resolved (2026-04-29):**
 - **Cold-start text loss**: first chunk of a session after 5+ min idle or under memory pressure uses extended 90s timeout (`TRANSCRIBER_COLD_START_TIMEOUT_SECONDS`) — process no longer killed before GPU weights reload.

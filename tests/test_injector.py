@@ -1,6 +1,11 @@
 from unittest.mock import MagicMock, patch
 
-from src.injector import InjectionResult, PasteboardSnapshot, inject_text
+from src.injector import (
+    InjectionResult,
+    PasteboardSnapshot,
+    QuartzKeyboardAdapter,
+    inject_text,
+)
 
 
 class FakeClipboard:
@@ -42,7 +47,7 @@ def test_atomic_paste_uses_one_shortcut_and_restores_clipboard() -> None:
         result = inject_text(
             "Привет\nworld",
             clipboard=clipboard,
-            keyboard_factory=lambda: keyboard,
+            keyboard=keyboard,
             restore_delay=0.0,
         )
 
@@ -50,8 +55,8 @@ def test_atomic_paste_uses_one_shortcut_and_restores_clipboard() -> None:
     assert result.method == "paste"
     assert clipboard.text == "Привет\nworld"
     assert clipboard.restored is True
-    keyboard.type.assert_not_called()
-    keyboard.press.assert_any_call("v")
+    keyboard.type_text.assert_not_called()
+    keyboard.paste.assert_called_once_with()
 
 
 def test_new_user_clipboard_is_not_overwritten() -> None:
@@ -61,7 +66,7 @@ def test_new_user_clipboard_is_not_overwritten() -> None:
         result = inject_text(
             "text",
             clipboard=clipboard,
-            keyboard_factory=MagicMock,
+            keyboard=MagicMock(),
             restore_delay=0.0,
         )
 
@@ -78,17 +83,17 @@ def test_unavailable_clipboard_falls_back_to_throttled_typing() -> None:
         result = inject_text(
             "abc",
             clipboard=FakeClipboard(available=False),
-            keyboard_factory=lambda: keyboard,
+            keyboard=keyboard,
         )
 
     assert result == InjectionResult(True, "typing", 3, result.duration_seconds)
-    assert keyboard.type.call_count == 3
+    keyboard.type_text.assert_called_once_with("abc")
 
 
 def test_failed_paste_restores_clipboard_before_typing_fallback() -> None:
     clipboard = FakeClipboard()
     keyboard = MagicMock()
-    keyboard.press.side_effect = RuntimeError("paste shortcut failed")
+    keyboard.paste.side_effect = RuntimeError("paste shortcut failed")
 
     with patch("src.injector.is_accessibility_trusted", return_value=True), patch(
         "src.injector.time.sleep"
@@ -96,7 +101,7 @@ def test_failed_paste_restores_clipboard_before_typing_fallback() -> None:
         result = inject_text(
             "abc",
             clipboard=clipboard,
-            keyboard_factory=lambda: keyboard,
+            keyboard=keyboard,
         )
 
     assert clipboard.restored is True
@@ -113,6 +118,31 @@ def test_missing_accessibility_returns_failure() -> None:
     assert result.success is False
     assert result.method == "none"
     assert "Accessibility" in (result.error or "")
+
+
+def test_quartz_paste_posts_command_v_without_text_services() -> None:
+    adapter = QuartzKeyboardAdapter()
+    key_down = MagicMock(name="key_down")
+    key_up = MagicMock(name="key_up")
+
+    with (
+        patch(
+            "src.injector.CGEventCreateKeyboardEvent",
+            side_effect=[key_down, key_up],
+        ) as create_event,
+        patch("src.injector.CGEventSetFlags") as set_flags,
+        patch("src.injector.CGEventPost") as post_event,
+        patch("src.injector.kCGEventFlagMaskCommand", 1),
+        patch("src.injector.kCGHIDEventTap", 0),
+    ):
+        adapter.paste()
+
+    assert create_event.call_args_list == [
+        ((None, 9, True),),
+        ((None, 9, False),),
+    ]
+    assert set_flags.call_count == 2
+    assert post_event.call_args_list == [((0, key_down),), ((0, key_up),)]
 
 
 def test_focus_must_be_confirmed_before_injection() -> None:

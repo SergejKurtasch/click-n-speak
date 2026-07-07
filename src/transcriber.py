@@ -575,10 +575,29 @@ class TranscriberProcessWrapper:
         self.last_detected_language: str = ""
 
         # Start child process
-        self._process = mp.Process(target=self._run_loop, daemon=True)
+        self._process = self._create_process()
         self._process.start()
 
-    def _run_loop(self):
+    def _create_process(self) -> mp.Process:
+        """Create a child without capturing this wrapper in the spawn target."""
+        return mp.Process(
+            target=self._run_loop,
+            args=(
+                self.input_queue,
+                self.output_queue,
+                self._prewarm_result_queue,
+                self.model_name,
+            ),
+            daemon=True,
+        )
+
+    @staticmethod
+    def _run_loop(
+        input_queue: mp.Queue,
+        output_queue: mp.Queue,
+        prewarm_result_queue: mp.Queue,
+        model_name: str,
+    ) -> None:
         # Parent-death watchdog: macOS has no PR_SET_PDEATHSIG, and a daemon
         # mp.Process only dies via atexit in the parent — which is skipped on
         # SIGKILL, crash, Force Quit, or NSApp.terminate without cleanup. Without
@@ -592,37 +611,37 @@ class TranscriberProcessWrapper:
         _os.environ["HF_HUB_OFFLINE"] = "1"
         log_info(
             f"Transcriber child process started: pid={_os.getpid()} "
-            f"ppid={_os.getppid()} pgid={_os.getpgrp()} model={self.model_name}"
+            f"ppid={_os.getppid()} pgid={_os.getpgrp()} model={model_name}"
         )
         install_parent_death_watchdog()
 
         try:
-            transcriber = WhisperTranscriber(model_name=self.model_name)
+            transcriber = WhisperTranscriber(model_name=model_name)
         except Exception as e:
-            self.output_queue.put({"type": "error", "message": str(e), "trace": traceback.format_exc()})
+            output_queue.put({"type": "error", "message": str(e), "trace": traceback.format_exc()})
             return
 
         while True:
             try:
-                cmd = self.input_queue.get()
+                cmd = input_queue.get()
                 if cmd is None:
                     break
                 
                 action = cmd.get("action")
                 if action == "warmup":
                     transcriber.warmup(language=cmd.get("language"))
-                    self.output_queue.put({"type": "warmup_done"})
+                    output_queue.put({"type": "warmup_done"})
                 elif action == "prewarm":
                     # Skip prewarm if a real transcribe request is already waiting —
                     # the queue became non-empty between pre_warm() being sent and the
                     # child getting here, meaning the user started speaking immediately.
                     # Running prewarm in that case would block the real chunk for 15-22s.
-                    if not self.input_queue.empty():
+                    if not input_queue.empty():
                         log_info(
                             "Prewarm skipped: real transcribe pending in queue "
                             "— model will warm on first real chunk."
                         )
-                        self._prewarm_result_queue.put({
+                        prewarm_result_queue.put({
                             "request_id": cmd.get("request_id"),
                             "success": False,
                             "reason": "transcribe_pending",
@@ -630,7 +649,7 @@ class TranscriberProcessWrapper:
                     else:
                         try:
                             transcriber.prewarm(language=cmd.get("language"))
-                            self._prewarm_result_queue.put({
+                            prewarm_result_queue.put({
                                 "request_id": cmd.get("request_id"),
                                 "success": True,
                             })
@@ -638,13 +657,13 @@ class TranscriberProcessWrapper:
                             log_exception(
                                 f"Whisper forced prewarm failed: {prewarm_error}"
                             )
-                            self._prewarm_result_queue.put({
+                            prewarm_result_queue.put({
                                 "request_id": cmd.get("request_id"),
                                 "success": False,
                                 "reason": str(prewarm_error),
                             })
                 elif action == "transcribe":
-                    def _signal_lang_retry(oq=self.output_queue):
+                    def _signal_lang_retry(oq=output_queue):
                         oq.put({"type": "lang_retry_started"})
 
                     text = transcriber.transcribe(
@@ -655,7 +674,7 @@ class TranscriberProcessWrapper:
                         is_final_chunk=cmd.get("is_final_chunk", False),
                         on_lang_retry=_signal_lang_retry,
                     )
-                    self.output_queue.put({
+                    output_queue.put({
                         "type": "transcription",
                         "text": text,
                         "is_final_chunk": cmd.get("is_final_chunk", False),
@@ -680,14 +699,14 @@ class TranscriberProcessWrapper:
                             initial_prompt=cmd.get("initial_prompt"),
                             allowed_languages=cmd.get("allowed_languages")
                         )
-                        self.output_queue.put({
+                        output_queue.put({
                             "type": "transcription",
                             "text": text,
                             "is_final_chunk": True
                         })
                     except (FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired) as file_err:
                         log_exception(f"File transcription failed: {file_err}")
-                        self.output_queue.put({
+                        output_queue.put({
                             "type": "file_transcription_error",
                             "message": str(file_err),
                         })
@@ -710,7 +729,7 @@ class TranscriberProcessWrapper:
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                self.output_queue.put({"type": "error", "message": str(e), "trace": traceback.format_exc()})
+                output_queue.put({"type": "error", "message": str(e), "trace": traceback.format_exc()})
 
     def stop(self):
         try:
@@ -815,7 +834,7 @@ class TranscriberProcessWrapper:
             self.input_queue = mp.Queue()
             self.output_queue = mp.Queue()
             self._prewarm_result_queue = mp.Queue()
-            self._process = mp.Process(target=self._run_loop, daemon=True)
+            self._process = self._create_process()
             self._process.start()
             log_info("Transcriber process restarted.")
 
