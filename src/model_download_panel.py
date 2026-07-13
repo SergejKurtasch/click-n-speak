@@ -24,6 +24,7 @@ from AppKit import (
 )
 from Foundation import NSObject
 
+from . import i18n
 from .utils import log_error, log_info
 
 _WIN_W = 420
@@ -123,30 +124,41 @@ class ModelDownloadPanel:
             if downloaded_bytes <= total:
                 pct = 100.0 * downloaded_bytes / total
                 total_mb = total / (1024 * 1024)
-                total_str = f"{total_mb / 1024:.2f} ГБ" if total_mb >= 1024 else f"{total_mb:.0f} МБ"
-                status = f"Скачано: {dl_mb:.0f} МБ из {total_str} · {speed_mbps:.1f} МБ/с"
+                total_str = (
+                    i18n.t("download.total_gb", gb=f"{total_mb / 1024:.2f}")
+                    if total_mb >= 1024
+                    else i18n.t("download.total_mb", mb=f"{total_mb:.0f}")
+                )
+                status = i18n.t(
+                    "download.status_with_total",
+                    downloaded=f"{dl_mb:.0f}", total=total_str, speed=f"{speed_mbps:.1f}",
+                )
             else:
                 # Downloaded exceeds estimate — show bytes only, bar stays near-full
                 pct = 99.0
-                status = f"Скачано: {dl_mb:.0f} МБ · {speed_mbps:.1f} МБ/с"
+                status = i18n.t(
+                    "download.status_no_total", downloaded=f"{dl_mb:.0f}", speed=f"{speed_mbps:.1f}"
+                )
             self._progress_bar.setDoubleValue_(pct)
 
             remaining_bytes = max(total - downloaded_bytes, 0)
             if speed_bps > 0:
                 remaining_s = remaining_bytes / speed_bps
                 if remaining_s > 3600:
-                    eta_str = f"Осталось ~{remaining_s / 3600:.0f} ч"
+                    eta_str = i18n.t("download.eta_hours", h=f"{remaining_s / 3600:.0f}")
                 elif remaining_s > 60:
-                    eta_str = f"Осталось ~{remaining_s / 60:.0f} мин"
+                    eta_str = i18n.t("download.eta_minutes", m=f"{remaining_s / 60:.0f}")
                 elif remaining_s > 5:
-                    eta_str = f"Осталось ~{remaining_s:.0f} сек"
+                    eta_str = i18n.t("download.eta_seconds", s=f"{remaining_s:.0f}")
                 else:
-                    eta_str = "Почти готово…"
+                    eta_str = i18n.t("download.eta_almost_done")
             else:
                 eta_str = ""
             self._eta_field.setStringValue_(eta_str)
         else:
-            status = f"Скачано: {dl_mb:.0f} МБ · {speed_mbps:.1f} МБ/с"
+            status = i18n.t(
+                "download.status_no_total", downloaded=f"{dl_mb:.0f}", speed=f"{speed_mbps:.1f}"
+            )
 
         self._status_field.setStringValue_(status)
 
@@ -192,7 +204,7 @@ class ModelDownloadPanel:
         self._window = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, mask, NSBackingStoreBuffered, False
         )
-        self._window.setTitle_("Загрузка модели")
+        self._window.setTitle_(i18n.t("download.window_title"))
         self._window.setReleasedWhenClosed_(False)
         self._window.setDelegate_(self._delegate)
 
@@ -203,7 +215,7 @@ class ModelDownloadPanel:
 
         # Model label
         y -= 22
-        name_lbl = _make_label(f"«{label}»", _MARGIN, y, inner_w, 22, bold=True)
+        name_lbl = _make_label(i18n.t("download.model_label", label=label), _MARGIN, y, inner_w, 22, bold=True)
         content.addSubview_(name_lbl)
 
         # Progress bar
@@ -224,7 +236,7 @@ class ModelDownloadPanel:
 
         # Status line (downloaded / speed)
         y -= 8 + 16
-        self._status_field = _make_label("Подключение…", _MARGIN, y, inner_w, 16, small=True)
+        self._status_field = _make_label(i18n.t("download.connecting"), _MARGIN, y, inner_w, 16, small=True)
         content.addSubview_(self._status_field)
 
         # ETA line
@@ -237,7 +249,7 @@ class ModelDownloadPanel:
         btn_x = _WIN_W - _MARGIN - btn_w
         btn_y = _MARGIN
         btn = NSButton.alloc().initWithFrame_(NSRect(NSPoint(btn_x, btn_y), NSSize(btn_w, btn_h)))
-        btn.setTitle_("Отмена")
+        btn.setTitle_(i18n.t("btn.cancel"))
         btn.setBezelStyle_(NSBezelStyleRounded)
         btn.setTarget_(self._delegate)
         btn.setAction_("cancel:")

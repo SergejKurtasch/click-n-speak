@@ -32,6 +32,7 @@ from AppKit import (
 )
 from Foundation import NSObject
 
+from . import i18n
 from .utils import LANG_NAMES, log_error
 
 
@@ -45,21 +46,31 @@ _ROW_H = 20
 _MIN_LIST_H = 160
 _MAX_SCREEN_H_RATIO = 0.85
 
-# (identifier, header title, default_width, min_width, max_width)
-_COLUMNS: list[tuple[str, str, float, float, float]] = [
-    ("term",      "Термин",    195, 80, 360),
-    ("lang",      "Язык",       42, 35,  58),
-    ("source",    "Источник",   78, 55, 110),
-    ("use_count", "Исп.",       44, 28,  68),
-    ("last_seen", "Последнее",  90, 60, 140),
-    ("status",    "",           28, 22,  36),
-]
 
-_SOURCE_LABELS: dict[str, str] = {
-    "manual":     "вручную",
-    "auto":       "авто",
-    "correction": "правки",
-}
+def _columns() -> list[tuple[str, str, float, float, float]]:
+    """(identifier, header title, default_width, min_width, max_width).
+
+    Built at call time (not a module constant) so the header text always
+    reflects the language loaded via i18n.load() at app startup — a module
+    constant would freeze on whatever language was active at import time.
+    """
+    return [
+        ("term",      i18n.t("terms.col_term"),      195, 80, 360),
+        ("lang",      i18n.t("terms.col_lang"),       42, 35,  58),
+        ("source",    i18n.t("terms.col_source"),     78, 55, 110),
+        ("use_count", i18n.t("terms.col_use_count"),  44, 28,  68),
+        ("last_seen", i18n.t("terms.col_last_seen"),  90, 60, 140),
+        ("status",    "",                             28, 22,  36),
+    ]
+
+
+def _source_label(source: str) -> str:
+    return {
+        "manual":     i18n.t("terms.source_manual"),
+        "auto":       i18n.t("terms.source_auto"),
+        "correction": i18n.t("terms.source_correction"),
+    }.get(source, source)
+
 
 try:
     _NSNotFound = int(__import__("Foundation").NSNotFound)
@@ -74,15 +85,15 @@ def _fmt_relative(ts: str | None) -> str:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         days = max(0, (datetime.now(UTC) - dt).days)
         if days == 0:
-            return "сегодня"
+            return i18n.t("terms.time_today")
         if days == 1:
-            return "вчера"
+            return i18n.t("terms.time_yesterday")
         if days < 30:
-            return f"{days}д"
+            return i18n.t("terms.time_days", n=days)
         months = days // 30
         if months < 12:
-            return f"{months}мес"
-        return f"{days // 365}г"
+            return i18n.t("terms.time_months", n=months)
+        return i18n.t("terms.time_years", n=days // 365)
     except Exception:
         return (ts or "")[:10]
 
@@ -112,7 +123,7 @@ class _TermsDataSource(NSObject):
         if ident == "lang":
             return lang.upper()
         if ident == "source":
-            return _SOURCE_LABELS.get(str(item.get("source", "manual")), str(item.get("source", "")))
+            return _source_label(str(item.get("source", "manual")))
         if ident == "use_count":
             return str(item.get("use_count", 0))
         if ident == "last_seen":
@@ -255,7 +266,7 @@ class TermsPanel:
         self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, mask, NSBackingStoreBuffered, False
         )
-        self._window.setTitle_("Управление терминами")
+        self._window.setTitle_(i18n.t("terms.window_title"))
         self._window.setReleasedWhenClosed_(False)
         min_h = _MARGIN + _BTN_H + 6 + _STATS_H + _MARGIN + _MIN_LIST_H + _MARGIN + _SEG_H + _MARGIN
         self._window.setMinSize_(NSSize(_WIN_W - 100, min_h))
@@ -298,7 +309,7 @@ class TermsPanel:
         table.setDataSource_(self._data_source)
         table.setDelegate_(self._delegate)
 
-        for ident, title, width, min_w, max_w in _COLUMNS:
+        for ident, title, width, min_w, max_w in _columns():
             col = NSTableColumn.alloc().initWithIdentifier_(ident)
             col.setTitle_(title)
             col.setWidth_(width)
@@ -331,7 +342,7 @@ class TermsPanel:
         del_btn = NSButton.alloc().initWithFrame_(
             NSRect(NSPoint(_MARGIN, btn_y), NSSize(col_w, _BTN_H))
         )
-        del_btn.setTitle_("Удалить выбранные")
+        del_btn.setTitle_(i18n.t("terms.btn_delete"))
         del_btn.setBezelStyle_(2)
         del_btn.setEnabled_(False)
         del_btn.setAutoresizingMask_(NSViewMaxYMargin)
@@ -343,7 +354,7 @@ class TermsPanel:
         close_btn = NSButton.alloc().initWithFrame_(
             NSRect(NSPoint(_MARGIN + col_w + 8, btn_y), NSSize(col_w, _BTN_H))
         )
-        close_btn.setTitle_("Закрыть")
+        close_btn.setTitle_(i18n.t("btn.close"))
         close_btn.setBezelStyle_(2)
         close_btn.setKeyEquivalent_("\x1b")
         close_btn.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)
@@ -362,7 +373,7 @@ class TermsPanel:
     # ------------------------------------------------------------------
 
     def _update_seg_labels_on(self, seg: NSSegmentedControl, langs: list[str]) -> None:
-        seg.setLabel_forSegment_(f"Все ({len(self._all_rows)})", 0)
+        seg.setLabel_forSegment_(i18n.t("terms.seg_all", n=len(self._all_rows)), 0)
         for i, lang in enumerate(langs):
             count = sum(1 for l, _ in self._all_rows if l == lang)
             name = LANG_NAMES.get(lang, lang.upper())
@@ -385,9 +396,9 @@ class TermsPanel:
         active = sum(1 for _, it in self._all_rows if not it.get("inactive"))
         inactive = len(self._all_rows) - active
         if self._current_lang is None:
-            text = f"Всего: {active} активных"
+            text = i18n.t("terms.stats_total_active", active=active)
             if inactive:
-                text += f" / {inactive} неактивных"
+                text += i18n.t("terms.stats_inactive_suffix", inactive=inactive)
         else:
             n_active = sum(
                 1 for l, it in self._all_rows
@@ -398,9 +409,9 @@ class TermsPanel:
                 if l == self._current_lang and it.get("inactive")
             )
             lang_name = LANG_NAMES.get(self._current_lang, self._current_lang.upper())
-            text = f"{lang_name}: {n_active} активных"
+            text = i18n.t("terms.stats_lang_active", lang=lang_name, active=n_active)
             if n_inactive:
-                text += f" / {n_inactive} неактивных"
+                text += i18n.t("terms.stats_inactive_suffix", inactive=n_inactive)
         self._stats_label.setStringValue_(text)
 
     def _update_delete_button(self) -> None:
@@ -408,10 +419,10 @@ class TermsPanel:
             return
         n = int(self._table.selectedRowIndexes().count())
         if n > 0:
-            self._delete_btn.setTitle_(f"Удалить выбранные ({n})")
+            self._delete_btn.setTitle_(i18n.t("terms.btn_delete_n", n=n))
             self._delete_btn.setEnabled_(True)
         else:
-            self._delete_btn.setTitle_("Удалить выбранные")
+            self._delete_btn.setTitle_(i18n.t("terms.btn_delete"))
             self._delete_btn.setEnabled_(False)
 
     # ------------------------------------------------------------------
@@ -439,12 +450,13 @@ class TermsPanel:
 
         from AppKit import NSAlert
         n = len(to_delete)
-        suffix = "термин" if n == 1 else "терминов"
         alert = NSAlert.alloc().init()
-        alert.setMessageText_(f"Удалить {n} {suffix}?")
-        alert.setInformativeText_("Удалённые термины больше не будут подсказывать Whisper.")
-        alert.addButtonWithTitle_("Удалить")
-        alert.addButtonWithTitle_("Отмена")
+        alert.setMessageText_(
+            i18n.t("terms.dialog_delete_title", n=n, term_word=i18n.plural("terms.term_word", n))
+        )
+        alert.setInformativeText_(i18n.t("terms.dialog_delete_body"))
+        alert.addButtonWithTitle_(i18n.t("btn.delete"))
+        alert.addButtonWithTitle_(i18n.t("btn.cancel"))
         if alert.runModal() != 1000:
             return
 

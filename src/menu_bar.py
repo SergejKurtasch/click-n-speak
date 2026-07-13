@@ -2805,7 +2805,7 @@ class ClickNSpeakApp(rumps.App):
             log_info("_open_suggestions_panel: no pending suggestions.")
             return
 
-        def on_accept(accepted: list[dict], rejected: list[dict]) -> None:
+        def apply_accept_reject(accepted: list[dict], rejected: list[dict]) -> None:
             from .app import _apply_candidates_to_user_terms
             if accepted:
                 by_lang: dict[str, list[dict]] = {}
@@ -2838,6 +2838,9 @@ class ClickNSpeakApp(rumps.App):
                     new_pending[lang] = remaining
             self.config["pending_suggestions"] = new_pending
             self.config["initial_prompt"] = build_initial_prompt(self.config)
+
+        def on_accept(accepted: list[dict], rejected: list[dict]) -> None:
+            apply_accept_reject(accepted, rejected)
             self.save_config()
             self.main_app.load_config_data(self.config)
             self.update_suggest_menu_badge()
@@ -2845,8 +2848,12 @@ class ClickNSpeakApp(rumps.App):
         def on_skip() -> None:
             pass  # pending remains, shown again at next startup
 
-        def on_auto() -> None:
-            self._apply_all_pending_suggestions()
+        def on_auto(accepted: list[dict], rejected: list[dict]) -> None:
+            # Only the terms the user left checked are applied now — same
+            # semantics as on_accept. Everything else stays pending and will
+            # be picked up by the normal auto-analysis sweep once
+            # prompt_update_mode is "auto".
+            apply_accept_reject(accepted, rejected)
             self.config["prompt_update_mode"] = "auto"
             self._update_mode_submenu_state()
             self.save_config()
