@@ -63,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // gated on the Phase 0 bake-off).
         let coordinator = RecordingCoordinator(
             config: config, i18n: i18n, resources: resources,
-            transcriber: StubTranscriber(), log: log
+            transcriber: GuardedTranscriber(wrapping: StubTranscriber()), log: log
         )
         self.coordinator = coordinator
 

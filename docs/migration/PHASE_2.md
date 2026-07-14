@@ -43,15 +43,13 @@ VAD НЕ выполняется в audio callback (как в `recorder.py._callb
 ### 2.4b WhisperKit transcriber (после bake-off)
 - Реальная интеграция движка-победителя фазы 0 за протоколом `Transcribing`. Прогревы (таблица §GPU warmup), initial prompt, language hint, токенизатор для 2.6.
 
-### 2.5 HallucinationFilter
+### 2.5 HallucinationFilter ✅
 - Прочитать: `src/transcriber.py` (`_hallucination_phrases`, `_SUBWORD_REPEAT_RE`, повторы слов, CJK, guard'ы коротких/тихих чанков, language-retry)
-- Создать: `HallucinationFilter.swift` + тесты (перекалибровка на golden-наборе)
-- Приёмка: тесты на каждый тип галлюцинации из Python.
+- Создано: `AudioGuards.swift` (pre-decode: tiny final ≤8000, silent short <48000 & RMS<0.005) + `HallucinationFilter.swift` (CJK, phrase-list word-boundary, single-word you/the, collapse repetition, subword strip, final strip). Поведение сверено с реальными Python-функциями. `GuardedTranscriber` декоратор оборачивает любой движок и подключён в пайплайн. Language-retry остаётся в движке-адаптере (нужен ре-декод). 13+3 тестов.
 
-### 2.6 Chunk context builder
+### 2.6 Chunk context builder ✅
 - Прочитать: `src/app.py` (`_build_chunk_context`, `_RECENT_CHARS_RATIO`, `_MAX_RECENT_CHUNKS`, лимиты 220 BPE / 700 char)
-- Создать: `ChunkContextBuilder.swift` + тесты
-- Сделать: 1:1 с гарантиями (vocab всегда полный, recent_text урезается). Токен-счётчик из 2.4b (до него — эвристика из фазы 1).
+- Создано: `ChunkContextBuilder.swift` — 1:1 гарантии (vocab целиком, recent урезается первым, ≤3 чанка, ≤50% char budget). Токен-счётчик инъектируемый (эвристика; WhisperKit-токенизатор в 2.4b). Выходы сверены с Python на 4 кейсах. 5 тестов.
 
 ### 2.7 HotkeyManager (Carbon) ✅
 - Прочитать: `src/hotkey_handler.py`
