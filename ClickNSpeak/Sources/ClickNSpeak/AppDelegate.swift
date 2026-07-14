@@ -1,5 +1,7 @@
 import AppKit
 import CNSCore
+import CNSInput
+import CNSTranscription
 import CNSUI
 
 /// Composition root: wires paths, config, i18n, logging and the menu bar
@@ -12,6 +14,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuController: MenuBarController?
     private var scheduler: MaintenanceScheduler?
     private var logger: FileLogger?
+    private var coordinator: RecordingCoordinator?
+    private var hotkey: HotkeyManager?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let paths = Paths.resolveDefault()
@@ -28,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let logger = FileLogger(fileURL: paths.logFile)
         self.logger = logger
-        let log: (String) -> Void = { message in
+        let log: @Sendable (String) -> Void = { message in
             Task { await logger.info(message) }
         }
 
@@ -53,9 +57,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         scheduler.start()
         self.scheduler = scheduler
+
+        // Phase 2 pipeline: hotkey → recorder → stub transcriber → HUD.
+        // The stub stands in until the real WhisperKit engine lands (task 2.4b,
+        // gated on the Phase 0 bake-off).
+        let coordinator = RecordingCoordinator(
+            config: config, i18n: i18n, resources: resources,
+            transcriber: StubTranscriber(), log: log
+        )
+        self.coordinator = coordinator
+
+        let hotkey = HotkeyManager { [weak coordinator] in coordinator?.toggle() }
+        if hotkey.start() {
+            log("Hotkey registered: Option+Space")
+        } else {
+            log("Hotkey registration failed")
+        }
+        self.hotkey = hotkey
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        hotkey?.stop()
         scheduler?.stop()
         instanceGuard?.release()
     }

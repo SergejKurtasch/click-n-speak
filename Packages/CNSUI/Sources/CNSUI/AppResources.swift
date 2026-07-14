@@ -49,6 +49,20 @@ public struct AppResources: Sendable {
         )
     }
 
+    /// Load the app icon (`CnS.png`) used in the HUD. In the bundle it sits at
+    /// Resources/CnS.png; in dev it is `assets/CnS.png` (sibling of icons/).
+    @MainActor
+    public func appIcon() -> NSImage? {
+        let candidates = [
+            iconsDirectory.deletingLastPathComponent().appendingPathComponent("CnS.png"),
+            iconsDirectory.appendingPathComponent("CnS.png"),
+        ]
+        for url in candidates {
+            if let image = NSImage(contentsOf: url) { return image }
+        }
+        return nil
+    }
+
     /// Load a menu-bar state icon (`idle`/`recording`/`processing`), preferring
     /// the Template variant so it adapts to light/dark menu bars.
     @MainActor

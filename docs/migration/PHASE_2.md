@@ -36,10 +36,9 @@ VAD НЕ выполняется в audio callback (как в `recorder.py._callb
 - Follow-up (не блокирует): звуки старт/стоп (`Tink.aiff`/`Pop.aiff`), watchdog зависания close→fatal-error (специфика PortAudio, для AVAudioEngine менее критично).
 - Приёмка: ring buffer тесты (wrap-around, overflow, clear) ✅; ручной тест записи (нужен мик + разрешение) — pending.
 
-### 2.4 Transcribing protocol + stub
+### 2.4 Transcribing protocol + stub ✅
 - Прочитать: `src/transcriber.py` (сигнатура `transcribe(audio, initial_prompt, language, is_final)`), `src/cloud_transcriber.py` (duck-typing → протокол)
-- Создать: `Packages/CNSTranscription` + `Transcribing.swift` + `StubTranscriber.swift` + тесты
-- Сделать: протокол; stub возвращает фиксированный текст (для сквозного теста пайплайна без модели).
+- Создано: `Packages/CNSTranscription` — `Transcribing` протокол (`TranscriptionRequest`/`TranscriptionResult`, `.empty` = skip/fail как Python `""`), `StubTranscriber` (actor, детерминированный текст). 3 теста.
 
 ### 2.4b WhisperKit transcriber (после bake-off)
 - Реальная интеграция движка-победителя фазы 0 за протоколом `Transcribing`. Прогревы (таблица §GPU warmup), initial prompt, language hint, токенизатор для 2.6.
@@ -54,20 +53,16 @@ VAD НЕ выполняется в audio callback (как в `recorder.py._callb
 - Создать: `ChunkContextBuilder.swift` + тесты
 - Сделать: 1:1 с гарантиями (vocab всегда полный, recent_text урезается). Токен-счётчик из 2.4b (до него — эвристика из фазы 1).
 
-### 2.7 HotkeyManager (Carbon)
+### 2.7 HotkeyManager (Carbon) ✅
 - Прочитать: `src/hotkey_handler.py`
-- Создать: `Packages/CNSAudio` или отдельный — `HotkeyManager.swift` (RegisterEventHotKey)
-- Сделать: глобальный хоткей `<alt>+<space>` по умолчанию, без Input Monitoring.
-- Приёмка: ручной тест срабатывания.
+- Создано: `Packages/CNSInput` — `HotkeyManager.swift` (RegisterEventHotKey, Option+Space default). Carbon-ресурсы в nonisolated box (deinit-cleanup). Вся CGEventTap/Input-Monitoring/macOS-15-TSM обвязка удалена (§4.3). 2 теста (binding); ручная проверка срабатывания — pending (нужна GUI).
 
-### 2.8 PreviewPanel (неинтерактивный HUD)
-- Прочитать: `src/preview_panel.py` (неинтерактивный режим, `append_text`, `update_text`, `update_status`, HUD-вид NSPanel non-activating)
-- Создать: `Packages/CNSUI` + `PreviewPanel.swift`
-- Сделать: HUD появляется, показывает текст чанков live. Интерактивный режим (редактирование, ⌘D) — фаза 3.
+### 2.8 PreviewPanel (неинтерактивный HUD) ✅
+- Прочитать: `src/preview_panel.py` (неинтерактивный режим)
+- Создано: `Packages/CNSUI/PreviewPanel.swift` — non-activating NSPanel, HUD material, corner radius 12, иконка+title+text, позиция у курсора, show/updateStatus/updateText (truncate 290)/hide с fade. @MainActor напрямую (§4.2, без очереди). Интерактивный режим — фаза 3.
 
-### 2.9 Сквозная проводка
-- Хоткей → AudioRecorder → чанки → StubTranscriber → PreviewPanel. Заменить stub на WhisperKit после bake-off.
-- Приёмка: milestone фазы.
+### 2.9 Сквозная проводка ✅ (на stub)
+- Создано: `ClickNSpeak/RecordingCoordinator.swift` — хоткей → AudioRecorder → чанки → StubTranscriber → PreviewPanel. Подключено в AppDelegate. App запускается, хоткей регистрируется (лог "Hotkey registered: Option+Space"). Замена stub на WhisperKit — после bake-off (2.4b). Ручной тест диктовки — pending (мик+GUI).
 
 ## Инварианты фазы (из §6)
 
