@@ -1,0 +1,15 @@
+{
+    "schema_version": 4,
+    "primary_language": "ru",
+    "additional_languages": ["en"],
+    "user_terms": {
+        "ru": ["нейросеть", "МЛХ"],
+        "en": ["MLX", "PCA"]
+    },
+    "prompt_snapshots": {},
+    "pending_suggestions": {},
+    "skipped_terms": {},
+    "prompt_update_mode": "suggest",
+    "auto_prompt_check_interval": 20,
+    "last_analysis_phrase_count": 0
+}

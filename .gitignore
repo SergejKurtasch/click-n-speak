@@ -52,3 +52,8 @@ scripts/launcher.c
 transparent Vector Illustration
 training1.md
 training2.md
+
+# Swift build artifacts
+.build/
+*.xcodeproj
+dist/swift/

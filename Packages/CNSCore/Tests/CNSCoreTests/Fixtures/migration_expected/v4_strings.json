@@ -1,0 +1,58 @@
+{
+    "schema_version": 9,
+    "primary_language": "ru",
+    "additional_languages": [
+        "en"
+    ],
+    "user_terms": {
+        "ru": [
+            {
+                "term": "\u043d\u0435\u0439\u0440\u043e\u0441\u0435\u0442\u044c",
+                "source": "manual",
+                "added_at": "2026-07-14T12:00:00.123456+00:00",
+                "last_seen": "2026-07-14T12:00:00.123456+00:00",
+                "use_count": 0
+            },
+            {
+                "term": "\u041c\u041b\u0425",
+                "source": "manual",
+                "added_at": "2026-07-14T12:00:00.123456+00:00",
+                "last_seen": "2026-07-14T12:00:00.123456+00:00",
+                "use_count": 0
+            }
+        ],
+        "en": [
+            {
+                "term": "MLX",
+                "source": "manual",
+                "added_at": "2026-07-14T12:00:00.123456+00:00",
+                "last_seen": "2026-07-14T12:00:00.123456+00:00",
+                "use_count": 0
+            },
+            {
+                "term": "PCA",
+                "source": "manual",
+                "added_at": "2026-07-14T12:00:00.123456+00:00",
+                "last_seen": "2026-07-14T12:00:00.123456+00:00",
+                "use_count": 0
+            }
+        ]
+    },
+    "prompt_snapshots": {},
+    "pending_suggestions": {},
+    "skipped_terms": {},
+    "prompt_update_mode": "suggest",
+    "auto_prompt_check_interval": 20,
+    "last_analysis_phrase_count": 0,
+    "last_decay_run_ts": null,
+    "max_dictionary_age_days": 60,
+    "initial_prompt": "\u0420\u0443\u0441\u0441\u043a\u0438\u0439 \u044f\u0437\u044b\u043a. English language. \u043d\u0435\u0439\u0440\u043e\u0441\u0435\u0442\u044c, \u041c\u041b\u0425, MLX, PCA",
+    "manual_replacements": [],
+    "last_notified_update_version": null,
+    "language_auto_detect": false,
+    "stt_backend": "local",
+    "stt_cloud_model": "gemini-2.5-flash-lite",
+    "last_metrics_snapshot_ts": null,
+    "notify_on_metrics": true,
+    "last_metrics_notification_ts": null
+}
