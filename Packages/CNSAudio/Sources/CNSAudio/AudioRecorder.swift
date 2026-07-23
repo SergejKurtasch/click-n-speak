@@ -45,9 +45,11 @@ public final class AudioRecorder: @unchecked Sendable {
 
     private let frameSamples: Int  // VAD frame size (30 ms)
 
+    /// - Parameter vad: defaults to libfvad (webrtcvad parity with the Python
+    ///   app, which the chunking thresholds are calibrated against).
     public init(
         config: ChunkingConfig = ChunkingConfig(),
-        vad: VoiceActivityDetecting = RMSVoiceActivityDetector(),
+        vad: VoiceActivityDetecting = FVADVoiceActivityDetector(),
         log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.config = config

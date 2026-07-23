@@ -61,10 +61,17 @@ public protocol Transcribing: Sendable {
 
     /// Release resources / stop any child work.
     func stop() async
+
+    /// Exact BPE token count from the engine's tokenizer, or nil when the engine
+    /// has none (cloud backends) or no model is loaded yet. Used by
+    /// `ChunkContextBuilder` to respect Whisper's 220-token prompt budget
+    /// precisely instead of estimating.
+    func tokenCount(_ text: String) async -> Int?
 }
 
 public extension Transcribing {
     func warmup(language: String?) async {}
     func preWarm() async {}
     func stop() async {}
+    func tokenCount(_ text: String) async -> Int? { nil }
 }

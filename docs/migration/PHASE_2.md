@@ -1,6 +1,6 @@
 # Фаза 2: аудио + STT-ядро
 
-Статус: in progress
+Статус: done — 104 теста зелёные; пайплайн хоткей→whisper.cpp→HUD работает
 Предусловия: фаза 1 done. Движок STT формально выбирается в фазе 0 (bake-off); задачи 2.1–2.3, 2.7, 2.8 от выбора НЕ зависят и делаются сразу. Реальная интеграция WhisperKit (2.4b) ждёт результата bake-off — до этого пайплайн работает на stub/mock transcriber.
 Читать перед стартом: docs/migration/CONVENTIONS.md, SWIFT_MIGRATION_PLAN.md §4.2, §4.4, §4.5, §5
 
@@ -26,8 +26,8 @@ VAD НЕ выполняется в audio callback (как в `recorder.py._callb
 - Сделать: протокол `isSpeech(frame) -> Bool`; RMS-реализация калибрована как в Python. **libfvad-реализация — отдельная follow-up задача 2.2b** (вендоринг C-исходников libfvad как SPM C-target); до неё пайплайн работает на RMS (Python поддерживает обе ветки).
 - Приёмка: RMS-детектор различает тишину/речь на синтетических фреймах.
 
-### 2.2b FVADVoiceActivityDetector (libfvad) — follow-up
-- Вендорить libfvad (C), SPM C-target, обёртка `FVADVoiceActivityDetector`. Заменяет RMS как дефолт (webrtcvad-паритет). Отдельный PR.
+### 2.2b FVADVoiceActivityDetector (libfvad) ✅
+- Вендорены исходники libfvad (BSD-3, WebRTC-derived) в `Packages/CNSAudio/Sources/Cfvad` как чистый SPM C-таргет (без cmake/бинарников). `FVADVoiceActivityDetector`: mode 2 = `webrtcvad.Vad(2)`, конвертация float32→int16 PCM, NSLock (не `OSAllocatedUnfairLock` — его `withLock` требует @Sendable-замыкания, несовместимого с C-указателем). Кадры невалидной длины падают на RMS, а не отбрасываются. **Стал дефолтом в `AudioRecorder`.** 6 тестов.
 
 ### 2.3 AudioRecorder (AVAudioEngine tap → ring buffer → consumer) ✅ (кроме звуков/watchdog)
 - Прочитать: `src/recorder.py` (`start`, `stop`, устройство, sample rate, конвертация; watchdog зависания close)
@@ -43,7 +43,7 @@ VAD НЕ выполняется в audio callback (как в `recorder.py._callb
 ### 2.4b whisper.cpp transcriber ✅ (движок-победитель фазы 0)
 - Создано: `scripts/build_whisper_xcframework.sh` (закреплённый commit whisper.cpp → статическая либа macOS arm64 + встроенный Metal → `whisper.xcframework` 3.5 МБ, gitignored), `Packages/CNSTranscription` binaryTarget + `WhisperCppTranscriber` (actor поверх C-API, продакшн-параметры: greedy, temp 0, no_speech 0.5, entropy_thold 2.0, язык форсируется при одном allowed). Контекст в nonisolated box (deinit-free). Подключён в AppDelegate: реальный движок при наличии модели, иначе stub.
 - Проверено: model-gated тест декодирует golden-WAV 007 → тот же текст, что CLI в bake-off. App стартует с «Using whisper.cpp engine».
-- Follow-up: language-retry с padding (нужен ре-декод, оптимизация), токен-точный `_build_chunk_context` через `whisper_tokenize` вместо эвристики, прогрев по таблице §GPU warmup.
+- Follow-up'ы закрыты: **language-retry** (padding 0.1 с с обеих сторон при языке вне allowed, только для нефинальных нетривиальных чанков; текст ретрая сохраняется независимо от его языка, пустой — дропает чанк), **токен-точный контекст** (`whisper_token_count` через `Transcribing.tokenCount`, async-вариант `ChunkContextBuilder.build` с кэшем и фолбэком на эвристику), **троттлинг прогрева** (`warmup` идемпотентен, `preWarm` пропускается если декод был <45 с назад).
 
 ### 2.5 HallucinationFilter ✅
 - Прочитать: `src/transcriber.py` (`_hallucination_phrases`, `_SUBWORD_REPEAT_RE`, повторы слов, CJK, guard'ы коротких/тихих чанков, language-retry)
@@ -82,13 +82,13 @@ VAD НЕ выполняется в audio callback (как в `recorder.py._callb
 
 ## Критерии завершения фазы
 
-- [ ] AudioChunker + RMS VAD + ring buffer с тестами
+- [x] AudioChunker + VAD (libfvad) + ring buffer с тестами
 - [ ] AudioRecorder пишет чанки из живого мика
 - [ ] HotkeyManager срабатывает глобально
 - [ ] PreviewPanel показывает текст чанков live
-- [ ] HallucinationFilter + chunk context с тестами
-- [ ] Сквозная цепочка хоткей→HUD (на stub или WhisperKit)
-- [ ] `swift test` всех пакетов зелёный
+- [x] HallucinationFilter + chunk context с тестами
+- [x] Сквозная цепочка хоткей→HUD на реальном whisper.cpp
+- [x] `swift test` всех пакетов зелёный (104 теста)
 
 ## Открытые вопросы
 

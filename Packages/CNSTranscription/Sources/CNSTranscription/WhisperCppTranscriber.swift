@@ -14,8 +14,13 @@ import whisper
 public actor WhisperCppTranscriber: Transcribing {
     public enum LoadError: Error, Sendable { case modelNotFound(String), initFailed }
 
+    /// `_PRE_WARM_THROTTLE_S` in the Python app.
+    static let preWarmThrottleSeconds: TimeInterval = 45
+
     private let modelURL: URL
     private let threadCount: Int32
+    private var warmupDone = false
+    private var lastDecodeAt: Date?
     /// Owns the whisper_context so a nonisolated deinit can free it (the pointer
     /// is non-Sendable and the model holds ~GBs, so leaking on dealloc is not OK).
     private let contextBox = WhisperContextBox()
@@ -45,6 +50,54 @@ public actor WhisperCppTranscriber: Transcribing {
     public func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
         guard !request.audio.isEmpty, let ctx = try? load() else { return .empty }
 
+        var params = makeParams()
+
+        // Force the language only when exactly one is allowed (matches the
+        // Python rule); otherwise auto-detect.
+        let language: String? = request.allowedLanguages.count == 1 ? request.allowedLanguages[0] : nil
+
+        let result = runDecode(ctx: ctx, audio: request.audio, params: &params,
+                               language: language, prompt: request.initialPrompt)
+        lastDecodeAt = Date()
+
+        guard let retried = languageRetryIfNeeded(ctx: ctx, request: request, result: result) else {
+            return result
+        }
+        return retried
+    }
+
+    /// Language-mismatch retry, ported from `WhisperTranscriber.transcribe`.
+    /// When a non-final, non-trivial chunk decodes into a language outside the
+    /// allowed set, pad it with 0.1 s of silence on both ends to shift the
+    /// decoding window and try once more. The retry text is kept regardless of
+    /// its language (losing the chunk is worse); only an empty retry drops it.
+    /// Returns nil when no retry applies.
+    private func languageRetryIfNeeded(
+        ctx: OpaquePointer, request: TranscriptionRequest, result: TranscriptionResult
+    ) -> TranscriptionResult? {
+        guard !request.isFinalChunk, !request.allowedLanguages.isEmpty, !result.text.isEmpty else { return nil }
+
+        let words = result.text.split(whereSeparator: { $0.isWhitespace })
+        let isTrivial = words.count <= 1 || !words.contains(where: { $0.contains(where: { $0.isLetter || $0.isNumber }) })
+        guard !isTrivial else { return nil }
+
+        let detected = result.detectedLanguage.lowercased()
+        guard !detected.isEmpty else { return nil }
+        let allowed = request.allowedLanguages.map { $0.lowercased() }
+        let isAllowed = allowed.contains(detected)
+            || allowed.contains { $0.contains(detected) || detected.contains($0) }
+        guard !isAllowed else { return nil }
+
+        let pad = [Float](repeating: 0, count: 1600) // 0.1 s at 16 kHz
+        let padded = pad + request.audio + pad
+        var params = makeParams()
+        let language: String? = request.allowedLanguages.count == 1 ? request.allowedLanguages[0] : nil
+        let retry = runDecode(ctx: ctx, audio: padded, params: &params,
+                              language: language, prompt: request.initialPrompt)
+        return retry.text.isEmpty ? .empty : retry
+    }
+
+    private func makeParams() -> whisper_full_params {
         var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         params.n_threads = threadCount
         params.no_timestamps = true
@@ -57,13 +110,15 @@ public actor WhisperCppTranscriber: Transcribing {
         params.no_speech_thold = 0.5     // production strict
         params.entropy_thold = 2.0       // ≈ compression_ratio_threshold
         params.suppress_blank = true
+        return params
+    }
 
-        // Force the language only when exactly one is allowed (matches the
-        // Python rule); otherwise auto-detect.
-        let language: String? = request.allowedLanguages.count == 1 ? request.allowedLanguages[0] : nil
-
-        return runDecode(ctx: ctx, audio: request.audio, params: &params,
-                         language: language, prompt: request.initialPrompt)
+    /// Exact BPE token count from the model's own tokenizer, for the 220-token
+    /// prompt budget in `ChunkContextBuilder` (replaces the len/3 heuristic).
+    public func tokenCount(_ text: String) async -> Int? {
+        guard let ctx = try? load() else { return nil }
+        let n = text.withCString { whisper_token_count(ctx, $0) }
+        return n >= 0 ? Int(n) : nil
     }
 
     /// Nested withCString calls keep the language/prompt C strings alive across
@@ -105,18 +160,30 @@ public actor WhisperCppTranscriber: Transcribing {
         }
     }
 
-    /// One-time warm decode of silence to load the model + compile Metal shaders.
+    /// One-time warm decode of silence to load the model + compile Metal shaders
+    /// (`WhisperTranscriber.warmup`). Idempotent.
     public func warmup(language: String?) async {
-        guard let ctx = try? load() else { return }
-        var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
-        params.n_threads = threadCount
-        params.no_timestamps = true
-        params.print_progress = false
-        params.print_realtime = false
-        let silence = [Float](repeating: 0, count: 16000 / 2) // 0.5 s
-        _ = silence.withUnsafeBufferPointer { buf in
-            whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
+        guard !warmupDone else { return }
+        warmupDone = true
+        decodeSilence(seconds: 0.5, language: language)
+    }
+
+    /// Cheap keep-warm before a session. Skipped when a real decode happened
+    /// less than 45 s ago, matching the Python `pre_warm` throttle that
+    /// eliminated the 15-22 s cold-start penalty on rapid re-recordings.
+    public func preWarm() async {
+        if let last = lastDecodeAt, Date().timeIntervalSince(last) < Self.preWarmThrottleSeconds {
+            return
         }
+        decodeSilence(seconds: 0.5, language: nil)
+    }
+
+    private func decodeSilence(seconds: Double, language: String?) {
+        guard let ctx = try? load() else { return }
+        var params = makeParams()
+        let silence = [Float](repeating: 0, count: Int(16000 * seconds))
+        _ = runDecode(ctx: ctx, audio: silence, params: &params, language: language, prompt: nil)
+        lastDecodeAt = Date()
     }
 
     public func stop() async {

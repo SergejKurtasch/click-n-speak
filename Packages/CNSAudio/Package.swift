@@ -11,9 +11,13 @@ let package = Package(
         .package(path: "../CNSCore"),
     ],
     targets: [
+        // Vendored libfvad (BSD-3, WebRTC-derived): the same VAD algorithm the
+        // Python app uses via webrtcvad, so the chunking thresholds carry over
+        // without recalibration. Pure C, compiled from source — no prebuilt binary.
+        .target(name: "Cfvad"),
         .target(
             name: "CNSAudio",
-            dependencies: ["CNSCore"],
+            dependencies: ["CNSCore", "Cfvad"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
