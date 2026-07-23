@@ -57,3 +57,9 @@ training2.md
 .build/
 *.xcodeproj
 dist/swift/
+
+# STT bake-off spike artifacts
+spikes/stt-bakeoff/models/
+spikes/stt-bakeoff/whisperkit-src/
+spikes/stt-bakeoff/golden/audio/
+spikes/stt-bakeoff/golden/audio_16k/

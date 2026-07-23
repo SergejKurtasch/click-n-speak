@@ -15,14 +15,14 @@
 
 | Область | Решение | Обоснование |
 |---|---|---|
-| Локальный STT | **Bake-off в фазе 0: WhisperKit против whisper.cpp**, оба large-v3-turbo, оба за протоколом `Transcribing`. Допустимо шипить оба движка (+10–15 MB) с переключателем в Advanced | WhisperKit: CoreML/ANE, энергоэффективность, но собственный decoding loop и зависимость от конверсий Argmax. whisper.cpp: Metal, декодер ближе к референсу OpenAI (как текущий mlx-whisper), ниже латентность на коротких чанках 1–8 s, нет минутной ANE-компиляции, новые модели в GGUF за дни. При приоритете точности и скорости выбор делают замеры, не удобство интеграции |
+| Локальный STT | **whisper.cpp** (Metal, ggml-large-v3-turbo, greedy) — решено по результатам bake-off фазы 0, см. `docs/migration/BAKEOFF_RESULTS.md` | Обгоняет текущий продакшн-движок: WER 4.1% против 4.8% (code-switch 4.6% против 7.7%, короткие команды 20% против 30%), хвост латентности 1.85 s против 2.50 s. WhisperKit отклонён: его ANE-путь на large-v3_turbo зависает бесконечно (с `tiny` работает), а на GPU он теряет своё единственное преимущество перед whisper.cpp. Движок остаётся за протоколом `Transcribing`, возврат к WhisperKit стоит одной реализации протокола |
 | Локальный AI-редактор | **MLX Swift** (`mlx-swift-examples` / MLXLLM), те же веса `mlx-community/Qwen2.5-1.5B-Instruct-4bit` | Полный паритет качества: тот же фреймворк и те же веса, что сейчас. HF-кэш Qwen можно переиспользовать |
 | Cloud STT / Gemini / OpenAI | Чистый `URLSession` (REST), без SDK | google-genai и openai SDK тянут мегабайты зависимостей ради двух эндпоинтов |
 | VAD | **libfvad** (C-порт WebRTC VAD) через SPM-обёртку + существующий RMS-fallback | Тот же алгоритм, что webrtcvad сейчас: пороги чанкинга не придётся перекалибровывать |
 | Глобальный хоткей | **Carbon `RegisterEventHotKey`** | Не требует Input Monitoring, устраняет крэш `TSMGetInputSourceProperty` на macOS 15, работает без перезапуска после выдачи прав. См. §4.3 |
 | UI | Чистый **AppKit** (NSStatusItem, NSMenu, NSPanel, NSAlert, NSWindow), без SwiftUI | Текущий UI и так написан на AppKit через PyObjC: прямой маппинг сохраняет вид 1:1 |
 | i18n | Порт движка `i18n.py`, те же файлы `locales/*.json` | Файлы переводов переносятся без изменений, включая славянские plural-правила |
-| min macOS | **14.0 (Sonoma)**, только Apple Silicon | Требование WhisperKit и MLX Swift |
+| min macOS | **14.0 (Sonoma)**, только Apple Silicon | Требование MLX Swift (whisper.cpp работает и на 13, но планку держим по редактору) |
 | Структура | Xcode-проект `ClickNSpeak/` в этом же репозитории, код в локальных SPM-пакетах (см. §2.1) | Python-версия живёт рядом до cutover |
 | Concurrency | **Swift 6 strict concurrency с первого коммита**, actors для пайплайна | Гонки, которые в Python ловились годами руками (весь thread-safety раздел CLAUDE.md), ловит компилятор. Включать строгий режим на готовой кодовой базе в разы дороже |
 | Bundle ID | Оставить `com.sergej.clicknspeak` | Сохраняет пути в Application Support и записи TCC (Accessibility, вероятно, придётся выдать заново из-за смены подписи бинарника) |
@@ -35,7 +35,7 @@
 |---|---|
 | `CNSCore` | Config + миграции, i18n, Paths, FileLogger, канонизация терминов, InitialPromptBuilder |
 | `CNSAudio` | AudioRecorder, ring buffer, VAD-чанкер |
-| `CNSTranscription` | протокол `Transcribing`, движки WhisperKit / whisper.cpp / cloud, HallucinationFilter, context builder |
+| `CNSTranscription` | протокол `Transcribing`, движки whisper.cpp / cloud, HallucinationFilter, context builder |
 | `CNSEditors` | протокол `Refining`, MLXLLM-редактор, Gemini/OpenAI |
 | `CNSDictionary` | vocab provider, анализаторы, decay, метрики, phrase history, dataset logger |
 | `CNSUI` | панели, меню, wizard, picker |
@@ -48,23 +48,22 @@
 |---|---|
 | Бинарник приложения | 3–6 MB |
 | MLX / MLXNN / MLXLLM (Metal-кернелы) | 20–30 MB |
-| WhisperKit + swift-transformers | 3–6 MB |
-| whisper.cpp (если шипим оба движка или выбран он) | 5–15 MB |
+| whisper.cpp (статическая библиотека + Metal-шейдеры) | 5–15 MB |
 | libfvad | < 0.5 MB |
 | locales, иконки, ассеты | ~1 MB |
 | **Итого `.app`** | **~35–60 MB, потолок 100 MB** (было 603 MB). Размер вторичен относительно скорости и точности |
 
-Модели (вне бандла, скачиваются как сейчас): Whisper turbo CoreML ~1.6 GB, Qwen 4-bit ~0.9 GB. Внимание: CoreML-веса Whisper скачиваются заново (другой формат, репо `whisperkit-coreml`), старый MLX-кэш Whisper остаётся неиспользуемым. Кэш Qwen переиспользуется, если направить `HubApi` swift-transformers в `~/.cache/huggingface`.
+Модели (вне бандла, скачиваются как сейчас): `ggml-large-v3-turbo.bin` 1.4 GB, Qwen 4-bit ~0.9 GB. Внимание: веса Whisper скачиваются заново в формате GGUF, старый MLX-кэш Whisper остаётся неиспользуемым (добавить пункт очистки в Advanced). Кэш Qwen переиспользуется, если направить `HubApi` swift-transformers в `~/.cache/huggingface`.
 
 ## 4. Целевая архитектура: что упрощается
 
 ### 4.1 Исчезает child-процесс транскрайбера
-WhisperKit работает in-process (CoreML не держит 2–4 GB Metal-весов в куче процесса так, как MLX). Полностью удаляются:
+whisper.cpp работает in-process через C-интероп (модель грузится один раз и держится в памяти библиотеки, без multiprocessing-обвязки). Полностью удаляются:
 
 - `process_watchdog.py`: kqueue-watchdog, PPID-поллер, orphan sweep, PGID-механика, killpg-обвязка сигналов.
 - Протокол input_queue/output_queue, `_run_loop`, generation bump, рестарты child-процесса.
-- `_watch_overdue_worker` упрощается: вместо рестарта процесса используется `Task`-таймаут с отменой и перезагрузка моделей WhisperKit (`unloadModels`/`loadModels`).
-- `ModelDownloader` child-процесс: заменяется на `URLSession`/WhisperKit download API с прогрессом in-process.
+- `_watch_overdue_worker` упрощается: вместо рестарта процесса используется `Task`-таймаут с отменой и перезагрузка модели (`whisper_free` + повторный `whisper_init_from_file`).
+- `ModelDownloader` child-процесс: заменяется на `URLSession` с прогрессом in-process (GGUF — один файл).
 
 Семантика `TranscriberHealthMonitor` сохраняется, но «restart transcriber» означает reload моделей, а не kill процесса.
 
@@ -93,7 +92,7 @@ WhisperKit работает in-process (CoreML не держит 2–4 GB Metal-
 Это единственное намеренное отступление от паритета (в меньшую сторону по количеству системных диалогов). Если нужен строгий паритет, оставить CGEventTap-путь как fallback.
 
 ### 4.4 GPU-конкуренция Whisper/Qwen
-Whisper уходит на ANE (CoreML), Qwen остаётся на GPU (MLX): физическая конкуренция за Metal-память исчезает. Non-blocking lock в редакторе сохраняем (защита от параллельных refine и повторных API-вызовов). Memory-pressure-скип для локального редактора сохраняем, но реализуем через `sysctlbyname("kern.memorystatus_vm_pressure_level")` нативно (без subprocess) либо `DispatchSource.makeMemoryPressureSource`, с тем же кэшем 5 s.
+**Внимание:** после выбора whisper.cpp оба движка делят Metal GPU (Whisper через ggml-metal, Qwen через MLX). Исходное допущение о разведении на ANE и GPU не сработало — ANE-путь отпал вместе с WhisperKit. Non-blocking lock в редакторе сохраняем (защита от параллельных refine и повторных API-вызовов). Memory-pressure-скип для локального редактора сохраняем, но реализуем через `sysctlbyname("kern.memorystatus_vm_pressure_level")` нативно (без subprocess) либо `DispatchSource.makeMemoryPressureSource`, с тем же кэшем 5 s.
 
 ### 4.5 Целевые выигрыши в производительности (фиксируем как требования)
 
@@ -247,7 +246,7 @@ Milestone: весь жизненный цикл словаря воспроиз�
 | # | Риск | Вероятность | Митигция |
 |---|---|---|---|
 | 1 | Оба движка дают WER хуже mlx-whisper на ru/uk | низкая | Bake-off фазы 0 это выявит до начала работ. Крайний fallback: тюнинг decoding-параметров whisper.cpp под референс, у него декодер ближе всего к OpenAI |
-| 2 | Первая ANE-компиляция CoreML занимает минуты (актуально при выборе WhisperKit) | высокая | Одноразовый прогрев с прогресс-панелью при первом запуске, кэш специализации сохраняется системой. У whisper.cpp риска нет |
+| 2 | ~~Первая ANE-компиляция CoreML~~ **СНЯТ**: выбран whisper.cpp (Metal), CoreML-путь не используется. Риск подтвердился на практике в фазе 0 — ANE на large-v3_turbo не стартовал вовсе — и стал одной из причин отклонить WhisperKit | — | — |
 | 3 | Фильтры галлюцинаций калиброваны под mlx-whisper | средняя | Перекалибровка на golden-наборе в фазе 2 |
 | 4 | Скрытое поведение в 17.8 K строк потеряется при порте | средняя | Построчный порт app.py/menu_bar.py, чеклист §6, порт тестов, параллельная эксплуатация в фазе 8 |
 | 5 | TCC сбросит Accessibility при смене подписи | высокая | Штатная обработка wizard'ом, заметка в release notes |
