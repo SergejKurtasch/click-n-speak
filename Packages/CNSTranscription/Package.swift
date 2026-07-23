@@ -11,10 +11,24 @@ let package = Package(
         .package(path: "../CNSCore"),
     ],
     targets: [
+        // Vendored whisper.cpp static library + Metal (built by
+        // scripts/build_whisper_xcframework.sh). Gitignored — regenerate locally.
+        .binaryTarget(name: "whisper", path: "Vendor/whisper.xcframework"),
         .target(
             name: "CNSTranscription",
-            dependencies: ["CNSCore"],
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            dependencies: [
+                "CNSCore",
+                "whisper",
+            ],
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [
+                // ggml/whisper.cpp are C++; pull in the C++ standard library.
+                .linkedLibrary("c++"),
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
+                .linkedFramework("Accelerate"),
+                .linkedFramework("Foundation"),
+            ]
         ),
         .testTarget(
             name: "CNSTranscriptionTests",

@@ -58,12 +58,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scheduler.start()
         self.scheduler = scheduler
 
-        // Phase 2 pipeline: hotkey → recorder → stub transcriber → HUD.
-        // The stub stands in until the real WhisperKit engine lands (task 2.4b,
-        // gated on the Phase 0 bake-off).
+        // Phase 2 pipeline: hotkey → recorder → transcriber → HUD.
+        // Use the real whisper.cpp engine when its model is present (env override
+        // or the app data dir); fall back to the stub so the app still runs
+        // before the model download phase lands.
+        let modelURL: URL = {
+            if let override = ProcessInfo.processInfo.environment["CNS_WHISPER_MODEL"] {
+                return URL(fileURLWithPath: override)
+            }
+            return paths.whisperModelFile
+        }()
+        let transcriber: any Transcribing
+        if FileManager.default.fileExists(atPath: modelURL.path) {
+            log("Using whisper.cpp engine: \(modelURL.lastPathComponent)")
+            transcriber = GuardedTranscriber(wrapping: WhisperCppTranscriber(modelURL: modelURL))
+        } else {
+            log("Whisper model not found at \(modelURL.path) — using stub transcriber")
+            transcriber = GuardedTranscriber(wrapping: StubTranscriber())
+        }
         let coordinator = RecordingCoordinator(
             config: config, i18n: i18n, resources: resources,
-            transcriber: GuardedTranscriber(wrapping: StubTranscriber()), log: log
+            transcriber: transcriber, log: log
         )
         self.coordinator = coordinator
 

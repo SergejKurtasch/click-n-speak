@@ -49,6 +49,10 @@ public struct Paths: Sendable {
     }
 
     public var configFile: URL { dataDirectory.appendingPathComponent("config.json") }
+    /// Local Whisper GGUF model (downloaded at first run in a later phase).
+    public var whisperModelFile: URL {
+        dataDirectory.appendingPathComponent("models/ggml-large-v3-turbo.bin")
+    }
     public var phraseHistoryFile: URL { dataDirectory.appendingPathComponent("phrase_history.txt") }
     public var correctionsFile: URL { dataDirectory.appendingPathComponent("corrections.json") }
     public var metricsHistoryFile: URL { dataDirectory.appendingPathComponent("metrics_history.jsonl") }

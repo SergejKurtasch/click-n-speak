@@ -40,8 +40,10 @@ VAD НЕ выполняется в audio callback (как в `recorder.py._callb
 - Прочитать: `src/transcriber.py` (сигнатура `transcribe(audio, initial_prompt, language, is_final)`), `src/cloud_transcriber.py` (duck-typing → протокол)
 - Создано: `Packages/CNSTranscription` — `Transcribing` протокол (`TranscriptionRequest`/`TranscriptionResult`, `.empty` = skip/fail как Python `""`), `StubTranscriber` (actor, детерминированный текст). 3 теста.
 
-### 2.4b WhisperKit transcriber (после bake-off)
-- Реальная интеграция движка-победителя фазы 0 за протоколом `Transcribing`. Прогревы (таблица §GPU warmup), initial prompt, language hint, токенизатор для 2.6.
+### 2.4b whisper.cpp transcriber ✅ (движок-победитель фазы 0)
+- Создано: `scripts/build_whisper_xcframework.sh` (закреплённый commit whisper.cpp → статическая либа macOS arm64 + встроенный Metal → `whisper.xcframework` 3.5 МБ, gitignored), `Packages/CNSTranscription` binaryTarget + `WhisperCppTranscriber` (actor поверх C-API, продакшн-параметры: greedy, temp 0, no_speech 0.5, entropy_thold 2.0, язык форсируется при одном allowed). Контекст в nonisolated box (deinit-free). Подключён в AppDelegate: реальный движок при наличии модели, иначе stub.
+- Проверено: model-gated тест декодирует golden-WAV 007 → тот же текст, что CLI в bake-off. App стартует с «Using whisper.cpp engine».
+- Follow-up: language-retry с padding (нужен ре-декод, оптимизация), токен-точный `_build_chunk_context` через `whisper_tokenize` вместо эвристики, прогрев по таблице §GPU warmup.
 
 ### 2.5 HallucinationFilter ✅
 - Прочитать: `src/transcriber.py` (`_hallucination_phrases`, `_SUBWORD_REPEAT_RE`, повторы слов, CJK, guard'ы коротких/тихих чанков, language-retry)

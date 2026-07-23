@@ -63,3 +63,6 @@ spikes/stt-bakeoff/models/
 spikes/stt-bakeoff/whisperkit-src/
 spikes/stt-bakeoff/golden/audio/
 spikes/stt-bakeoff/golden/audio_16k/
+
+# Vendored whisper.cpp (regenerate: scripts/build_whisper_xcframework.sh)
+Packages/CNSTranscription/Vendor/
