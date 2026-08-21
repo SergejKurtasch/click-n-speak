@@ -24,6 +24,9 @@ public actor WhisperCppTranscriber: Transcribing {
     /// Owns the whisper_context so a nonisolated deinit can free it (the pointer
     /// is non-Sendable and the model holds ~GBs, so leaking on dealloc is not OK).
     private let contextBox = WhisperContextBox()
+    /// Read by whisper.cpp's abort callback on the decoding thread, written by
+    /// `abortInFlight()` from wherever the watchdog runs.
+    private let abortFlag = AbortFlag()
 
     public init(modelURL: URL, threadCount: Int = 0) {
         self.modelURL = modelURL
@@ -121,6 +124,17 @@ public actor WhisperCppTranscriber: Transcribing {
         return n >= 0 ? Int(n) : nil
     }
 
+    /// Ask the decode that is currently running to give up.
+    ///
+    /// The Python app achieves this by restarting the transcriber child process,
+    /// whose generation bump releases the blocked caller. In-process there is no
+    /// process to kill, so we use whisper.cpp's own abort callback: it is polled
+    /// between encoder/decoder steps and makes `whisper_full` return early.
+    /// Callable from any isolation — the flag is the only thing touched.
+    public nonisolated func abortInFlight() {
+        abortFlag.value = true
+    }
+
     /// Nested withCString calls keep the language/prompt C strings alive across
     /// the whisper_full call.
     private func runDecode(
@@ -131,6 +145,13 @@ public actor WhisperCppTranscriber: Transcribing {
             if let s { return s.withCString { body($0) } }
             return body(nil)
         }
+
+        abortFlag.value = false
+        params.abort_callback = { userData in
+            guard let userData else { return false }
+            return Unmanaged<AbortFlag>.fromOpaque(userData).takeUnretainedValue().value
+        }
+        params.abort_callback_user_data = Unmanaged.passUnretained(abortFlag).toOpaque()
 
         return withOptionalCString(language) { langPtr in
             withOptionalCString(prompt) { promptPtr in
@@ -189,6 +210,22 @@ public actor WhisperCppTranscriber: Transcribing {
     public func stop() async {
         contextBox.free()
     }
+
+    /// Drop the model so the next decode reloads it from scratch — the in-process
+    /// equivalent of the Python periodic transcriber restart, which exists to
+    /// release model weight tensors that a cache clear cannot free.
+    public func reload() async {
+        contextBox.free()
+        warmupDone = false
+    }
+}
+
+/// Abort switch polled by whisper.cpp during a decode.
+/// @unchecked Sendable: a single Bool, written by the watchdog and read by the
+/// decoding thread; a torn read is impossible and a late read only costs one
+/// more decode step.
+final class AbortFlag: @unchecked Sendable {
+    var value: Bool = false
 }
 
 /// Holds the whisper_context pointer outside the actor so a nonisolated deinit

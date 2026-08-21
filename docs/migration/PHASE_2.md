@@ -29,11 +29,11 @@ VAD НЕ выполняется в audio callback (как в `recorder.py._callb
 ### 2.2b FVADVoiceActivityDetector (libfvad) ✅
 - Вендорены исходники libfvad (BSD-3, WebRTC-derived) в `Packages/CNSAudio/Sources/Cfvad` как чистый SPM C-таргет (без cmake/бинарников). `FVADVoiceActivityDetector`: mode 2 = `webrtcvad.Vad(2)`, конвертация float32→int16 PCM, NSLock (не `OSAllocatedUnfairLock` — его `withLock` требует @Sendable-замыкания, несовместимого с C-указателем). Кадры невалидной длины падают на RMS, а не отбрасываются. **Стал дефолтом в `AudioRecorder`.** 6 тестов.
 
-### 2.3 AudioRecorder (AVAudioEngine tap → ring buffer → consumer) ✅ (кроме звуков/watchdog)
+### 2.3 AudioRecorder (AVAudioEngine tap → ring buffer → consumer) ✅
 - Прочитать: `src/recorder.py` (`start`, `stop`, устройство, sample rate, конвертация; watchdog зависания close)
 - Создать: `AudioRecorder.swift`, `RingBuffer.swift` + тесты (ring buffer)
 - Сделано: AVAudioEngine input tap → `AVAudioConverter` в 16 kHz mono float32 → `SampleRingBuffer`; consumer-задача (`Task.detached`) гоняет VAD пофреймово (30 ms) + `AudioChunker`, эмитит чанки через callback. Start/stop, финальный чанк из остатка с guard <0.3 s.
-- Follow-up (не блокирует): звуки старт/стоп (`Tink.aiff`/`Pop.aiff`), watchdog зависания close→fatal-error (специфика PortAudio, для AVAudioEngine менее критично).
+- Долги закрыты в фазе 3 (раздел 0): звуки старт/стоп через `RecordingSounds` (AudioToolbox, пауза 0.2 с перед открытием потока) и `StreamCloseWatchdog` (12 с, `onFatalError`, 5 тестов). `start` стал async — пауза после бипа не блокирует вызывающий поток.
 - Приёмка: ring buffer тесты (wrap-around, overflow, clear) ✅; ручной тест записи (нужен мик + разрешение) — pending.
 
 ### 2.4 Transcribing protocol + stub ✅

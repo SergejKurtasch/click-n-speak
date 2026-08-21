@@ -62,6 +62,14 @@ public protocol Transcribing: Sendable {
     /// Release resources / stop any child work.
     func stop() async
 
+    /// Drop and re-acquire the model, releasing its memory. Called every N
+    /// sessions and by the overdue watchdog.
+    func reload() async
+
+    /// Ask an in-flight decode to return early. Must be safe to call from any
+    /// isolation while `transcribe` is running — that is the whole point.
+    nonisolated func abortInFlight()
+
     /// Exact BPE token count from the engine's tokenizer, or nil when the engine
     /// has none (cloud backends) or no model is loaded yet. Used by
     /// `ChunkContextBuilder` to respect Whisper's 220-token prompt budget
@@ -73,5 +81,7 @@ public extension Transcribing {
     func warmup(language: String?) async {}
     func preWarm() async {}
     func stop() async {}
+    func reload() async { await stop() }
+    nonisolated func abortInFlight() {}
     func tokenCount(_ text: String) async -> Int? { nil }
 }

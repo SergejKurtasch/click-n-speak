@@ -399,7 +399,28 @@ public extension JSONValue {
         return String(d)
     }
 
-    static func encodeString(_ s: String) -> String {
+    /// One-line form matching Python's `json.dumps(obj, ensure_ascii=False)`:
+    /// `", "` / `": "` separators, no indentation, non-ASCII characters kept as
+    /// they are. This is the format of the dataset JSONL, which the Python
+    /// analysis scripts read.
+    func serializedJSONLine() -> String {
+        switch self {
+        case .null: return "null"
+        case let .bool(b): return b ? "true" : "false"
+        case let .int(i): return String(i)
+        case let .double(d): return JSONValue.formatDouble(d)
+        case let .string(s): return JSONValue.encodeString(s, escapeNonASCII: false)
+        case let .array(a):
+            return "[" + a.map { $0.serializedJSONLine() }.joined(separator: ", ") + "]"
+        case let .object(o):
+            let body = o.pairs
+                .map { JSONValue.encodeString($0.0, escapeNonASCII: false) + ": " + $0.1.serializedJSONLine() }
+                .joined(separator: ", ")
+            return "{" + body + "}"
+        }
+    }
+
+    static func encodeString(_ s: String, escapeNonASCII: Bool = true) -> String {
         var out = "\""
         for scalar in s.unicodeScalars {
             switch scalar {
@@ -413,7 +434,7 @@ public extension JSONValue {
             default:
                 if scalar.value < 0x20 {
                     out += String(format: "\\u%04x", scalar.value)
-                } else if scalar.value < 0x80 {
+                } else if scalar.value < 0x80 || !escapeNonASCII {
                     out.unicodeScalars.append(scalar)
                 } else if scalar.value > 0xFFFF {
                     // Encode as UTF-16 surrogate pair, matching Python ensure_ascii.

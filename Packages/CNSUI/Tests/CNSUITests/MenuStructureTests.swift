@@ -50,6 +50,7 @@ struct MenuStructureTests {
             "AI Editor (Punctuation & Cleanup)",
             "AI Editor Backend ▶",
             "Download AI Editor Model",
+            "Delete Local Model…",
             "Initial Prompt",
             "Last Phrases",
             "Transcribe Audio File...",

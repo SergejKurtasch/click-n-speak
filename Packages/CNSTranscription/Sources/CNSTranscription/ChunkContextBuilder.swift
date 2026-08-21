@@ -41,7 +41,7 @@ public struct ChunkContextBuilder: Sendable {
     /// works before a model is loaded.
     public func build(
         instruction: String, vocabPrompt: String, transcribedParts: [String],
-        tokenCount: (String) async -> Int?
+        tokenCount: @Sendable (String) async -> Int?
     ) async -> String {
         var cache: [String: Int] = [:]
         func count(_ s: String) async -> Int {

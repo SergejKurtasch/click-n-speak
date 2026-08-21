@@ -32,5 +32,7 @@ public struct GuardedTranscriber: Transcribing {
     public func warmup(language: String?) async { await inner.warmup(language: language) }
     public func preWarm() async { await inner.preWarm() }
     public func stop() async { await inner.stop() }
+    public func reload() async { await inner.reload() }
+    public nonisolated func abortInFlight() { inner.abortInFlight() }
     public func tokenCount(_ text: String) async -> Int? { await inner.tokenCount(text) }
 }

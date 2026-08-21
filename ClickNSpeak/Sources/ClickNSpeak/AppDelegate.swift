@@ -1,6 +1,9 @@
 import AppKit
+import CNSAudio
 import CNSCore
+import CNSDictionary
 import CNSInput
+import CNSSession
 import CNSTranscription
 import CNSUI
 
@@ -12,9 +15,10 @@ import CNSUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var instanceGuard: SingleInstanceGuard?
     private var menuController: MenuBarController?
+    private var modelDownloader: ModelDownloader?
     private var scheduler: MaintenanceScheduler?
     private var logger: FileLogger?
-    private var coordinator: RecordingCoordinator?
+    private var session: SessionController?
     private var hotkey: HotkeyManager?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -49,7 +53,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         log("Click-n-speak (Swift) starting — schema v\(config.schemaVersion), lang \(i18n.lang)")
 
-        menuController = MenuBarController(config: config, i18n: i18n, resources: resources, log: log)
+        let menuCtrl = MenuBarController(config: config, i18n: i18n, resources: resources, paths: paths, log: log)
+        let downloader = ModelDownloader(paths: paths, log: log)
+        menuCtrl.modelDownloader = downloader
+        menuController = menuCtrl
+        self.modelDownloader = downloader
 
         let scheduler = MaintenanceScheduler(
             onFlush: { log("maintenance: flush tick (not implemented)") },
@@ -76,13 +84,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("Whisper model not found at \(modelURL.path) — using stub transcriber")
             transcriber = GuardedTranscriber(wrapping: StubTranscriber())
         }
-        let coordinator = RecordingCoordinator(
-            config: config, i18n: i18n, resources: resources,
-            transcriber: transcriber, log: log
+        let chunking = ChunkingConfig(
+            silenceDuration: config.raw["silence_duration"]?.doubleValue ?? 1.0,
+            targetSpeechDuration: config.raw["target_speech_duration"]?.doubleValue ?? 3.0,
+            maxSpeechDuration: config.raw["max_speech_duration"]?.doubleValue ?? 8.0,
+            minSpeechDuration: config.raw["min_speech_duration"]?.doubleValue ?? 0.5
         )
-        self.coordinator = coordinator
+        let panel = PreviewPanel(resources: resources, log: log)
+        let sessionRef = SessionBox()
+        let recorder = AudioRecorder(
+            config: chunking,
+            log: log,
+            onFatalError: { [sessionRef] in
+                Task { @MainActor in sessionRef.controller?.handleRecorderFatalError() }
+            }
+        )
 
-        let hotkey = HotkeyManager { [weak coordinator] in coordinator?.toggle() }
+        let session = SessionController(
+            config: config,
+            strings: Self.sessionStrings(i18n),
+            transcriber: transcriber,
+            recorder: recorder,
+            panel: panel,
+            delivery: SystemTextDelivery(log: log),
+            frontmost: WorkspaceFrontmostProvider(),
+            phraseHistory: PhraseHistory(fileURL: paths.phraseHistoryFile, log: log),
+            datasetLogger: DatasetLogger(fileURL: paths.datasetFile, log: log),
+            log: log,
+            onConfigChanged: { updated in
+                try? updated.saveAtomically(to: paths.configFile)
+            }
+        )
+        sessionRef.controller = session
+        self.session = session
+
+        let hotkey = HotkeyManager { [weak session] in session?.toggle() }
         if hotkey.start() {
             log("Hotkey registered: Option+Space")
         } else {
@@ -97,9 +133,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         instanceGuard?.release()
     }
 
+    /// User-visible session strings, resolved once from the loaded locale.
+    private static func sessionStrings(_ i18n: I18n) -> SessionStrings {
+        SessionStrings(
+            recording: i18n.t("hud.recording_title"),
+            transcribing: i18n.t("hud.transcribing_title"),
+            stillWorking: i18n.t("hud.still_working_title"),
+            ready: i18n.t("hud.ready_title"),
+            popupTitle: i18n.t("popup.title_with_hotkey"),
+            transcriptionInstruction: i18n.t("hud.transcription_instruction"),
+            noSpeech: i18n.t("notify.no_speech_title"),
+            recordError: i18n.t("notify.record_error_title"),
+            toasts: DictionaryToasts(
+                addedTemplate: i18n.t("toast.added"),
+                invalidTerm: i18n.t("toast.invalid_term"),
+                alreadyExists: i18n.t("toast.exists")
+            )
+        )
+    }
+
     private func activateExistingInstance() {
         let bundleID = "com.sergej.clicknspeak"
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         running.first?.activate()
     }
+}
+
+/// Lets the recorder's fatal-error callback reach a controller that does not
+/// exist yet when the recorder is constructed.
+@MainActor
+final class SessionBox {
+    weak var controller: SessionController?
 }

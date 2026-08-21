@@ -8,6 +8,12 @@ import os
 /// convert to 16 kHz mono and write into a `SampleRingBuffer`; a consumer task
 /// runs the VAD and `AudioChunker` off the audio thread. Chunk thresholds and
 /// the final-chunk guard are preserved 1:1.
+public enum RecorderError: Error {
+    /// The previous stream never finished tearing down — Core Audio is wedged and
+    /// the app restarts instead of opening a stream that would capture nothing.
+    case previousStreamStuck
+}
+
 public final class AudioRecorder: @unchecked Sendable {
     public struct Callbacks: Sendable {
         /// A non-final speech chunk (16 kHz mono float32).
@@ -27,6 +33,8 @@ public final class AudioRecorder: @unchecked Sendable {
     private let config: ChunkingConfig
     private let vad: VoiceActivityDetecting
     private let log: @Sendable (String) -> Void
+    private let playsSounds: Bool
+    private let closeWatchdog: StreamCloseWatchdog
 
     private let engine = AVAudioEngine()
     private let targetFormat: AVAudioFormat
@@ -45,16 +53,30 @@ public final class AudioRecorder: @unchecked Sendable {
 
     private let frameSamples: Int  // VAD frame size (30 ms)
 
-    /// - Parameter vad: defaults to libfvad (webrtcvad parity with the Python
-    ///   app, which the chunking thresholds are calibrated against).
+    /// - Parameters:
+    ///   - vad: defaults to libfvad (webrtcvad parity with the Python app, which
+    ///     the chunking thresholds are calibrated against).
+    ///   - playsSounds: start/stop cues, as in `recorder.py`. Off in tests.
+    ///   - onFatalError: the audio stream failed to tear down within
+    ///     `streamCloseTimeout`; the app must restart itself (see
+    ///     `_on_recorder_fatal_error` in `app.py`).
     public init(
         config: ChunkingConfig = ChunkingConfig(),
         vad: VoiceActivityDetecting = FVADVoiceActivityDetector(),
-        log: @escaping @Sendable (String) -> Void = { _ in }
+        playsSounds: Bool = true,
+        streamCloseTimeout: TimeInterval = 12.0,
+        log: @escaping @Sendable (String) -> Void = { _ in },
+        onFatalError: @escaping @Sendable () -> Void = {}
     ) {
         self.config = config
         self.vad = vad
         self.log = log
+        self.playsSounds = playsSounds
+        self.closeWatchdog = StreamCloseWatchdog(
+            timeout: streamCloseTimeout,
+            log: log,
+            onHang: onFatalError
+        )
         self.frameSamples = Int(Double(config.sampleRate) * 0.03)
         self.targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -71,16 +93,33 @@ public final class AudioRecorder: @unchecked Sendable {
 
     // MARK: - Start / stop
 
-    public func start(callbacks: Callbacks) throws {
-        stateLock.withLock { state in
-            guard !state.recording else { return }
+    /// Async because of the start cue: the beep plays *before* the input opens and
+    /// we wait it out so it is not recorded (`play_sound` + `time.sleep(0.2)` in
+    /// `recorder.start`). Suspending keeps that wait off the caller's thread.
+    public func start(callbacks: Callbacks) async throws {
+        let alreadyRecording: Bool = stateLock.withLock { state in
+            if state.recording { return true }
             state.recording = true
             state.callbacks = callbacks
             state.chunker = AudioChunker(config: config)
             state.accumulation.removeAll(keepingCapacity: true)
             state.pendingFrame.removeAll(keepingCapacity: true)
+            return false
         }
+        if alreadyRecording { return }
         ringBuffer.clear()
+
+        // A stream still tearing down holds Core Audio state; opening a new one on
+        // top of it either deadlocks or yields a stream that captures nothing.
+        guard await closeWatchdog.awaitPendingClose() else {
+            stateLock.withLock { $0.recording = false }
+            throw RecorderError.previousStreamStuck
+        }
+
+        if playsSounds {
+            RecordingSounds.playStart()
+            try? await Task.sleep(nanoseconds: UInt64(RecordingSounds.startSoundLeadTime * 1_000_000_000))
+        }
 
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
@@ -91,7 +130,13 @@ public final class AudioRecorder: @unchecked Sendable {
         }
 
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            input.removeTap(onBus: 0)
+            stateLock.withLock { $0.recording = false }
+            throw error
+        }
         startConsumer()
         log("AudioRecorder started (input \(Int(inputFormat.sampleRate)) Hz → \(config.sampleRate) Hz)")
     }
@@ -107,9 +152,13 @@ public final class AudioRecorder: @unchecked Sendable {
         guard let callbacks else { return }
 
         engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        // Tear the engine down off this thread, watched for hangs: `recording` is
+        // already false, so the tap cannot mutate state after we return.
+        closeWatchdog.close { [engine] in engine.stop() }
         consumerTask?.cancel()
         consumerTask = nil
+
+        if playsSounds { RecordingSounds.playStop() }
 
         // Drain whatever remains and assemble the final chunk.
         let remaining = ringBuffer.readAll()

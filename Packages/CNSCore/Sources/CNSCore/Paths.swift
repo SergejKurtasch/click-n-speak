@@ -49,10 +49,27 @@ public struct Paths: Sendable {
     }
 
     public var configFile: URL { dataDirectory.appendingPathComponent("config.json") }
-    /// Local Whisper GGUF model (downloaded at first run in a later phase).
-    public var whisperModelFile: URL {
-        dataDirectory.appendingPathComponent("models/ggml-large-v3-turbo.bin")
+
+    /// Directory for all downloaded model files (Whisper GGML, Qwen GGUF, etc.).
+    public var modelsDirectory: URL {
+        dataDirectory.appendingPathComponent("models", isDirectory: true)
     }
+
+    /// Resolve the local file URL for a given `ModelInfo`.
+    public func modelFile(for model: ModelInfo) -> URL {
+        modelsDirectory.appendingPathComponent(model.fileName)
+    }
+
+    /// Default Whisper GGUF model (downloaded at first run).
+    public var whisperModelFile: URL {
+        modelsDirectory.appendingPathComponent("ggml-large-v3-turbo.bin")
+    }
+
+    /// Default AI Editor (Qwen) GGUF model.
+    public var aiEditorModelFile: URL {
+        modelsDirectory.appendingPathComponent("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+    }
+
     public var phraseHistoryFile: URL { dataDirectory.appendingPathComponent("phrase_history.txt") }
     public var correctionsFile: URL { dataDirectory.appendingPathComponent("corrections.json") }
     public var metricsHistoryFile: URL { dataDirectory.appendingPathComponent("metrics_history.jsonl") }
@@ -92,5 +109,10 @@ public struct Paths: Sendable {
     /// Create the data directory if missing.
     public func ensureDataDirectory() throws {
         try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+    }
+
+    /// Create the models subdirectory if missing.
+    public func ensureModelsDirectory() throws {
+        try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
     }
 }

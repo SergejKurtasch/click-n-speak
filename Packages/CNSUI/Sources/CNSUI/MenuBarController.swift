@@ -18,6 +18,7 @@ public final class MenuBarController: NSObject {
     private let i18n: I18n
     private let resources: AppResources
     private let log: (String) -> Void
+    private let paths: Paths
 
     /// The built menu tree, exposed for structural tests.
     public let menu: NSMenu
@@ -25,18 +26,28 @@ public final class MenuBarController: NSObject {
     private var microphoneItem: NSMenuItem?
     private var accessibilityItem: NSMenuItem?
 
+    // MARK: - Model Download
+
+    /// Model downloader — injected by the app so the menu can trigger downloads.
+    public var modelDownloader: ModelDownloader?
+
+    /// Download progress panel.
+    private lazy var downloadPanel = ModelDownloadPanel(log: log)
+
     /// - Parameter installStatusItem: when false, no `NSStatusItem` is created,
     ///   so the menu tree can be built and inspected headlessly in tests.
     public init(
         config: Config,
         i18n: I18n,
         resources: AppResources,
+        paths: Paths = Paths.resolveDefault(),
         log: @escaping (String) -> Void = { _ in },
         installStatusItem: Bool = true
     ) {
         self.config = config
         self.i18n = i18n
         self.resources = resources
+        self.paths = paths
         self.log = log
         self.menu = NSMenu()
         self.statusItem = installStatusItem
@@ -119,6 +130,7 @@ public final class MenuBarController: NSObject {
         menu.addItem(aiBackend)
 
         menu.addItem(item(t("menu.download_ai_model"), #selector(onDownloadAIModel)))
+        menu.addItem(item("Delete Local Model…", #selector(onDeleteLocalModel)))
 
         // Initial Prompt
         let prompt = NSMenuItem(title: t("menu.initial_prompt"), action: nil, keyEquivalent: "")
@@ -262,7 +274,18 @@ public final class MenuBarController: NSObject {
     @objc private func onMicrophone() { stub("permissions.microphone") }
     @objc private func onAccessibility() { stub("permissions.accessibility") }
     @objc private func onSelectCloudModel(_ sender: NSMenuItem) { stub("model.cloud:\(sender.representedObject ?? "")") }
-    @objc private func onSelectLocalModel(_ sender: NSMenuItem) { stub("model.local:\(sender.representedObject ?? "")") }
+
+    @objc private func onSelectLocalModel(_ sender: NSMenuItem) {
+        guard let modelID = sender.representedObject as? String else { return }
+        // Map legacy MLX hub IDs (from ModelCatalog) to ModelRegistry entries.
+        if let info = ModelRegistry.whisperModelByLegacyID(modelID),
+           !ModelManager.isDownloaded(info, paths: paths) {
+            startDownload(model: info)
+        } else {
+            stub("model.local:\(modelID)")
+        }
+    }
+
     @objc private func onGeminiApiKey() { stub("api_keys.gemini") }
     @objc private func onOpenAIApiKey() { stub("api_keys.openai") }
     @objc private func onSelectPrimaryLanguage(_ sender: NSMenuItem) { stub("language.primary:\(sender.representedObject ?? "")") }
@@ -271,7 +294,46 @@ public final class MenuBarController: NSObject {
     @objc private func onToggleAIEditor() { stub("ai_editor.toggle") }
     @objc private func onAIBackendLocal() { stub("ai_editor.backend.local") }
     @objc private func onAIBackendGemini() { stub("ai_editor.backend.gemini") }
-    @objc private func onDownloadAIModel() { stub("ai_editor.download_model") }
+
+    @objc private func onDownloadAIModel() {
+        guard let model = ModelRegistry.aiEditorModels.first else { return }
+        if ModelManager.isDownloaded(model, paths: paths) {
+            log("AI model already downloaded")
+            return
+        }
+        startDownload(model: model)
+    }
+
+    @objc private func onDeleteLocalModel() {
+        // Show confirmation alert listing all downloaded models.
+        let usage = ModelManager.diskUsage(paths: paths)
+        guard usage > 0 else {
+            let alert = NSAlert()
+            alert.messageText = "No Local Models"
+            alert.informativeText = "There are no downloaded models to delete."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete Local Models?"
+        alert.informativeText = "This will free \(ModelManager.formattedSize(usage)) of disk space. You can re-download models at any time."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        do {
+            for model in ModelRegistry.whisperModels + ModelRegistry.aiEditorModels {
+                try ModelManager.delete(model, paths: paths)
+            }
+            log("All local models deleted")
+        } catch {
+            log("Failed to delete models: \(error)")
+        }
+    }
     @objc private func onEditTerms() { stub("prompt.edit_terms") }
     @objc private func onRevertTerms() { stub("prompt.revert_terms") }
     @objc private func onModeSuggest() { stub("prompt.mode.suggest") }
@@ -288,6 +350,47 @@ public final class MenuBarController: NSObject {
     @objc private func onReloadConfig() { stub("advanced.reload_config") }
     @objc private func onRestart() { stub("restart") }
     @objc private func onQuit() { NSApp.terminate(nil) }
+
+    // MARK: - Download coordination
+
+    private func startDownload(model: ModelInfo) {
+        guard let downloader = modelDownloader else {
+            log("ModelDownloader not configured — cannot download \(model.id)")
+            return
+        }
+        guard downloader.state != .downloading else {
+            log("A download is already in progress")
+            return
+        }
+
+        downloadPanel.show(modelName: model.displayName) { [weak self] in
+            self?.modelDownloader?.cancel()
+        }
+
+        downloader.onProgress = { [weak self] bytes, total in
+            guard let self else { return }
+            self.downloadPanel.update(
+                downloadedBytes: bytes,
+                totalBytes: total,
+                bytesPerSecond: downloader.bytesPerSecond,
+                estimatedTimeRemaining: downloader.estimatedTimeRemaining
+            )
+        }
+        downloader.onDone = { [weak self] in
+            self?.log("Download complete: \(model.id)")
+            self?.downloadPanel.showCompleted()
+        }
+        downloader.onError = { [weak self] msg in
+            self?.log("Download failed: \(msg)")
+            self?.downloadPanel.showError(msg)
+        }
+        downloader.onCancelled = { [weak self] in
+            self?.log("Download cancelled: \(model.id)")
+            self?.downloadPanel.showCancelled()
+        }
+
+        downloader.start(model: model)
+    }
 }
 
 extension MenuBarController: NSMenuDelegate {
