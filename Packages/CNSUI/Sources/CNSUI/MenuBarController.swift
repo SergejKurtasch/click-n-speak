@@ -19,6 +19,7 @@ public final class MenuBarController: NSObject {
     private let resources: AppResources
     private let log: (String) -> Void
     private let paths: Paths
+    public var onConfigChanged: ((Config) -> Void)?
 
     /// The built menu tree, exposed for structural tests.
     public let menu: NSMenu
@@ -286,14 +287,61 @@ public final class MenuBarController: NSObject {
         }
     }
 
-    @objc private func onGeminiApiKey() { stub("api_keys.gemini") }
+    @objc private func onGeminiApiKey() {
+        let alert = NSAlert()
+        alert.messageText = "Gemini API Key"
+        alert.informativeText = "Enter your Google Gemini API Key:"
+        
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        if let key = KeychainHelper.getPassword(service: "click-n-speak", account: "google_api_key") {
+            input.stringValue = key
+        }
+        alert.accessoryView = input
+        
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Clear")
+        
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let key = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty {
+                do {
+                    try KeychainHelper.setPassword(service: "click-n-speak", account: "google_api_key", password: key)
+                    log("Gemini API Key saved to Keychain.")
+                } catch {
+                    log("Failed to save Gemini API Key: \(error)")
+                }
+            }
+        } else if response == .alertThirdButtonReturn {
+            try? KeychainHelper.deletePassword(service: "click-n-speak", account: "google_api_key")
+            log("Gemini API Key cleared.")
+        }
+    }
     @objc private func onOpenAIApiKey() { stub("api_keys.openai") }
     @objc private func onSelectPrimaryLanguage(_ sender: NSMenuItem) { stub("language.primary:\(sender.representedObject ?? "")") }
     @objc private func onToggleAdditionalLanguage(_ sender: NSMenuItem) { stub("language.additional:\(sender.representedObject ?? "")") }
     @objc private func onToggleAutoDetect() { stub("language.auto_detect") }
-    @objc private func onToggleAIEditor() { stub("ai_editor.toggle") }
-    @objc private func onAIBackendLocal() { stub("ai_editor.backend.local") }
-    @objc private func onAIBackendGemini() { stub("ai_editor.backend.gemini") }
+    @objc private func onToggleAIEditor() {
+        var newConfig = config
+        newConfig.raw["ai_editor_enabled"] = .bool(!config.aiEditorEnabled)
+        onConfigChanged?(newConfig)
+        log("AI Editor \(!newConfig.aiEditorEnabled ? "disabled" : "enabled")")
+    }
+    
+    @objc private func onAIBackendLocal() {
+        var newConfig = config
+        newConfig.raw["ai_editor_backend"] = .string("local")
+        onConfigChanged?(newConfig)
+        log("AI Editor backend: local")
+    }
+    
+    @objc private func onAIBackendGemini() {
+        var newConfig = config
+        newConfig.raw["ai_editor_backend"] = .string("gemini")
+        onConfigChanged?(newConfig)
+        log("AI Editor backend: gemini")
+    }
 
     @objc private func onDownloadAIModel() {
         guard let model = ModelRegistry.aiEditorModels.first else { return }

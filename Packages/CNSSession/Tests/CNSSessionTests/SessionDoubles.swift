@@ -210,3 +210,35 @@ final class FakeFrontmost: FrontmostAppProviding {
     var pid: pid_t? = 4242
     func frontmostPid() -> pid_t? { pid }
 }
+
+/// A fake AI editor for testing integration.
+final class FakeAiEditor: AiEditing, @unchecked Sendable {
+    var isReady: Bool = true
+    var refineDelay: TimeInterval = 0
+    var refinedText: String = "refined text"
+    var lastInputText: String?
+    var didCallRefine = false
+    
+    func refine(
+        text: String,
+        languages: [String]?,
+        knownTerms: [String]?,
+        misrecognitions: [(String, String)]?
+    ) async -> RefineResult {
+        didCallRefine = true
+        lastInputText = text
+        if refineDelay > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(refineDelay * 1_000_000_000))
+        }
+        return RefineResult(text: refinedText, status: .ok)
+    }
+    
+    func refineFileText(
+        text: String,
+        languages: [String]?,
+        knownTerms: [String]?,
+        misrecognitions: [(String, String)]?
+    ) async -> RefineResult {
+        return RefineResult(text: text, status: .ok)
+    }
+}

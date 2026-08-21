@@ -100,10 +100,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
+        let aiEditor: (any AiEditing)?
+        if config.aiEditorEnabled {
+            if config.aiEditorBackend == "gemini" {
+                if let key = KeychainHelper.getPassword(service: "click-n-speak", account: "google_api_key") {
+                    aiEditor = GeminiEditor(modelName: config.geminiModel, apiKey: key)
+                } else {
+                    log("Gemini API key missing.")
+                    aiEditor = nil
+                }
+            } else {
+                aiEditor = LocalAiEditor(modelName: config.aiEditorModel, paths: paths)
+            }
+        } else {
+            aiEditor = nil
+        }
+
         let session = SessionController(
             config: config,
             strings: Self.sessionStrings(i18n),
             transcriber: transcriber,
+            aiEditor: aiEditor,
             recorder: recorder,
             panel: panel,
             delivery: SystemTextDelivery(log: log),

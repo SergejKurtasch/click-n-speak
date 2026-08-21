@@ -109,4 +109,16 @@ public struct Config: Sendable, Equatable {
     public var initialPrompt: String {
         raw["initial_prompt"]?.stringValue ?? ""
     }
+
+    public var aiEditorBackend: String {
+        raw["ai_editor_backend"]?.stringValue ?? "local"
+    }
+
+    public var aiEditorModel: String {
+        raw["ai_editor_model"]?.stringValue ?? "qwen2.5-1.5b-q4" // Matches Python default / legacy config
+    }
+
+    public var geminiModel: String {
+        raw["gemini_model"]?.stringValue ?? "gemini-2.5-flash-lite"
+    }
 }

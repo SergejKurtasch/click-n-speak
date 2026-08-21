@@ -92,6 +92,7 @@ public final class SessionController {
     private var config: Config
     private let strings: SessionStrings
     private let transcriber: any Transcribing
+    private let aiEditor: (any AiEditing)?
     private let recorder: any AudioCapturing
     private let panel: any PopupPresenting
     private let delivery: any TextDelivering
@@ -106,10 +107,13 @@ public final class SessionController {
     /// Called after the controller mutates config (⌘D), so the owner can persist it.
     private let onConfigChanged: (Config) -> Void
 
+    private var lastRefineResult: RefineResult?
+
     public init(
         config: Config,
         strings: SessionStrings = SessionStrings(),
         transcriber: any Transcribing,
+        aiEditor: (any AiEditing)? = nil,
         recorder: any AudioCapturing,
         panel: any PopupPresenting,
         delivery: any TextDelivering,
@@ -125,6 +129,7 @@ public final class SessionController {
         self.config = config
         self.strings = strings
         self.transcriber = transcriber
+        self.aiEditor = aiEditor
         self.recorder = recorder
         self.panel = panel
         self.delivery = delivery
@@ -330,7 +335,7 @@ public final class SessionController {
         // Stop produced no final chunk (too short, or the recorder never started),
         // but partial chunks may still hold the whole phrase.
         if !sawFinalChunk, isProcessing {
-            finalize(sessionId: id)
+            await finalize(sessionId: id)
         }
         finishCleanup()
     }
@@ -366,21 +371,37 @@ public final class SessionController {
 
         if chunk.isFinal {
             sawFinalChunk = true
-            finalize(sessionId: id)
+            await finalize(sessionId: id)
         } else if !result.text.isEmpty {
             panel.updateText(ChunkJoiner.join(transcribedParts))
         }
     }
 
     /// Hand the accumulated text to the user for editing.
-    private func finalize(sessionId id: Int) {
-        let fullText = ChunkJoiner.join(transcribedParts)
+    private func finalize(sessionId id: Int) async {
+        var fullText = ChunkJoiner.join(transcribedParts)
         guard !fullText.isEmpty else {
             log("Nothing recognised in session \(id).")
             appendToPopup = false
             panel.updateStatus(strings.noSpeech)
             panel.hide(delay: 2.0)
             return
+        }
+
+        if config.aiEditorEnabled, let editor = aiEditor {
+            let lang = detectedLanguage.isEmpty ? config.primaryLanguage : detectedLanguage
+            let result = await editor.refine(
+                text: fullText,
+                languages: allowedLanguages(),
+                knownTerms: UserTerms.activeTerms(config, lang: lang),
+                misrecognitions: nil
+            )
+            lastRefineResult = result
+            if result.status == .ok {
+                fullText = result.text
+            }
+        } else {
+            lastRefineResult = nil
         }
 
         if appendToPopup, panel.isShowingInteractive {
@@ -422,10 +443,17 @@ public final class SessionController {
         let raw = rawChunks.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         let lang = detectedLanguage.isEmpty ? config.primaryLanguage : detectedLanguage
         let pid = previousAppPid
+        
+        let aiEdited = lastRefineResult?.status == .ok ? lastRefineResult?.text : nil
+        let aiModel = config.aiEditorBackend == "gemini" ? config.geminiModel : config.aiEditorModel
 
         datasetLogger?.append(
             DatasetRecord(
                 rawWhisper: raw,
+                aiEdited: aiEdited,
+                aiStatus: lastRefineResult?.status.rawValue,
+                sttModel: config.sttBackend,
+                aiModel: config.aiEditorEnabled ? aiModel : nil,
                 userFinal: userText,
                 lang: lang,
                 promptHash: Self.promptHash(config.initialPrompt),

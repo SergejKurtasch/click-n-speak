@@ -16,12 +16,14 @@ struct SessionControllerTests {
         let transcriber: FakeTranscriber
         let delivery: FakeDelivery
         let frontmost: FakeFrontmost
+        let aiEditor: FakeAiEditor?
     }
 
     private func makeRig(
         texts: [String] = ["распознанный текст"],
         delay: TimeInterval = 0,
         config: Config? = nil,
+        aiEditor: FakeAiEditor? = nil,
         onConfigChanged: @escaping (Config) -> Void = { _ in }
     ) -> Rig {
         let panel = FakePanel()
@@ -32,6 +34,7 @@ struct SessionControllerTests {
         let controller = SessionController(
             config: config ?? Self.makeConfig(),
             transcriber: transcriber,
+            aiEditor: aiEditor,
             recorder: recorder,
             panel: panel,
             delivery: delivery,
@@ -40,7 +43,8 @@ struct SessionControllerTests {
         )
         return Rig(
             controller: controller, panel: panel, recorder: recorder,
-            transcriber: transcriber, delivery: delivery, frontmost: frontmost
+            transcriber: transcriber, delivery: delivery, frontmost: frontmost,
+            aiEditor: aiEditor
         )
     }
 
@@ -317,6 +321,33 @@ struct SessionControllerTests {
 
         #expect(rig.controller.completedSessions == 20)
         #expect(await rig.transcriber.reloadCount == 1)
+    }
+    @Test("AI Editor refines text before showing interactive popup")
+    func testFinalizeWithAiEditor() async {
+        let aiEditor = FakeAiEditor()
+        aiEditor.refinedText = "super refined text"
+        
+        // Ensure ai_editor_enabled is true in config
+        var config = Self.makeConfig()
+        config.raw["ai_editor_enabled"] = .bool(true)
+        
+        let rig = makeRig(texts: ["raw STT"], config: config, aiEditor: aiEditor)
+        
+        let now = Date()
+        rig.controller.toggle(now: now)
+        await settle()
+        
+        rig.recorder.finalChunk = [Float](repeating: 0, count: 16000)
+        
+        rig.controller.toggle(now: now.addingTimeInterval(2.0))
+        
+        while !rig.panel.isShowingInteractive { await Task.yield() }
+        
+        #expect(aiEditor.didCallRefine)
+        #expect(aiEditor.lastInputText == "raw STT")
+        
+        // Wait, the panel should show the refined text
+        #expect(rig.panel.shownText == "super refined text")
     }
 }
 
