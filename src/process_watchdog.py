@@ -29,7 +29,6 @@ import threading
 import time
 from typing import Callable, Optional
 
-
 _PPID_POLL_INTERVAL_SECONDS = 2.0
 
 
@@ -232,9 +231,9 @@ def install_nsapp_terminate_observer(cleanup_fn: Callable[[], None]) -> bool:
     global _nsapp_terminate_observer, _nsapp_terminate_observer_class
     global _nsapp_terminate_cleanup_fn
     try:
+        import objc  # noqa: F401 — required to subclass NSObject
         from AppKit import NSApplicationWillTerminateNotification
         from Foundation import NSNotificationCenter, NSObject
-        import objc  # noqa: F401 — required to subclass NSObject
     except ImportError:
         return False
 

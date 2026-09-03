@@ -9,7 +9,7 @@ import Foundation
 /// - `.dev` → a sibling `Click-n-speak-dev` directory (or `CNS_DATA_DIR`), so a
 ///   debug build never reads or writes the real config/history/log.
 public struct Paths: Sendable {
-    public enum Mode: Sendable {
+    public enum Mode: Sendable, Equatable {
         case release
         case dev
     }
@@ -50,9 +50,15 @@ public struct Paths: Sendable {
 
     public var configFile: URL { dataDirectory.appendingPathComponent("config.json") }
 
-    /// Directory for all downloaded model files (Whisper GGML, Qwen GGUF, etc.).
+    /// Directory for downloaded Whisper files and Qwen snapshot directories.
     public var modelsDirectory: URL {
         dataDirectory.appendingPathComponent("models", isDirectory: true)
+    }
+
+    /// App-controlled update downloads, mounted-image copies, swap metadata,
+    /// and validation acknowledgements. Never points into `/Applications`.
+    public var updatesDirectory: URL {
+        dataDirectory.appendingPathComponent("updates", isDirectory: true)
     }
 
     /// Resolve the local file URL for a given `ModelInfo`.
@@ -65,9 +71,9 @@ public struct Paths: Sendable {
         modelsDirectory.appendingPathComponent("ggml-large-v3-turbo.bin")
     }
 
-    /// Default AI Editor (Qwen) GGUF model.
+    /// Default AI Editor (Qwen) MLX snapshot directory.
     public var aiEditorModelFile: URL {
-        modelsDirectory.appendingPathComponent("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+        modelsDirectory.appendingPathComponent("qwen2.5-1.5b-instruct-4bit", isDirectory: true)
     }
 
     public var phraseHistoryFile: URL { dataDirectory.appendingPathComponent("phrase_history.txt") }
@@ -114,5 +120,9 @@ public struct Paths: Sendable {
     /// Create the models subdirectory if missing.
     public func ensureModelsDirectory() throws {
         try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
+    }
+
+    public func ensureUpdatesDirectory() throws {
+        try FileManager.default.createDirectory(at: updatesDirectory, withIntermediateDirectories: true)
     }
 }

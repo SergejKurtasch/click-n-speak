@@ -9,26 +9,22 @@ Network and filesystem operations are mocked throughout.
 
 import os
 import plistlib
-import shutil
 import sys
 import tempfile
-import threading
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.app_updater import (
     AppUpdater,
-    check_staged_update_on_launch,
-    swap_and_launch,
     _find_app_in_mount,
     _read_bundle_version,
-    STAGED_PATH,
+    check_staged_update_on_launch,
+    swap_and_launch,
 )
 from src.updater import UpdateInfo
-
 
 # ---------------------------------------------------------------------------
 # Helpers

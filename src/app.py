@@ -5,51 +5,48 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:
+    from .updater import UpdateInfo
 
 from .hotkey_handler import HotkeyHandler
 from .injector import InjectionResult, inject_text
 from .phrase_history import append_phrase
 from .recorder import AudioRecorder
-from .runtime_telemetry import AudioChunk, collect_process_metrics, emit_runtime_event
 from .runtime_health import RestartDecision, TranscriberHealthMonitor
+from .runtime_telemetry import AudioChunk, collect_process_metrics, emit_runtime_event
+
 try:
-    from AppKit import NSWorkspace, NSRunningApplication
+    from AppKit import NSRunningApplication, NSWorkspace
 except ImportError:
     NSWorkspace = None
     NSRunningApplication = None
 
-from .dataset_logger import append_to_dataset
-from .dataset_logger import _DEFAULT_DATASET_PATH
-from .metrics import append_metrics_history, compute_metrics, load_metrics_history
+from . import i18n
 from .ai_editor import (
-    AiEditor,
-    DEFAULT_MODEL_NAME,
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_MODEL_NAME,
+    AiEditor,
     ExternalApiEditor,
     GeminiEditor,
 )
+from .cloud_transcriber import DEFAULT_CLOUD_STT_MODEL, CloudSTTTranscriber
 from .correction_analyzer import (
+    get_correction_candidates,
     has_fresh_strong_correction_signal,
     update_corrections_index,
-    get_correction_candidates,
 )
+from .dataset_logger import _DEFAULT_DATASET_PATH, append_to_dataset
+from .metrics import append_metrics_history, compute_metrics, load_metrics_history
 from .transcriber import (
-    FileTranscriptionError,
     TRANSCRIBER_COLD_START_TIMEOUT_SECONDS,
+    FileTranscriptionError,
     TranscriberProcessWrapper,
     TranscriberRestartedError,
 )
-from .cloud_transcriber import CloudSTTTranscriber, DEFAULT_CLOUD_STT_MODEL
-from .vocab_provider import (
-    add_term_to_user_terms,
-    apply_replacements,
-    collect_known_terms,
-    collect_misrecognitions,
-    collect_replacement_pairs_for_apply,
-)
-from . import i18n
 from .utils import (
+    LANG_NAMES,
     _count_prompt_tokens,
     _term_is_active,
     _term_str,
@@ -57,12 +54,12 @@ from .utils import (
     build_initial_prompt,
     canonical_term_key,
     canonicalize_term,
+    copy_to_clipboard,
     detect_term_script,
-    LANG_NAMES,
     get_allowed_languages,
     get_corrections_file_path,
-    get_metrics_history_path,
     get_language_script,
+    get_metrics_history_path,
     get_primary_language,
     log_error,
     log_exception,
@@ -78,9 +75,15 @@ from .utils import (
     normalize_ukrainian_lang_codes,
     save_config_to_disk,
     send_notification,
-    copy_to_clipboard,
     target_lang_for_script_bucket,
     update_term_usage,
+)
+from .vocab_provider import (
+    add_term_to_user_terms,
+    apply_replacements,
+    collect_known_terms,
+    collect_misrecognitions,
+    collect_replacement_pairs_for_apply,
 )
 
 # Keep-alive interval in seconds (15 minutes)
@@ -794,7 +797,7 @@ class SVoiceRecApp:
                 self._preview_panel.update_text(text, self._main_thread_queue)
             self._preview_panel.hide(self._main_thread_queue, delay=delay)
 
-    def handle_update_available(self, info: "UpdateInfo") -> None:  # type: ignore[name-defined]
+    def handle_update_available(self, info: "UpdateInfo") -> None:
         """Called from the background update-check thread when a new version is found.
 
         Sends a macOS notification once per release (deduplicated via config field),
@@ -1327,7 +1330,7 @@ class SVoiceRecApp:
 
     def run_decay_if_due(self) -> None:
         """Run apply_decay() at most once per 24 h; called by menu-bar hourly timer."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
         last_run = self.config.get("last_decay_run_ts")
         now = datetime.now(timezone.utc)
         if last_run:
@@ -1354,7 +1357,7 @@ class SVoiceRecApp:
 
     def run_metrics_if_due(self, force: bool = False) -> dict | None:
         """Compute and persist metrics snapshot at most once per 24 h."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
 
         now = datetime.now(timezone.utc)
         last_run = self.config.get("last_metrics_snapshot_ts")
@@ -1400,7 +1403,7 @@ class SVoiceRecApp:
         """Monthly-throttled hint when edit-score degrades sharply."""
         if not self.config.get("notify_on_metrics", True):
             return
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
 
         current = snapshot.get("edit_score_avg")
         if not isinstance(current, (int, float)):
@@ -2786,7 +2789,7 @@ class SVoiceRecApp:
     def start_wake_observer(self) -> None:
         """Subscribe to macOS NSWorkspaceDidWakeNotification to warmup model after sleep."""
         try:
-            from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification, NSObject
+            from AppKit import NSObject, NSWorkspace, NSWorkspaceDidWakeNotification
 
             app_ref = self  # Capture reference for the observer callback
 

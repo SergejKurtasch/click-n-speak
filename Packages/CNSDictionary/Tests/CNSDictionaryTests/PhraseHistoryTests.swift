@@ -2,6 +2,13 @@ import Foundation
 import Testing
 @testable import CNSDictionary
 
+private final class MessageBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+    func append(_ message: String) { lock.withLock { storage.append(message) } }
+    var values: [String] { lock.withLock { storage } }
+}
+
 @Suite("PhraseHistory")
 struct PhraseHistoryTests {
     private func makeHistory() -> (PhraseHistory, URL, URL) {
@@ -74,5 +81,44 @@ struct PhraseHistoryTests {
 
         #expect(history.lastPhrases(3).isEmpty)
         #expect(history.count() == 0)
+    }
+
+    @Test("Large history pages stay correct from 0 through 100,000 rows")
+    func largeHistoryPages() async throws {
+        for rowCount in [0, 1, 5, 6, 2_000, 20_000, 100_000] {
+            let (_, file, dir) = makeHistory()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if rowCount > 0 {
+                var fixture = ""
+                fixture.reserveCapacity(rowCount * 36)
+                for index in 0..<rowCount {
+                    fixture += "2026-08-29T12:00:00\tphrase \(index)\n"
+                }
+                try fixture.write(to: file, atomically: true, encoding: .utf8)
+            }
+            let history = PhraseHistory(fileURL: file)
+            let page = await history.loadPage(limit: 5)
+            #expect(page.totalCount == rowCount)
+            #expect(page.entries.count == min(5, rowCount))
+            if rowCount > 0 {
+                #expect(page.entries.last?.text == "phrase \(rowCount - 1)")
+            }
+        }
+    }
+
+    @Test("Malformed rows are reported without logging phrase content")
+    func malformedRowsArePrivate() async throws {
+        let (_, file, dir) = makeHistory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try "private malformed transcript\n".write(to: file, atomically: true, encoding: .utf8)
+        let messages = MessageBox()
+        let history = PhraseHistory(fileURL: file) { message in
+            messages.append(message)
+        }
+        _ = await history.loadPage(limit: 5)
+        #expect(messages.values.count == 1)
+        #expect(messages.values[0].contains("private malformed transcript") == false)
     }
 }

@@ -17,8 +17,8 @@ from AppKit import (
     NSRect,
     NSScreen,
     NSSize,
-    NSTextField,
     NSTextAlignmentLeft,
+    NSTextField,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskTitled,
 )

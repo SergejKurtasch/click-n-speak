@@ -1,0 +1,27 @@
+{
+  "source": "Python src/ai_editor.py prompt and accepted local cleanup behavior",
+  "model_id": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+  "model_revision": "8b403126fc14f14cfc99bb4cfa72ecbc129ea677",
+  "cold_max_seconds": 25.0,
+  "warm_max_seconds": 8.0,
+  "cases": [
+    {
+      "id": "ru_punctuation",
+      "languages": ["ru"],
+      "input": "привет это проверка локального редактора пожалуйста добавь знаки препинания и сохрани все исходные слова без изменения смысла",
+      "required_terms": ["локального", "редактора", "смысла"]
+    },
+    {
+      "id": "en_punctuation",
+      "languages": ["en"],
+      "input": "hello this is a local editor validation please add punctuation while preserving every meaningful source word in the original order",
+      "required_terms": ["local", "editor", "validation"]
+    },
+    {
+      "id": "mixed_terms",
+      "languages": ["ru", "en"],
+      "input": "сегодня мы проверяем Click n speak вместе with Swift MLX and Qwen please preserve all technical terms exactly",
+      "required_terms": ["Swift", "MLX", "Qwen"]
+    }
+  ]
+}

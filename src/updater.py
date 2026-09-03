@@ -7,12 +7,11 @@ import json
 import logging
 import plistlib
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
 
 from .utils import log_error, log_info
 

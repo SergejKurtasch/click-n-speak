@@ -4,10 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from src.dataset_logger import _find_terms, append_to_dataset
-
 
 # ---------------------------------------------------------------------------
 # _find_terms

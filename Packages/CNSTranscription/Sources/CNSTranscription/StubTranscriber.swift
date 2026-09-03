@@ -1,4 +1,5 @@
 import Foundation
+import CNSCore
 
 /// Placeholder transcriber for wiring up the record → chunk → HUD pipeline
 /// before the real WhisperKit engine lands (task 2.4b, gated on the Phase 0

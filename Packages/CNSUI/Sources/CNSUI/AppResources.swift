@@ -5,6 +5,16 @@ import CNSCore
 /// `.app` bundle (Resources) or as a raw executable during development
 /// (repo-relative fallback, or `CNS_RESOURCES_DIR`).
 public struct AppResources: Sendable {
+    public static let requiredMenuBarIcons = ["idle", "recording", "processing"]
+    public static let requiredMenuItemIcons = [
+        "accessibility-ok", "accessibility-warn", "advanced", "ai-editor",
+        "check-updates", "copy-phrase", "download-model", "initial-prompt",
+        "languages", "last-phrases", "launch-at-login", "microphone-ok",
+        "microphone-warn", "model", "permissions-ok", "permissions-warn",
+        "restart", "transcribe-file"
+    ]
+    @MainActor private static var loggedMissingAssets = Set<String>()
+
     public let localesDirectory: URL
     public let iconsDirectory: URL
 
@@ -71,9 +81,56 @@ public struct AppResources: Sendable {
             let url = iconsDirectory.appendingPathComponent("menubar").appendingPathComponent(name)
             if let image = NSImage(contentsOf: url) {
                 image.isTemplate = name.contains("Template")
+                image.size = NSSize(width: 22, height: 22)
                 return image
             }
         }
         return nil
+    }
+
+    /// Load a menu item icon, preferring the Template variant so it adapts to
+    /// light/dark mode and selection state.
+    @MainActor
+    public func menuItemIcon(name: String) -> NSImage? {
+        for filename in ["\(name)Template.png", "\(name).png"] {
+            let url = iconsDirectory.appendingPathComponent("menu").appendingPathComponent(filename)
+            if let image = NSImage(contentsOf: url) {
+                image.isTemplate = filename.contains("Template")
+                image.size = NSSize(width: 16, height: 16)
+                return image
+            }
+        }
+        let symbolName: String?
+        switch name {
+        case "api-keys": symbolName = "key.fill"
+        default: symbolName = nil
+        }
+        if let symbolName,
+           let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: name) {
+            image.isTemplate = true
+            return image
+        }
+        return nil
+    }
+
+    @MainActor
+    public func missingRequiredAssets() -> [String] {
+        var missing: [String] = []
+        for state in Self.requiredMenuBarIcons where menuBarIcon(state: state) == nil {
+            missing.append("menubar/\(state)")
+        }
+        for name in Self.requiredMenuItemIcons where menuItemIcon(name: name) == nil {
+            missing.append("menu/\(name)")
+        }
+        if menuItemIcon(name: "api-keys") == nil {
+            missing.append("system/api-keys")
+        }
+        return missing
+    }
+
+    @MainActor
+    public func logMissingAssetOnce(_ name: String, log: (String) -> Void) {
+        guard Self.loggedMissingAssets.insert(name).inserted else { return }
+        log("Missing required UI asset: \(name)")
     }
 }

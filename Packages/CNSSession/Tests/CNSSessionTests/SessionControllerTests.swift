@@ -1,5 +1,7 @@
 import CNSCore
-import CNSUI
+import CNSDictionary
+import CNSTranscription
+
 import Foundation
 import Testing
 @testable import CNSSession
@@ -21,14 +23,20 @@ struct SessionControllerTests {
 
     private func makeRig(
         texts: [String] = ["распознанный текст"],
+        results: [TranscriptionResult] = [],
         delay: TimeInterval = 0,
         config: Config? = nil,
         aiEditor: FakeAiEditor? = nil,
-        onConfigChanged: @escaping (Config) -> Void = { _ in }
+        phraseHistory: (any PhraseHistoryProviding)? = nil,
+        datasetLogger: DatasetLogger? = nil,
+        dictionaryCoordinator: (any DictionaryCoordinating)? = nil,
+        runtimeDescriptorProvider: (@Sendable () -> RuntimeDescriptor)? = nil,
+        onConfigChanged: @escaping (Config) -> Void = { _ in },
+        onPhraseHistoryChanged: @escaping () -> Void = {}
     ) -> Rig {
         let panel = FakePanel()
         let recorder = FakeRecorder()
-        let transcriber = FakeTranscriber(texts: texts, delay: delay)
+        let transcriber = FakeTranscriber(texts: texts, results: results, delay: delay)
         let delivery = FakeDelivery()
         let frontmost = FakeFrontmost()
         let controller = SessionController(
@@ -39,7 +47,12 @@ struct SessionControllerTests {
             panel: panel,
             delivery: delivery,
             frontmost: frontmost,
-            onConfigChanged: onConfigChanged
+            phraseHistory: phraseHistory,
+            datasetLogger: datasetLogger,
+            dictionaryCoordinator: dictionaryCoordinator,
+            onConfigChanged: onConfigChanged,
+            runtimeDescriptorProvider: runtimeDescriptorProvider,
+            onPhraseHistoryChanged: onPhraseHistoryChanged
         )
         return Rig(
             controller: controller, panel: panel, recorder: recorder,
@@ -126,6 +139,48 @@ struct SessionControllerTests {
         #expect(rig.delivery.delivered.count == 1)
         #expect(rig.delivery.delivered.first?.text == "исправленный текст ")
         #expect(rig.delivery.delivered.first?.pid == 777)
+    }
+
+    @Test("A confirmed phrase invalidates shared history exactly once")
+    func historyInvalidatesOnce() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-history-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let history = PhraseHistory(fileURL: directory.appendingPathComponent("phrases.txt"))
+        var invalidations = 0
+        let rig = makeRig(
+            phraseHistory: history,
+            onPhraseHistoryChanged: { invalidations += 1 }
+        )
+        await runSession(rig)
+
+        rig.panel.userConfirms("saved phrase")
+        rig.panel.userConfirms("duplicate callback")
+        await settle()
+
+        #expect(invalidations == 1)
+        #expect(history.count() == 1)
+        #expect(history.lastPhrases(1).first?.text == "saved phrase")
+    }
+
+    @Test("Confirmation metadata is handed to the dictionary coordinator exactly once")
+    func coordinatorConfirmIsExactlyOnce() async {
+        let coordinator = FakeDictionaryCoordinator(config: Self.makeConfig())
+        var historyInvalidations = 0
+        let rig = makeRig(
+            dictionaryCoordinator: coordinator,
+            onPhraseHistoryChanged: { historyInvalidations += 1 }
+        )
+        await runSession(rig)
+
+        rig.panel.userConfirms("final text")
+        rig.panel.userConfirms("duplicate callback")
+        await settle()
+
+        #expect(coordinator.confirmations.count == 1)
+        #expect(coordinator.confirmations.first?.sessionID == 1)
+        #expect(coordinator.confirmations.first?.datasetRecord.userFinal == "final text")
+        #expect(historyInvalidations == 1)
     }
 
     @Test("Cancelling injects nothing")
@@ -228,6 +283,141 @@ struct SessionControllerTests {
         #expect(rig.panel.statuses.contains("Recording error"))
     }
 
+    @Test("Stopping while recorder startup is suspended cannot start the stale engine")
+    func stopBeforeRecorderStartupCompletes() async {
+        let rig = makeRig(texts: [])
+        rig.recorder.suspendStart = true
+        let now = Date()
+
+        rig.controller.toggle(now: now)
+        await settle(2)
+        #expect(rig.controller.isRecording == true)
+        if case .starting(sessionID: 1, targetPID: _, appendMode: false) = rig.controller.state {
+            // Expected explicit startup state.
+        } else {
+            Issue.record("Expected session 1 to remain in starting state")
+        }
+
+        rig.controller.toggle(now: now.addingTimeInterval(1))
+        rig.recorder.resumeStart()
+        await settle(30)
+
+        #expect(rig.recorder.isRecording == false)
+        #expect(rig.controller.isRecording == false)
+        #expect(rig.controller.isProcessing == false)
+        #expect(rig.controller.state == .idle)
+        #expect(rig.panel.interactiveTexts.isEmpty)
+        #expect(rig.controller.completedSessions == 1)
+    }
+
+    @Test("Thirty rapid toggles settle without overlapping session generations")
+    func rapidToggleBurst() async {
+        let rig = makeRig(texts: [])
+        let start = Date()
+
+        for index in 0..<30 {
+            rig.controller.toggle(now: start.addingTimeInterval(Double(index) * 0.31))
+        }
+        await settle(40)
+
+        #expect(rig.controller.sessionId == 1)
+        #expect(rig.controller.completedSessions == 1)
+        #expect(rig.controller.isRecording == false)
+        #expect(rig.controller.isProcessing == false)
+        #expect(rig.recorder.isRecording == false)
+    }
+
+    @Test("Duplicate final and popup callbacks complete the session once")
+    func duplicateCallbacksAreIdempotent() async {
+        let rig = makeRig(texts: ["один текст"])
+        rig.recorder.duplicateFinalCallback = true
+        await runSession(rig)
+
+        rig.panel.userConfirms()
+        rig.panel.userCancels()
+        await settle(200)
+
+        #expect(rig.controller.completedSessions == 1)
+        #expect(await rig.transcriber.requestCount == 1)
+        #expect(rig.delivery.delivered.count == 1)
+    }
+
+    @Test("Hotkey start never queues synthetic prewarm work")
+    func hotkeyDoesNotPrewarm() async {
+        let rig = makeRig()
+        await runSession(rig)
+
+        #expect(await rig.transcriber.preWarmCount == 0)
+        #expect(await rig.transcriber.warmupCount == 0)
+    }
+
+    @Test("Dataset metadata uses the runtime captured at session start")
+    func datasetUsesFactualRuntimeDescriptor() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-runtime-metadata-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("dataset.jsonl")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let descriptor = RuntimeDescriptor(
+            transcriber: TranscriberDescriptor(
+                backend: "openai", modelID: "gpt-4o-transcribe", kind: .cloud
+            ),
+            aiEditor: AiEditorDescriptor(
+                backend: "gemini", modelID: "gemini-2.5-flash-lite", kind: .cloud
+            )
+        )
+        let rig = makeRig(
+            datasetLogger: DatasetLogger(fileURL: file),
+            runtimeDescriptorProvider: { descriptor }
+        )
+
+        await runSession(rig)
+        rig.panel.userConfirms()
+        await settle(10)
+
+        let line = try String(contentsOf: file, encoding: .utf8)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        )
+        #expect(object["stt_backend"] as? String == "openai")
+        #expect(object["stt_model"] as? String == "gpt-4o-transcribe")
+        #expect(object["ai_model"] as? String == "gemini-2.5-flash-lite")
+    }
+
+    @Test("Dataset records factual AI timeout without claiming edited text")
+    func datasetUsesFactualAiStatus() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-ai-status-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("dataset.jsonl")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = Self.makeConfig()
+        config.raw["ai_editor_enabled"] = .bool(true)
+        let editor = FakeAiEditor()
+        editor.refineStatus = .timeout
+        editor.refinedText = "must not be recorded as edited"
+        let descriptor = RuntimeDescriptor(
+            transcriber: .init(backend: "local", modelID: "whisper-test", kind: .local),
+            aiEditor: .init(backend: "local", modelID: "qwen-test", kind: .local)
+        )
+        let rig = makeRig(
+            config: config,
+            aiEditor: editor,
+            datasetLogger: DatasetLogger(fileURL: file),
+            runtimeDescriptorProvider: { descriptor }
+        )
+
+        await runSession(rig)
+        rig.panel.userConfirms()
+        await settle(10)
+
+        let line = try String(contentsOf: file, encoding: .utf8)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        )
+        #expect(object["ai_status"] as? String == "timeout")
+        #expect(object["ai_edited"] is NSNull)
+        #expect(object["ai_model"] as? String == "qwen-test")
+    }
+
     @Test("Silence produces no popup")
     func noSpeechNoPopup() async {
         let rig = makeRig(texts: [])
@@ -236,6 +426,31 @@ struct SessionControllerTests {
         #expect(rig.panel.interactiveTexts.isEmpty)
         #expect(rig.panel.statuses.contains("No speech detected"))
         #expect(rig.controller.isProcessing == false)
+    }
+
+    @Test("A typed provider failure is not presented as no speech")
+    func providerFailureIsActionable() async {
+        let rig = makeRig(
+            texts: [],
+            results: [TranscriptionResult.failed(
+                .init(kind: .unauthorized, message: "Cloud key was rejected")
+            )]
+        )
+        await runSession(rig)
+
+        #expect(rig.panel.interactiveTexts.isEmpty)
+        #expect(rig.panel.statuses.contains("Cloud key was rejected"))
+        #expect(!rig.panel.statuses.contains("No speech detected"))
+    }
+
+    @Test("A decode timeout has a distinct user-visible status")
+    func timeoutIsDistinctFromNoSpeech() async {
+        let rig = makeRig(texts: [], results: [.init(text: "", outcome: .timedOut)])
+        await runSession(rig)
+
+        #expect(rig.panel.interactiveTexts.isEmpty)
+        #expect(rig.panel.statuses.contains("Speech recognition timed out"))
+        #expect(!rig.panel.statuses.contains("No speech detected"))
     }
 
     @Test("Audio from a finished session never reaches the next one")
@@ -348,6 +563,76 @@ struct SessionControllerTests {
         
         // Wait, the panel should show the refined text
         #expect(rig.panel.shownText == "super refined text")
+    }
+
+    @Test("Replacement policy mirrors local and cloud editor hint behavior")
+    func replacementPolicy() {
+        for status in [
+            RefineStatus.disabled, .skipped, .timeout, .error, .memoryPressure,
+        ] {
+            #expect(SessionController.shouldApplyDirectReplacements(after: status, hintsInPrompt: false))
+            #expect(SessionController.shouldApplyDirectReplacements(after: status, hintsInPrompt: true))
+        }
+        #expect(SessionController.shouldApplyDirectReplacements(after: nil, hintsInPrompt: false))
+        #expect(SessionController.shouldApplyDirectReplacements(after: .unchanged, hintsInPrompt: false))
+        #expect(!SessionController.shouldApplyDirectReplacements(after: .unchanged, hintsInPrompt: true))
+        #expect(!SessionController.shouldApplyDirectReplacements(after: .ok, hintsInPrompt: false))
+    }
+
+    @Test("Local unchanged output receives mechanical replacements")
+    func localUnchangedAppliesReplacement() async {
+        var config = Self.makeConfig(primary: "en", additional: [])
+        config.raw["ai_editor_enabled"] = .bool(true)
+        var replacement = JSONObject()
+        replacement["from"] = .string("click and speak")
+        replacement["to"] = .string("Click-n-speak")
+        config.raw["manual_replacements"] = .array([.object(replacement)])
+        let source = "click and speak keeps the original transcript when the local editor returns unchanged"
+        let editor = FakeAiEditor()
+        editor.refinedText = source
+        editor.refineStatus = .unchanged
+        let runtime = RuntimeDescriptor(
+            transcriber: .init(backend: "local", modelID: "whisper-test", kind: .local),
+            aiEditor: .init(backend: "local", modelID: "qwen-test", kind: .local)
+        )
+        let rig = makeRig(
+            texts: [source],
+            config: config,
+            aiEditor: editor,
+            runtimeDescriptorProvider: { runtime }
+        )
+
+        await runSession(rig)
+
+        #expect(rig.panel.shownText.hasPrefix("Click-n-speak keeps"))
+    }
+
+    @Test("Cloud unchanged output avoids applying the same hints twice")
+    func cloudUnchangedSkipsReplacement() async {
+        var config = Self.makeConfig(primary: "en", additional: [])
+        config.raw["ai_editor_enabled"] = .bool(true)
+        var replacement = JSONObject()
+        replacement["from"] = .string("click and speak")
+        replacement["to"] = .string("Click-n-speak")
+        config.raw["manual_replacements"] = .array([.object(replacement)])
+        let source = "click and speak keeps the cloud editor response unchanged without a second pass"
+        let editor = FakeAiEditor()
+        editor.refinedText = source
+        editor.refineStatus = .unchanged
+        let runtime = RuntimeDescriptor(
+            transcriber: .init(backend: "local", modelID: "whisper-test", kind: .local),
+            aiEditor: .init(backend: "gemini", modelID: "gemini-test", kind: .cloud)
+        )
+        let rig = makeRig(
+            texts: [source],
+            config: config,
+            aiEditor: editor,
+            runtimeDescriptorProvider: { runtime }
+        )
+
+        await runSession(rig)
+
+        #expect(rig.panel.shownText == source)
     }
 }
 

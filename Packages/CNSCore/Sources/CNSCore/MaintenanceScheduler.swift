@@ -26,9 +26,6 @@ public struct IntervalGate: Sendable {
 /// a 60 s dirty-config flush and a 3600 s daily-maintenance tick (decay +
 /// metrics). The 0.3 s main-thread-queue drain is intentionally NOT ported —
 /// Swift uses `@MainActor` directly (SWIFT_MIGRATION_PLAN.md §4.2).
-///
-/// Phase 1 wires the timers and invokes the hooks; the hooks themselves land in
-/// later phases.
 @MainActor
 public final class MaintenanceScheduler {
     public var flushInterval: TimeInterval

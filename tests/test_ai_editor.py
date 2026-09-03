@@ -17,25 +17,23 @@ Integration smoke test (skipped if mlx-lm is missing):
   - AiEditor.load() does not crash when mlx-lm is available.
 """
 
-import sys
-import threading
-import tempfile
-import types
-import unittest
-from unittest.mock import MagicMock, patch
-
-
 # ---------------------------------------------------------------------------
 # Ensure the project root is on sys.path so "from src.ai_editor import …" works
 # ---------------------------------------------------------------------------
 import os
+import sys
+import tempfile
+import threading
+import unittest
+from unittest.mock import MagicMock, patch
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.ai_editor import (
+    _REFINE_TIMEOUT_SECONDS,
     AiEditor,
     ExternalApiEditor,
     GeminiEditor,
-    _REFINE_TIMEOUT_SECONDS,
     _build_api_editor_system_prompt,
     _build_system_prompt,
 )

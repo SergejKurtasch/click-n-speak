@@ -25,8 +25,8 @@ from AppKit import (
     NSModalResponseOK,
     NSOpenPanel,
     NSScreen,
-    NSTextField,
     NSTextAlignmentCenter,
+    NSTextField,
     NSView,
     NSWindow,
     NSWindowStyleMaskClosable,
@@ -34,8 +34,8 @@ from AppKit import (
 )
 from Foundation import NSObject
 
-from .utils import log_error, log_info
 from . import i18n
+from .utils import log_error, log_info
 
 _AUDIO_EXTENSIONS = frozenset({
     ".wav", ".mp3", ".m4a", ".aiff", ".aif",

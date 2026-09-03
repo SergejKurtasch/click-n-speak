@@ -1,34 +1,52 @@
 import Foundation
+import Security
 
 public enum KeychainHelper: Sendable {
     public static let defaultService = "click-n-speak"
     public static let geminiAccount = "google_api_key"
+    public static let openAIAccount = "openai_api_key"
 
-    /// Store a password in macOS Keychain via the `security` CLI tool, mimicking the Python implementation.
+    /// Store a password in macOS Keychain natively using Security.framework.
     public static func setPassword(
         service: String = defaultService,
         account: String,
         password: String
     ) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        // -U: Update item if it already exists
-        process.arguments = ["add-generic-password", "-s", service, "-a", account, "-w", password, "-U"]
-        
-        let pipe = Pipe()
-        process.standardError = pipe
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        if process.terminationStatus != 0 {
-            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMessage = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw NSError(domain: "KeychainHelper", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMessage ?? "security command failed"])
+        guard let data = password.data(using: .utf8) else {
+            throw NSError(domain: "KeychainHelper", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode password string."])
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        switch status {
+        case errSecSuccess:
+            // Update existing item
+            let attributesToUpdate: [String: Any] = [
+                kSecValueData as String: data
+            ]
+            let updateStatus = SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
+            if updateStatus != errSecSuccess {
+                throw NSError(domain: "KeychainHelper", code: Int(updateStatus), userInfo: [NSLocalizedDescriptionKey: "SecItemUpdate failed: \(updateStatus)"])
+            }
+        case errSecItemNotFound:
+            // Add new item
+            var newItem = query
+            newItem[kSecValueData as String] = data
+            let addStatus = SecItemAdd(newItem as CFDictionary, nil)
+            if addStatus != errSecSuccess {
+                throw NSError(domain: "KeychainHelper", code: Int(addStatus), userInfo: [NSLocalizedDescriptionKey: "SecItemAdd failed: \(addStatus)"])
+            }
+        default:
+            throw NSError(domain: "KeychainHelper", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "SecItemCopyMatching failed: \(status)"])
         }
     }
 
-    /// Return a password from macOS Keychain via the `security` CLI tool.
+    /// Return a password from macOS Keychain natively using Security.framework.
     public static func getPassword(
         service: String = defaultService,
         account: String
@@ -42,51 +60,42 @@ public enum KeychainHelper: Sendable {
                 return envKey
             }
         }
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", service, "-a", account, "-w"]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            if process.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let result = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                return result?.isEmpty == false ? result : nil
-            }
-            return nil
-        } catch {
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var dataTypeRef: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+
+        guard status == errSecSuccess,
+              let data = dataTypeRef as? Data,
+              let result = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !result.isEmpty else {
             return nil
         }
+
+        return result
     }
 
-    /// Delete a password from macOS Keychain via the `security` CLI tool.
+    /// Delete a password from macOS Keychain natively using Security.framework.
     public static func deletePassword(
         service: String = defaultService,
         account: String
     ) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["delete-generic-password", "-s", service, "-a", account]
-        
-        let pipe = Pipe()
-        process.standardError = pipe
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        if process.terminationStatus != 0 {
-            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMessage = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            // Error code 44 indicates item not found, which is fine for deletion
-            if process.terminationStatus != 44 {
-                throw NSError(domain: "KeychainHelper", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMessage ?? "security command failed"])
-            }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+
+        let status = SecItemDelete(query as CFDictionary)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            throw NSError(domain: "KeychainHelper", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "SecItemDelete failed: \(status)"])
         }
     }
 }

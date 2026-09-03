@@ -12,9 +12,9 @@ public struct ChunkingConfig: Sendable {
     public init(
         sampleRate: Int = 16000,
         silenceDuration: Double = 1.0,
-        targetSpeechDuration: Double = 3.0,
+        targetSpeechDuration: Double = 4.0,
         maxSpeechDuration: Double = 8.0,
-        minSpeechDuration: Double = 0.5
+        minSpeechDuration: Double = 1.0
     ) {
         self.sampleRate = sampleRate
         self.silenceDuration = silenceDuration

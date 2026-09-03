@@ -817,8 +817,8 @@ def build_initial_prompt(config: dict) -> str:
     additional = list(config.get("additional_languages") or [])
 
     # Language hints for every active language.
-    all_langs = [primary] + [l for l in additional if l != primary]
-    lang_hint = " ".join(LANG_PROMPTS[l] for l in all_langs if l in LANG_PROMPTS)
+    all_langs = [primary] + [lang for lang in additional if lang != primary]
+    lang_hint = " ".join(LANG_PROMPTS[lang] for lang in all_langs if lang in LANG_PROMPTS)
 
     user_terms: dict = config.get("user_terms") or {}
 
@@ -1152,7 +1152,7 @@ def update_term_usage(config: dict, phrase: str) -> bool:
     tokens: set[str] = set(re.findall(r"[\w'-]+", phrase_lower))
     now_iso = datetime.now(timezone.utc).isoformat()
     dirty = False
-    for lang, terms in (config.get("user_terms") or {}).items():
+    for _lang, terms in (config.get("user_terms") or {}).items():
         for item in terms:
             if not isinstance(item, dict):
                 continue
@@ -1226,7 +1226,7 @@ def apply_decay(config: dict, max_age_days: int | None = None) -> int:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=max_age_days)
     n_slow = 0
-    for lang, terms in (config.get("user_terms") or {}).items():
+    for _lang, terms in (config.get("user_terms") or {}).items():
         for item in terms:
             if not isinstance(item, dict):
                 continue

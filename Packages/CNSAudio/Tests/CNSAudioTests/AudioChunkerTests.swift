@@ -16,20 +16,20 @@ struct AudioChunkerTests {
     @Test("Normal branch: 1.0s silence triggers before target duration")
     func normalBranch() {
         var c = AudioChunker()
-        // 1.5s speech, total stays < 3s target.
+        // 1.5s speech, total stays below the 4s target.
         #expect(block(&c, seconds: 0.5, speech: true) == .continue)
         #expect(block(&c, seconds: 0.5, speech: true) == .continue)
         #expect(block(&c, seconds: 0.5, speech: true) == .continue)
-        // 0.5s + 0.5s silence → silence_counter hits 1.0 at total 2.5s (< 3s).
+        // 0.5s + 0.5s silence → silence_counter hits 1.0 at total 2.5s (< 4s).
         #expect(block(&c, seconds: 0.5, speech: false) == .continue)
         #expect(block(&c, seconds: 0.5, speech: false) == .emit(triggerType: "Normal"))
     }
 
-    @Test("Micro branch: 0.4s silence triggers after target (3s) duration")
+    @Test("Micro branch: 0.4s silence triggers after target (4s) duration")
     func microBranch() {
         var c = AudioChunker()
-        // 3.5s of speech → past target, no trigger yet (no silence).
-        for _ in 0..<7 { #expect(block(&c, seconds: 0.5, speech: true) == .continue) }
+        // 4.0s of speech reaches target, with no trigger while speech continues.
+        for _ in 0..<8 { #expect(block(&c, seconds: 0.5, speech: true) == .continue) }
         // Two 0.2s silence frames → silence_counter 0.4 → Micro trigger.
         #expect(block(&c, seconds: 0.2, speech: false) == .continue)
         #expect(block(&c, seconds: 0.2, speech: false) == .emit(triggerType: "MICRO (Target duration)"))
@@ -47,7 +47,7 @@ struct AudioChunkerTests {
     @Test("Short speech below min_speech is discarded")
     func discardShortSpeech() {
         var c = AudioChunker()
-        // 0.4s speech then 1.0s silence: speech_duration 0.4 ≤ 0.5 → discard.
+        // 0.4s speech then 1.0s silence: speech_duration 0.4 ≤ 1.0 → discard.
         #expect(block(&c, seconds: 0.4, speech: true) == .continue)
         #expect(block(&c, seconds: 0.5, speech: false) == .continue)
         #expect(block(&c, seconds: 0.5, speech: false) == .discard)
@@ -79,7 +79,7 @@ struct AudioChunkerTests {
         // 0.3s speech (10 frames) then 0.6s silence (20 frames).
         for _ in 0..<10 { c.voiceFrame(isSpeech: true, seconds: 0.03) }
         for _ in 0..<20 { c.voiceFrame(isSpeech: false, seconds: 0.03) }
-        // silence_counter = 0.6 < 1.0 and duration 0.9 < 3 → continue.
+        // silence_counter = 0.6 < 1.0 and duration 0.9 < 4 → continue.
         #expect(c.endBlock() == .continue)
     }
 

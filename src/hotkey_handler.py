@@ -1,7 +1,7 @@
 import threading
 
 from pynput import keyboard
-from pynput.keyboard import Key, KeyCode
+from pynput.keyboard import KeyCode
 
 from .utils import log_error, log_info, log_warning
 

@@ -26,18 +26,16 @@ public struct HallucinationFilter: Sendable {
     ]
 
     private let phraseRegex: NSRegularExpression
-    private let subwordRepeatRegex: NSRegularExpression
-    private let wordNormalizeRegex: NSRegularExpression
 
     public init() {
         let pattern = HallucinationFilter.phrases
             .map { "\\b" + NSRegularExpression.escapedPattern(for: $0) + "\\b" }
             .joined(separator: "|")
-        phraseRegex = try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
-        // Any 2-8 char unit that repeats 6+ times (`_SUBWORD_REPEAT_RE`).
-        subwordRepeatRegex = try! NSRegularExpression(pattern: "(.{2,8}?)\\1{5,}", options: [])
-        // Leading/trailing punctuation for word-repetition comparison (`_WORD_NORMALIZE`).
-        wordNormalizeRegex = try! NSRegularExpression(pattern: "^[\\W_]+|[\\W_]+$", options: [])
+        do {
+            phraseRegex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        } catch {
+            preconditionFailure("Static hallucination phrase regex is invalid: \(error)")
+        }
     }
 
     /// Filter decoded `text`. Returns "" when the chunk is dropped as a
@@ -96,13 +94,15 @@ public struct HallucinationFilter: Sendable {
     /// `_normalize_word`: lowercase and strip leading/trailing punctuation.
     func normalizeWord(_ w: String) -> String {
         let lower = w.lowercased()
-        let range = NSRange(lower.startIndex..., in: lower)
-        return wordNormalizeRegex.stringByReplacingMatches(in: lower, range: range, withTemplate: "")
+        let wordNormalizeRegex = /^[\W_]+|[\W_]+$/
+        return lower.replacing(wordNormalizeRegex, with: "")
     }
 
     private func replaceSubwordRepetition(_ text: String) -> String {
-        let range = NSRange(text.startIndex..., in: text)
-        return subwordRepeatRegex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1")
+        let subwordRepeatRegex = /(.{2,8}?)\1{5,}/
+        return text.replacing(subwordRepeatRegex, with: { match in
+            String(match.output.1)
+        })
     }
 
     private func firstMatch(_ regex: NSRegularExpression, in text: String) -> NSTextCheckingResult? {

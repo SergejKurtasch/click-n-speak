@@ -1,21 +1,22 @@
 """Tests for stability fixes: transcriber timeout, micro-chunk skip, hallucination filter, is_processing reset."""
 
-import time
 import queue
 import threading
+import time
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
 
 from src.transcriber import (
+    MIN_FINAL_CHUNK_SAMPLES,
     PREWARM_MAX_TOKENS,
     REALTIME_MAX_TOKENS,
-    WhisperTranscriber,
     TranscriberProcessWrapper,
-    MIN_FINAL_CHUNK_SAMPLES,
-    TRANSCRIBER_TIMEOUT_SECONDS,
+    WhisperTranscriber,
     _collapse_consecutive_word_repetition,
 )
+
 
 # Alias for backwards-compat with older test references
 def _has_consecutive_word_repetition(text: str, min_count: int) -> bool:
@@ -118,7 +119,7 @@ def test_long_silent_chunk_not_filtered_by_rms(mock_call):
     with patch("src.transcriber.log_info"):
         transcriber = WhisperTranscriber(model_name="dummy")
         long_silence = np.zeros(48001, dtype=np.float32)  # just over 3s
-        result = transcriber.transcribe(long_silence, is_final_chunk=False)
+        transcriber.transcribe(long_silence, is_final_chunk=False)
         # Whisper gets called (RMS filter doesn't trigger for long chunks)
         mock_call.assert_called_once()
 
@@ -417,8 +418,9 @@ def test_overdue_worker_without_partials_requests_buffered_finalization() -> Non
 
 def test_min_speech_duration_filtering():
     """Audio shorter than min_speech_duration must not be returned by recorder.stop()."""
-    from src.recorder import AudioRecorder
     import numpy as np
+
+    from src.recorder import AudioRecorder
 
     recorder = AudioRecorder(sample_rate=16000, min_speech_duration=1.0)
     recorder.recording = True
@@ -444,9 +446,10 @@ def test_keep_alive_memory_pressure():
     and returns the cached value immediately, so we test the underlying
     _check_memory_pressure_now() directly.
     """
-    from src.app import SVoiceRecApp, MEMORY_PRESSURE_THRESHOLD_PERCENT
     import sys
     from unittest.mock import patch
+
+    from src.app import MEMORY_PRESSURE_THRESHOLD_PERCENT, SVoiceRecApp
 
     app = SVoiceRecApp.__new__(SVoiceRecApp)
 
@@ -470,9 +473,9 @@ def test_keep_alive_memory_pressure():
 
 def test_recorder_stop_thread_timeout():
     """Test that recorder stop doesn't block indefinitely."""
-    from src.recorder import AudioRecorder
-    import threading
     import time
+
+    from src.recorder import AudioRecorder
     
     recorder = AudioRecorder(sample_rate=16000)
     

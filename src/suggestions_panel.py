@@ -15,10 +15,9 @@ from AppKit import (
     NSPoint,
     NSRect,
     NSScreen,
-    NSSize,
     NSScrollView,
+    NSSize,
     NSTextField,
-    NSTextAlignmentRight,
     NSView,
     NSViewHeightSizable,
     NSViewMaxYMargin,
@@ -32,7 +31,7 @@ from AppKit import (
 from Foundation import NSObject
 
 from . import i18n
-from .utils import LANG_NAMES, log_error, log_info
+from .utils import LANG_NAMES, log_error
 
 _PAGE_SIZE = 10
 _WIN_W = 480
@@ -483,7 +482,7 @@ class SuggestionsPanel:
         lang_counts: dict[str, int] = {}
         for item in self._items:
             lang_counts[item["lang"]] = lang_counts.get(item["lang"], 0) + item["count"]
-        return sorted(lang_counts.keys(), key=lambda l: -lang_counts[l])
+        return sorted(lang_counts.keys(), key=lambda lang: -lang_counts[lang])
 
     def _do_select_section(self, idx: int) -> None:
         if idx >= len(self._ordered_langs):

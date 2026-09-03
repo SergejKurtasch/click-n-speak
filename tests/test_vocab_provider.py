@@ -1,8 +1,8 @@
 import json
 
-from src.correction_analyzer import remove_replacement_pair_from_index
 from src.ai_editor import AiEditor
 from src.app import _should_apply_direct_replacements_after_refine
+from src.correction_analyzer import remove_replacement_pair_from_index
 from src.utils import migrate_config_to_v6
 from src.vocab_provider import (
     add_term_to_user_terms,

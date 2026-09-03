@@ -1,0 +1,16 @@
+{
+  "source": "docs/migration/BAKEOFF_RESULTS.md quality/RSS plus AGENTS.md Python production wall-latency profile (2026-07-14/2026-04-29)",
+  "initial_prompt": "Русский язык. English language. Это разговорная речь. Используются профессиональные термины и аббревиатуры. Prompt, Claude, Gemini, Whisper, GitHub, TF-IDF, Qwen, Readmission, MCP, Cognee, HuggingFace, survival, LinkedIn, XGBoost, Optuna, CV, ADK, Claude.MD, Cursor, C-Index, LLM",
+  "maximum_overall_wer": 0.048,
+  "maximum_russian_wer": 0.050,
+  "maximum_english_wer": 0.079,
+  "maximum_code_switch_wer": 0.077,
+  "minimum_short_command_accuracy": 0.700,
+  "minimum_term_recall": 0.830,
+  "maximum_warm_p50_seconds": 3.000,
+  "maximum_warm_p95_seconds": 6.000,
+  "maximum_cold_p50_seconds": 6.000,
+  "maximum_cold_p95_seconds": 8.000,
+  "maximum_peak_rss_mb": 5000.0,
+  "cold_sample_ids": ["001", "020", "040"]
+}

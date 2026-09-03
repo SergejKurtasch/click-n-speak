@@ -121,4 +121,8 @@ public struct Config: Sendable, Equatable {
     public var geminiModel: String {
         raw["gemini_model"]?.stringValue ?? "gemini-2.5-flash-lite"
     }
+
+    public var sttModelName: String {
+        raw["model_name"]?.stringValue ?? "mlx-community/whisper-large-v3-turbo"
+    }
 }

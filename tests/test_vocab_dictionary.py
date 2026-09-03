@@ -1,11 +1,9 @@
 """Tests for detect_term_script, _is_valid_term (multi-word), and add_term_to_user_terms."""
 
-import pytest
 
-from src.utils import detect_term_script, target_lang_for_script_bucket
 from src.preview_panel import _is_valid_term
+from src.utils import detect_term_script, target_lang_for_script_bucket
 from src.vocab_provider import add_term_to_user_terms
-
 
 # ---------------------------------------------------------------------------
 # detect_term_script

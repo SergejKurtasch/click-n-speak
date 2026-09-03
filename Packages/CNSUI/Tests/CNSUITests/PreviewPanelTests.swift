@@ -203,4 +203,49 @@ struct PreviewPanelTests {
         #expect(panel.titleForTesting == "Edit and press Enter")
         panel.close()
     }
+
+    @Test("Popup placement uses the display containing the pointer and clamps every edge")
+    func multiDisplayPlacement() {
+        let left = NSRect(x: -1_920, y: 0, width: 1_920, height: 1_080)
+        let right = NSRect(x: 0, y: 24, width: 2_560, height: 1_416)
+        let size = NSSize(width: 400, height: 160)
+
+        let onLeft = PopupPlacement.origin(
+            mouse: NSPoint(x: -1_900, y: 50),
+            panelSize: size,
+            visibleFrames: [right, left]
+        )
+        #expect(onLeft.x == left.minX)
+        #expect(onLeft.y == left.minY)
+
+        let onRight = PopupPlacement.origin(
+            mouse: NSPoint(x: 2_550, y: 1_430),
+            panelSize: size,
+            visibleFrames: [left, right]
+        )
+        #expect(onRight.x == right.maxX - size.width)
+        #expect(onRight.y + size.height <= right.maxY)
+    }
+
+    @Test("Interactive editor exposes a stable VoiceOver identifier")
+    func editorAccessibility() {
+        let panel = makePanel()
+        panel.showInteractive(text: "sanitized fixture", title: "Edit", onConfirm: { _ in })
+        #expect(panel.editorAccessibilityIdentifierForTesting == "preview.editor")
+        panel.close()
+    }
+
+    @Test("HUD is ordered out after its fade rather than remaining invisible")
+    func fadeOrdersOut() async {
+        let panel = makePanel()
+        panel.show(title: "Recording")
+        #expect(panel.isVisibleForTesting)
+        panel.hide(delay: 0)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while panel.isVisibleForTesting, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(!panel.isVisibleForTesting)
+        panel.close()
+    }
 }

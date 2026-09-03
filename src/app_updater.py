@@ -56,8 +56,8 @@ _COPY_TIMEOUT = 60.0           # seconds for .app copy
 
 def _download_worker(url: str, dest: str, progress_q, result_q) -> None:
     """Runs in a child process. Downloads url → dest, reports progress."""
-    import urllib.request
     import os
+    import urllib.request
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Click-n-speak/updater"})
@@ -229,7 +229,7 @@ def check_staged_update_on_launch() -> Optional[UpdateInfo]:
     current_version = get_current_version()
 
     if staged_version is None:
-        log_warning(f"app_updater: staged .app has no readable version — removing.")
+        log_warning("app_updater: staged .app has no readable version — removing.")
         shutil.rmtree(STAGED_PATH, ignore_errors=True)
         return None
 

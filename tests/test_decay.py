@@ -2,8 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from src.utils import (
     apply_decay,
     apply_fast_decay,
@@ -11,7 +9,6 @@ from src.utils import (
     migrate_config_to_v5,
     update_term_usage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

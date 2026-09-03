@@ -1,31 +1,6 @@
 import AppKit
 import CNSCore
 
-/// What the app did with a term the user added from the popup.
-public enum AddTermResult: Sendable, Equatable {
-    /// Added; `message` overrides the default "Added: {term}" toast when non-nil.
-    case added(message: String?)
-    case alreadyExists
-}
-
-/// Toast strings for the Add-to-Dictionary flow, supplied by the caller so the
-/// panel stays free of i18n lookups.
-public struct DictionaryToasts: Sendable {
-    public var addedTemplate: String
-    public var invalidTerm: String
-    public var alreadyExists: String
-
-    public init(
-        addedTemplate: String = "Added: {term}",
-        invalidTerm: String = "Not a valid term",
-        alreadyExists: String = "Already in dictionary"
-    ) {
-        self.addedTemplate = addedTemplate
-        self.invalidTerm = invalidTerm
-        self.alreadyExists = alreadyExists
-    }
-}
-
 /// HUD popup (NSPanel) near the cursor, in two modes.
 ///
 /// Non-interactive: live status + streaming text while dictating. Interactive:
@@ -36,11 +11,12 @@ public struct DictionaryToasts: Sendable {
 /// The panel is non-activating, so Enter/Escape/⌘D arrive through an
 /// `NSEvent` local monitor rather than the responder chain.
 @MainActor
-public final class PreviewPanel {
+public final class PreviewPanel: PopupPresenting {
     private let width: CGFloat = 400
     private var height: CGFloat { isInteractive ? 160 : 120 }
 
     private let resources: AppResources
+    private let i18n: I18n
     private let log: @Sendable (String) -> Void
 
     private var panel: NSPanel?
@@ -55,7 +31,9 @@ public final class PreviewPanel {
     /// True between `showInteractive` and the confirm/cancel that ends it. Guards
     /// against confirm and cancel both firing for one keypress.
     private var awaitingDecision = false
-    private var keyMonitor: Any?
+    /// AppKit monitor tokens are opaque/non-Sendable. All mutations occur on
+    /// the main actor; `nonisolated(unsafe)` only lets deinit unregister it.
+    nonisolated(unsafe) private var keyMonitor: Any?
     private var canonicalTitle = ""
 
     private var onConfirm: ((String) -> Void)?
@@ -63,9 +41,20 @@ public final class PreviewPanel {
     private var onAddToDictionary: ((String) -> AddTermResult)?
     private var toasts = DictionaryToasts()
 
-    public init(resources: AppResources, log: @escaping @Sendable (String) -> Void = { _ in }) {
+    public init(
+        resources: AppResources,
+        i18n: I18n? = nil,
+        log: @escaping @Sendable (String) -> Void = { _ in }
+    ) {
         self.resources = resources
+        self.i18n = i18n ?? I18n.load("en", localesDirectory: resources.localesDirectory)
         self.log = log
+    }
+
+    deinit {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        fadeTask?.cancel()
+        toastTask?.cancel()
     }
 
     /// Whether the editable popup is currently open and waiting on the user.
@@ -76,6 +65,10 @@ public final class PreviewPanel {
 
     /// Test seams: the editor and title are otherwise private to the panel.
     var titleForTesting: String? { titleField?.stringValue }
+    var isVisibleForTesting: Bool { panel?.isVisible ?? false }
+    var editorAccessibilityIdentifierForTesting: String? {
+        textView?.accessibilityIdentifier()
+    }
 
     func setSelectionForTesting(_ range: NSRange) {
         textView?.setSelectedRange(range)
@@ -87,14 +80,18 @@ public final class PreviewPanel {
     public func show(title: String) {
         let panel = makePanel(interactive: false)
         canonicalTitle = title
+        panel.setAccessibilityLabel(title)
         titleField?.stringValue = title
         textField?.stringValue = ""
         position(panel)
-        panel.alphaValue = 0
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        panel.alphaValue = reduceMotion ? 0.9 : 0
         panel.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
-            panel.animator().alphaValue = 0.9
+        if !reduceMotion {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                panel.animator().alphaValue = 0.9
+            }
         }
     }
 
@@ -103,8 +100,13 @@ public final class PreviewPanel {
     public func updateStatus(_ title: String) {
         guard let panel, !isInteractive else { return }
         canonicalTitle = title
+        panel.setAccessibilityLabel(i18n.t("preview.editor_accessibility"))
         titleField?.stringValue = title
-        panel.animator().alphaValue = 0.9
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            panel.alphaValue = 0.9
+        } else {
+            panel.animator().alphaValue = 0.9
+        }
     }
 
     /// Update the body text, truncating to the last ~290 chars like the Python
@@ -206,7 +208,7 @@ public final class PreviewPanel {
     /// Mark the title done and fade out after `delay` seconds (`hide`). An open
     /// interactive popup is closed outright instead — its state must fully reset.
     public func hide(delay: TimeInterval = 0.8) {
-        guard panel != nil else { return }
+        guard let panel else { return }
         if isInteractive {
             teardownInteractive()
             return
@@ -220,8 +222,19 @@ public final class PreviewPanel {
         fadeTask?.cancel()
         fadeTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            self?.panel?.animator().alphaValue = 0
+            guard !Task.isCancelled, let self, self.panel === panel, !self.isInteractive else { return }
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                panel.alphaValue = 0
+                panel.orderOut(nil)
+            } else {
+                NSAnimationContext.beginGrouping()
+                NSAnimationContext.current.duration = 0.15
+                panel.animator().alphaValue = 0
+                NSAnimationContext.endGrouping()
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, self.panel === panel, !self.isInteractive else { return }
+                panel.orderOut(nil)
+            }
         }
     }
 
@@ -373,6 +386,9 @@ public final class PreviewPanel {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.ignoresMouseEvents = !interactive
+        panel.setAccessibilityLabel(interactive
+            ? i18n.t("preview.editor_accessibility")
+            : canonicalTitle)
 
         let effect = NSVisualEffectView(frame: rect)
         effect.material = .hudWindow
@@ -386,12 +402,14 @@ public final class PreviewPanel {
         let iconY = height - 15 - iconSize
         let iconView = NSImageView(frame: NSRect(x: iconX, y: iconY, width: iconSize, height: iconSize))
         iconView.image = resources.appIcon()
+        iconView.setAccessibilityElement(false)
         effect.addSubview(iconView)
 
         let titleX = iconX + iconSize + 10
         let titleY = height - 15 - 18
         let title = NSTextField(frame: NSRect(x: titleX, y: titleY, width: width - titleX - 15, height: 20))
         configureLabel(title, color: .white, font: .boldSystemFont(ofSize: 13))
+        title.setAccessibilityIdentifier("preview.status")
         effect.addSubview(title)
         self.titleField = title
 
@@ -435,7 +453,11 @@ public final class PreviewPanel {
             editor.isAutomaticSpellingCorrectionEnabled = false
             editor.isAutomaticQuoteSubstitutionEnabled = false
             editor.isAutomaticDashSubstitutionEnabled = false
+            editor.addToDictionaryTitle = i18n.t("preview.add_dictionary")
             editor.onAddToDictionary = { [weak self] in self?.addSelectionToDictionary() }
+            editor.setAccessibilityLabel(i18n.t("preview.editor_accessibility"))
+            editor.setAccessibilityHelp(i18n.t("preview.editor_help"))
+            editor.setAccessibilityIdentifier("preview.editor")
 
             scroll.documentView = editor
             effect.addSubview(scroll)
@@ -445,6 +467,7 @@ public final class PreviewPanel {
         } else {
             let text = NSTextField(frame: NSRect(x: 15, y: textBottomPad, width: textW, height: textH))
             configureLabel(text, color: NSColor(white: 1.0, alpha: 0.8), font: .systemFont(ofSize: 14))
+            text.setAccessibilityIdentifier("preview.live-text")
             text.maximumNumberOfLines = 3
             text.cell?.wraps = true
             effect.addSubview(text)
@@ -486,15 +509,11 @@ public final class PreviewPanel {
 
     private func position(_ panel: NSPanel) {
         let mouse = NSEvent.mouseLocation
-        var x = mouse.x - width / 2
-        var y = mouse.y - height - 20
-        if let screen = NSScreen.main {
-            let frame = screen.visibleFrame
-            if x < frame.origin.x { x = frame.origin.x }
-            else if x + width > frame.origin.x + frame.size.width { x = frame.origin.x + frame.size.width - width }
-            if y < frame.origin.y { y = frame.origin.y }
-        }
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        panel.setFrameOrigin(PopupPlacement.origin(
+            mouse: mouse,
+            panelSize: panel.frame.size,
+            visibleFrames: NSScreen.screens.map(\.visibleFrame)
+        ))
     }
 }
 

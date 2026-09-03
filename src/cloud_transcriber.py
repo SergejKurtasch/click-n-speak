@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 
 from .ai_editor import get_gemini_api_key
-from .transcriber import FileTranscriptionError, MIN_FINAL_CHUNK_SAMPLES, _is_audio_silent
+from .transcriber import MIN_FINAL_CHUNK_SAMPLES, FileTranscriptionError, _is_audio_silent
 from .utils import LANG_NAMES, log_error, log_info
 
 # ---------------------------------------------------------------------------

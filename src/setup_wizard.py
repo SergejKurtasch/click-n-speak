@@ -26,7 +26,6 @@ from .permissions import (
     open_accessibility_settings,
     open_input_monitoring_settings,
     request_microphone_sync,
-    wait_for_accessibility,
 )
 
 log = logging.getLogger(__name__)
@@ -283,7 +282,7 @@ def _wait_for_permission_with_dialog(
     Returns True if the permission was detected before timeout, False otherwise.
     """
     try:
-        from AppKit import NSRunLoop, NSDefaultRunLoopMode, NSDate  # type: ignore
+        from AppKit import NSDate, NSDefaultRunLoopMode, NSRunLoop  # type: ignore
     except ImportError:
         # Headless fallback (e.g. tests without AppKit)
         deadline = time.monotonic() + timeout

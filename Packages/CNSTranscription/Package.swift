@@ -27,12 +27,15 @@ let package = Package(
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalKit"),
                 .linkedFramework("Accelerate"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreMedia"),
                 .linkedFramework("Foundation"),
             ]
         ),
         .testTarget(
             name: "CNSTranscriptionTests",
-            dependencies: ["CNSTranscription"],
+            dependencies: ["CNSTranscription", "CNSCore"],
+            resources: [.copy("Fixtures")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

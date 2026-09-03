@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import CNSCore
 @testable import CNSDictionary
 
@@ -82,5 +83,67 @@ struct UserTermsTests {
         config.raw["user_terms"] = .object(byLang)
 
         #expect(UserTerms.activeTerms(config, lang: "ru") == ["первый"])
+    }
+
+    @Test("Usage updates metadata and reactivates exact matching terms")
+    func updatesUsageAndReactivates() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        var config = makeConfig()
+        #expect(UserTerms.add(to: &config, lang: "en", term: "SwiftUI", source: .auto))
+        #expect(UserTerms.add(to: &config, lang: "en", term: "machine learning", source: .correction))
+        var byLanguage = config.raw["user_terms"]!.objectValue!
+        var items = byLanguage["en"]!.arrayValue!
+        var first = items[0].objectValue!
+        first["inactive"] = .bool(true)
+        items[0] = .object(first)
+        byLanguage["en"] = .array(items)
+        config.raw["user_terms"] = .object(byLanguage)
+
+        #expect(UserTerms.updateUsage(
+            in: &config,
+            phrase: "SwiftUI enables machine learning, not SwiftUIExtras",
+            now: now
+        ))
+        let updated = config.raw["user_terms"]!.objectValue!["en"]!.arrayValue!
+        #expect(updated[0].objectValue?["inactive"] == nil)
+        #expect(updated[0].objectValue?["use_count"]?.intValue == 1)
+        #expect(updated[1].objectValue?["use_count"]?.intValue == 1)
+    }
+
+    @Test("Decay matches fast and slow boundaries while preserving manual terms")
+    func decayBoundaries() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let fastBoundary = ISOTimestamp.now(now.addingTimeInterval(-14 * 86_400))
+        let slowBefore = ISOTimestamp.now(now.addingTimeInterval(-60 * 86_400 - 1))
+        var object = JSONObject()
+        object["schema_version"] = .int(9)
+        object["primary_language"] = .string("en")
+        object["max_dictionary_age_days"] = .int(60)
+
+        func item(_ term: String, source: String, added: String, seen: String, uses: Int) -> JSONValue {
+            var value = JSONObject()
+            value["term"] = .string(term)
+            value["source"] = .string(source)
+            value["added_at"] = .string(added)
+            value["last_seen"] = .string(seen)
+            value["use_count"] = .int(Int64(uses))
+            return .object(value)
+        }
+        var languages = JSONObject()
+        languages["en"] = .array([
+            item("fast", source: "auto", added: fastBoundary, seen: fastBoundary, uses: 0),
+            item("slow", source: "correction", added: slowBefore, seen: slowBefore, uses: 2),
+            item("manual", source: "manual", added: slowBefore, seen: slowBefore, uses: 0),
+            item("useful", source: "auto", added: slowBefore, seen: slowBefore, uses: 3),
+        ])
+        object["user_terms"] = .object(languages)
+        var config = Config(raw: object)
+
+        #expect(UserTerms.applyDecay(to: &config, now: now) == 2)
+        let result = config.raw["user_terms"]!.objectValue!["en"]!.arrayValue!
+        #expect(result[0].objectValue?["inactive"]?.boolValue == true)
+        #expect(result[1].objectValue?["inactive"]?.boolValue == true)
+        #expect(result[2].objectValue?["inactive"] == nil)
+        #expect(result[3].objectValue?["inactive"] == nil)
     }
 }

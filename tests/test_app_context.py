@@ -6,14 +6,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.app import (
-    _build_chunk_context,
-    _WHISPER_PROMPT_TOKEN_LIMIT,
-    _WHISPER_PROMPT_CHAR_BUDGET,
     _MAX_RECENT_CHUNKS,
     _RECENT_CHARS_RATIO,
+    _WHISPER_PROMPT_CHAR_BUDGET,
+    _WHISPER_PROMPT_TOKEN_LIMIT,
+    _build_chunk_context,
 )
 from src.utils import _count_prompt_tokens
-
 
 INSTRUCTION = "Русский язык. Это разговорная речь."
 VOCAB = " Whisper, Claude, Gemini, TF-IDF, XGBoost, MCP, Qwen, ADK, LLM"

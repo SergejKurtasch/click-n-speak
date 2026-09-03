@@ -7,9 +7,13 @@ let package = Package(
     products: [
         .library(name: "CNSInput", targets: ["CNSInput"]),
     ],
+    dependencies: [
+        .package(path: "../CNSCore"),
+    ],
     targets: [
         .target(
             name: "CNSInput",
+            dependencies: ["CNSCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

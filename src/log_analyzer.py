@@ -9,10 +9,8 @@ from .utils import (
     existing_terms_union_for_script,
     get_phrases_file_path,
     log_error,
-    log_info,
     skipped_phrases_merge_for_script,
 )
-
 
 # Must start with a letter; allows letters, digits, +, #, ., _, - afterwards.
 # Minimum effective length: 2 chars (one letter + at least one more character).
@@ -51,10 +49,10 @@ _RUS_FUNCTION_WORDS: frozenset[str] = frozenset({
     "хотел", "хотела", "хотели",
     # Conjunctions / particles / connectives
     "и", "а", "но", "или", "ни", "либо",
-    "что", "чтобы", "если", "когда", "хотя", "потому", "поэтому",
+    "чтобы", "если", "хотя", "потому", "поэтому",
     "однако", "зато", "причём", "притом",
     "да", "как", "так", "вот", "ну", "ли", "же", "бы",
-    "даже", "именно", "ведь", "лишь", "именно", "всё",
+    "даже", "именно", "ведь", "лишь", "всё",
     # Common adverbs of degree / time
     "очень", "просто", "только", "уже", "ещё", "еще", "тоже", "почти",
     "всегда", "никогда", "иногда", "сейчас", "теперь", "потом", "тогда",
@@ -227,7 +225,7 @@ def _collect_english_terms(
     variant_counts: Counter = Counter()
     term_sessions: dict[str, set[int]] = defaultdict(set)
 
-    for (_, text), sid in zip(records, session_ids):
+    for (_, text), sid in zip(records, session_ids, strict=True):
         seen_lower_in_record: set[str] = set()
         for match in _TERM_PATTERN.finditer(text):
             term = canonicalize_term(match.group(0))
@@ -331,7 +329,7 @@ def _collect_raw_english_counts(
         lower_to_variants[variant.lower()].append(variant)
 
     candidates: list[tuple[str, int]] = []
-    for lower, variants in lower_to_variants.items():
+    for _lower, variants in lower_to_variants.items():
         best = max(variants, key=lambda v: variant_counts[v])
         total = sum(variant_counts[v] for v in variants)
         candidates.append((best, total))

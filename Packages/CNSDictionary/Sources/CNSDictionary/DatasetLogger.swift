@@ -6,6 +6,7 @@ public struct DatasetRecord: Sendable {
     public var rawWhisper: String
     public var aiEdited: String?
     public var aiStatus: String?
+    public var sttBackend: String?
     public var sttModel: String?
     public var aiModel: String?
     public var userFinal: String
@@ -18,6 +19,7 @@ public struct DatasetRecord: Sendable {
         rawWhisper: String,
         aiEdited: String? = nil,
         aiStatus: String? = nil,
+        sttBackend: String? = nil,
         sttModel: String? = nil,
         aiModel: String? = nil,
         userFinal: String,
@@ -28,6 +30,7 @@ public struct DatasetRecord: Sendable {
         self.rawWhisper = rawWhisper
         self.aiEdited = aiEdited
         self.aiStatus = aiStatus
+        self.sttBackend = sttBackend
         self.sttModel = sttModel
         self.aiModel = aiModel
         self.userFinal = userFinal
@@ -51,7 +54,8 @@ public struct DatasetLogger: Sendable {
         self.log = log
     }
 
-    public func append(_ record: DatasetRecord, at date: Date = Date()) {
+    @discardableResult
+    public func append(_ record: DatasetRecord, at date: Date = Date()) -> Bool {
         let line = Self.jsonLine(record, at: date) + "\n"
         do {
             try FileManager.default.createDirectory(
@@ -66,8 +70,10 @@ public struct DatasetLogger: Sendable {
             } else {
                 try data.write(to: fileURL, options: .atomic)
             }
+            return true
         } catch {
             log("Failed to write dataset record: \(error)")
+            return false
         }
     }
 
@@ -77,6 +83,7 @@ public struct DatasetLogger: Sendable {
         object["raw_whisper"] = .string(record.rawWhisper)
         object["ai_edited"] = record.aiEdited.map { JSONValue.string($0) } ?? .null
         object["ai_status"] = record.aiStatus.map { JSONValue.string($0) } ?? .null
+        object["stt_backend"] = record.sttBackend.map { JSONValue.string($0) } ?? .null
         object["stt_model"] = record.sttModel.map { JSONValue.string($0) } ?? .null
         object["ai_model"] = record.aiModel.map { JSONValue.string($0) } ?? .null
         object["user_final"] = .string(record.userFinal)

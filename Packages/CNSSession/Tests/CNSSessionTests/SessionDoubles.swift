@@ -1,6 +1,7 @@
-import CNSAudio
+import CNSCore
+import CNSDictionary
 import CNSTranscription
-import CNSUI
+
 import Foundation
 @testable import CNSSession
 
@@ -85,26 +86,51 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
     // @unchecked Sendable: touched only from the test's main actor and from the
     // controller's start task, never concurrently.
     private let lock = NSLock()
-    private var callbacks: AudioRecorder.Callbacks?
+    private var callbacks: AudioCallbacks?
     private var recording = false
     /// Chunks handed to the pipeline on `stop()`; the last one is the final chunk.
     var scriptedChunks: [[Float]] = []
     var finalChunk: [Float]?
     var startError: Error?
+    var suspendStart = false
+    var duplicateFinalCallback = false
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
 
     var isRecording: Bool {
         lock.lock(); defer { lock.unlock() }
         return recording
     }
 
-    func start(callbacks: AudioRecorder.Callbacks) async throws {
+    func start(callbacks: AudioCallbacks) async throws {
         if let startError { throw startError }
+        let shouldSuspend = lock.withLock { () -> Bool in
+            startCount += 1
+            return suspendStart
+        }
+        if shouldSuspend {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                startContinuation = continuation
+                lock.unlock()
+            }
+        }
+        try Task.checkCancellation()
         store(callbacks)
+    }
+
+    func resumeStart() {
+        lock.lock()
+        let continuation = startContinuation
+        startContinuation = nil
+        lock.unlock()
+        continuation?.resume()
     }
 
     /// NSLock is unavailable directly in an async context, so the mutation lives
     /// in a synchronous helper.
-    private func store(_ callbacks: AudioRecorder.Callbacks) {
+    private func store(_ callbacks: AudioCallbacks) {
         lock.lock()
         staleCallbacks = self.callbacks
         self.callbacks = callbacks
@@ -114,21 +140,23 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
 
     /// Callbacks handed out for the previous session, kept so a test can pretend
     /// an old audio thread fired late.
-    private var staleCallbacks: AudioRecorder.Callbacks?
+    private var staleCallbacks: AudioCallbacks?
 
     func emitStaleChunk(_ samples: [Float]) {
         lock.lock(); let cb = staleCallbacks; lock.unlock()
         cb?.onChunk(samples)
     }
 
-    func stop() {
-        lock.lock()
-        let cb = callbacks
-        recording = false
-        lock.unlock()
+    func stop() async {
+        let cb = lock.withLock { () -> AudioCallbacks? in
+            recording = false
+            stopCount += 1
+            return callbacks
+        }
         guard let cb else { return }
         for chunk in scriptedChunks { cb.onChunk(chunk) }
         cb.onFinal(finalChunk)
+        if duplicateFinalCallback { cb.onFinal(finalChunk) }
     }
 
     /// Emit a non-final chunk mid-recording.
@@ -141,14 +169,22 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
 /// Returns scripted texts, one per chunk, and can be made slow on demand.
 actor FakeTranscriber: Transcribing {
     private var texts: [String]
+    private var scriptedResults: [TranscriptionResult]
     private let delay: TimeInterval
     private(set) var requests: [TranscriptionRequest] = []
     private(set) var reloadCount = 0
     private(set) var abortCount = 0
+    private(set) var warmupCount = 0
+    private(set) var preWarmCount = 0
     private let aborted = AbortBox()
 
-    init(texts: [String], delay: TimeInterval = 0) {
+    init(
+        texts: [String],
+        results: [TranscriptionResult] = [],
+        delay: TimeInterval = 0
+    ) {
         self.texts = texts
+        self.scriptedResults = results
         self.delay = delay
     }
 
@@ -166,14 +202,28 @@ actor FakeTranscriber: Transcribing {
                 try? await Task.sleep(nanoseconds: UInt64(step * 1_000_000_000))
                 waited += step
             }
-            if aborted.value { return .empty }
+            if aborted.value {
+                return .empty
+            }
+        }
+        if !scriptedResults.isEmpty {
+            return scriptedResults.removeFirst()
         }
         guard !texts.isEmpty else { return .empty }
-        return TranscriptionResult(text: texts.removeFirst(), detectedLanguage: "ru")
+        let text = texts.removeFirst()
+        return TranscriptionResult(text: text, detectedLanguage: "ru")
     }
 
     func reload() async {
         reloadCount += 1
+    }
+
+    func warmup(language: String?) async {
+        warmupCount += 1
+    }
+
+    func preWarm() async {
+        preWarmCount += 1
     }
 
     nonisolated func abortInFlight() {
@@ -211,14 +261,43 @@ final class FakeFrontmost: FrontmostAppProviding {
     func frontmostPid() -> pid_t? { pid }
 }
 
+@MainActor
+final class FakeDictionaryCoordinator: DictionaryCoordinating {
+    private(set) var snapshot: Config
+    let correctionsURL: URL
+    private(set) var confirmations: [DictionaryConfirmation] = []
+    private(set) var addedTerms: [(term: String, language: String)] = []
+
+    init(config: Config) {
+        snapshot = config
+        correctionsURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-corrections-\(UUID().uuidString).json")
+    }
+
+    func recordConfirmation(_ confirmation: DictionaryConfirmation) async -> ConfirmationPersistenceResult {
+        confirmations.append(confirmation)
+        return ConfirmationPersistenceResult(datasetSaved: true, correctionsUpdated: true, historySaved: true)
+    }
+
+    func addManualTerm(_ term: String, language: String) -> Bool {
+        guard UserTerms.add(to: &snapshot, lang: language, term: term, source: .manual) else {
+            return false
+        }
+        snapshot.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: snapshot.raw))
+        addedTerms.append((term, language))
+        return true
+    }
+}
+
 /// A fake AI editor for testing integration.
 final class FakeAiEditor: AiEditing, @unchecked Sendable {
     var isReady: Bool = true
     var refineDelay: TimeInterval = 0
     var refinedText: String = "refined text"
+    var refineStatus: RefineStatus = .ok
     var lastInputText: String?
     var didCallRefine = false
-    
+
     func refine(
         text: String,
         languages: [String]?,
@@ -230,15 +309,15 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
         if refineDelay > 0 {
             try? await Task.sleep(nanoseconds: UInt64(refineDelay * 1_000_000_000))
         }
-        return RefineResult(text: refinedText, status: .ok)
+        return RefineResult(text: refinedText, status: refineStatus)
     }
-    
+
     func refineFileText(
         text: String,
         languages: [String]?,
         knownTerms: [String]?,
         misrecognitions: [(String, String)]?
     ) async -> RefineResult {
-        return RefineResult(text: text, status: .ok)
+        return RefineResult(text: refinedText, status: refineStatus)
     }
 }

@@ -2,8 +2,6 @@
 
 from datetime import datetime, timedelta
 
-import pytest
-
 from src.log_analyzer import (
     _assign_session_ids,
     _collect_english_terms,
@@ -15,7 +13,6 @@ from src.log_analyzer import (
     get_prompt_candidates,
 )
 from src.utils import get_language_script, target_lang_for_script_bucket
-
 
 # ---------------------------------------------------------------------------
 # _levenshtein

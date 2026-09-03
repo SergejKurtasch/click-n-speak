@@ -4,11 +4,12 @@ import AppKit
 /// menu. Ported from `DictionaryAwareTextView` in `preview_panel.py`.
 final class DictionaryAwareTextView: NSTextView {
     var onAddToDictionary: (() -> Void)?
+    var addToDictionaryTitle = ""
 
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let menu = super.menu(for: event) else { return nil }
         let item = NSMenuItem(
-            title: "Add to Dictionary",
+            title: addToDictionaryTitle,
             action: #selector(addToDictionary(_:)),
             keyEquivalent: "d"
         )

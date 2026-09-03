@@ -1,11 +1,10 @@
 """Tests for audio settings refactor: new defaults, menu removal, short-phrase handling."""
 
+from unittest.mock import MagicMock, patch
+
 import numpy as np
-import pytest
-from unittest.mock import patch, MagicMock, call
 
 from src.recorder import AudioRecorder
-
 
 # ---------------------------------------------------------------------------
 # 1. New default values
@@ -53,6 +52,7 @@ def test_app_passes_new_defaults_to_recorder():
 def test_config_overrides_silence_duration(tmp_path):
     """A value in config.json must still override the default."""
     import json as _json
+
     from src.app import SVoiceRecApp
 
     config_file = tmp_path / "config.json"

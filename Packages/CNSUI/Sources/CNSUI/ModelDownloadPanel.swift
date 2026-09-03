@@ -9,7 +9,7 @@ import CNSCore
 /// cancelled. All state is driven by external `update(…)` calls from
 /// `ModelDownloader`'s callbacks.
 @MainActor
-public final class ModelDownloadPanel {
+public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
 
     // MARK: - UI
 
@@ -20,30 +20,48 @@ public final class ModelDownloadPanel {
     private var cancelButton: NSButton?
 
     private var onCancel: (() -> Void)?
+    private var onRetry: (() -> Void)?
+    private let i18n: I18n
     private let log: (String) -> Void
+    private var generation = 0
+    private var terminalState = false
 
     // MARK: - Init
 
-    public init(log: @escaping (String) -> Void = { _ in }) {
+    public init(i18n: I18n, log: @escaping (String) -> Void = { _ in }) {
+        self.i18n = i18n
         self.log = log
+        super.init()
     }
 
     // MARK: - Public API
 
     /// Show the panel and begin tracking a download.
-    public func show(modelName: String, onCancel: @escaping () -> Void) {
+    @discardableResult
+    public func show(
+        modelName: String,
+        onCancel: @escaping () -> Void,
+        onRetry: (() -> Void)? = nil
+    ) -> Int {
+        generation += 1
+        let currentGeneration = generation
         self.onCancel = onCancel
+        self.onRetry = onRetry
+        terminalState = false
         buildPanelIfNeeded()
 
-        titleLabel?.stringValue = "Downloading \(modelName)…"
-        statusLabel?.stringValue = "Starting…"
+        titleLabel?.stringValue = i18n.t("download.progress_title", ["label": modelName])
+        statusLabel?.stringValue = i18n.t("download.starting")
         progressBar?.doubleValue = 0
         progressBar?.isIndeterminate = true
         progressBar?.startAnimation(nil)
+        cancelButton?.title = i18n.t("btn.cancel")
+        cancelButton?.isEnabled = true
 
         panel?.center()
         panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        return currentGeneration
     }
 
     /// Update progress.  Called from `ModelDownloader.onProgress`.
@@ -51,8 +69,10 @@ public final class ModelDownloadPanel {
         downloadedBytes: Int64,
         totalBytes: Int64?,
         bytesPerSecond: Double,
-        estimatedTimeRemaining: TimeInterval?
+        estimatedTimeRemaining: TimeInterval?,
+        generation expectedGeneration: Int? = nil
     ) {
+        guard expectedGeneration == nil || expectedGeneration == generation else { return }
         guard let progressBar else { return }
 
         if let total = totalBytes, total > 0 {
@@ -75,37 +95,49 @@ public final class ModelDownloadPanel {
         }
 
         if let eta = estimatedTimeRemaining, eta > 0 {
-            parts.append("~\(Self.formatETA(eta))")
+            parts.append(localizedETA(eta))
         }
 
         statusLabel?.stringValue = parts.joined(separator: "  —  ")
     }
 
     /// Flash a "Done" message and auto-close after a short delay.
-    public func showCompleted() {
-        statusLabel?.stringValue = "✓ Download complete"
+    public func showCompleted(generation expectedGeneration: Int? = nil) {
+        guard expectedGeneration == nil || expectedGeneration == generation else { return }
+        let currentGeneration = generation
+        terminalState = true
+        onRetry = nil
+        statusLabel?.stringValue = "✓ \(i18n.t("download.complete"))"
         progressBar?.doubleValue = progressBar?.maxValue ?? 100
-        cancelButton?.isEnabled = false
+        cancelButton?.title = i18n.t("btn.close")
 
         Task {
             try? await Task.sleep(for: .seconds(1.5))
+            guard generation == currentGeneration else { return }
             close()
         }
     }
 
     /// Show an error and let the user dismiss.
-    public func showError(_ message: String) {
-        statusLabel?.stringValue = "✗ \(message)"
-        cancelButton?.title = "Close"
+    public func showError(_ message: String, generation expectedGeneration: Int? = nil) {
+        guard expectedGeneration == nil || expectedGeneration == generation else { return }
+        terminalState = true
+        statusLabel?.stringValue = "✗ \(i18n.t("download.failed", ["message": message]))"
+        cancelButton?.title = i18n.t(onRetry == nil ? "btn.close" : "btn.retry")
     }
 
     /// Show cancelled state and auto-close.
-    public func showCancelled() {
-        statusLabel?.stringValue = "Download cancelled"
+    public func showCancelled(generation expectedGeneration: Int? = nil) {
+        guard expectedGeneration == nil || expectedGeneration == generation else { return }
+        let currentGeneration = generation
+        terminalState = true
+        onRetry = nil
+        statusLabel?.stringValue = i18n.t("download.cancelled")
         cancelButton?.isEnabled = false
 
         Task {
             try? await Task.sleep(for: .seconds(1.0))
+            guard generation == currentGeneration else { return }
             close()
         }
     }
@@ -119,12 +151,27 @@ public final class ModelDownloadPanel {
         statusLabel = nil
         cancelButton = nil
         onCancel = nil
+        onRetry = nil
+        terminalState = false
     }
 
     /// Whether the panel is currently visible.
     public var isVisible: Bool {
         panel?.isVisible ?? false
     }
+    /// Restore an existing download window after the user returns through the
+    /// menu-bar item. The active download and its generation are unchanged.
+    @discardableResult
+    public func bringToFront() -> Bool {
+        guard let panel else { return false }
+        panel.orderFrontRegardless()
+        panel.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
+        return true
+    }
+    var statusForTesting: String? { statusLabel?.stringValue }
+    var generationForTesting: Int { generation }
+    var hidesOnDeactivateForTesting: Bool? { panel?.hidesOnDeactivate }
 
     // MARK: - Panel construction
 
@@ -141,12 +188,19 @@ public final class ModelDownloadPanel {
             backing: .buffered,
             defer: true
         )
-        p.title = "Model Download"
+        p.title = i18n.t("download.window_title")
         p.isFloatingPanel = true
         p.becomesKeyOnlyIfNeeded = false
         p.level = .floating
+        // A long model download must remain observable when the user switches
+        // to another application. It can always be raised again from the tray.
+        p.hidesOnDeactivate = false
+        p.isReleasedWhenClosed = false
+        p.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         // Prevent the panel from being minimized.
         p.styleMask.remove(.miniaturizable)
+        p.delegate = self
+        p.setAccessibilityLabel(i18n.t("download.window_title"))
 
         let contentView = p.contentView!
 
@@ -168,19 +222,21 @@ public final class ModelDownloadPanel {
         progressBar = bar
 
         // Status label (speed/ETA)
-        let status = NSTextField(labelWithString: "Starting…")
+        let status = NSTextField(labelWithString: i18n.t("download.starting"))
         status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         status.textColor = .secondaryLabelColor
         status.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(status)
         statusLabel = status
+        status.setAccessibilityIdentifier("download.status")
 
         // Cancel button
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked))
+        let cancel = NSButton(title: i18n.t("btn.cancel"), target: self, action: #selector(cancelClicked))
         cancel.translatesAutoresizingMaskIntoConstraints = false
         cancel.bezelStyle = .rounded
         contentView.addSubview(cancel)
         cancelButton = cancel
+        cancel.setAccessibilityIdentifier("download.cancel")
 
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: padding),
@@ -204,8 +260,20 @@ public final class ModelDownloadPanel {
     }
 
     @objc private func cancelClicked() {
-        log("ModelDownloadPanel: cancel clicked")
-        onCancel?()
+        if terminalState {
+            let retry = onRetry
+            close()
+            retry?()
+        } else {
+            log("ModelDownloadPanel: cancel clicked")
+            onCancel?()
+        }
+    }
+
+    public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if !terminalState { onCancel?() }
+        close()
+        return false
     }
 
     // MARK: - Helpers
@@ -224,5 +292,17 @@ public final class ModelDownloadPanel {
         let h = m / 60
         let remainderMin = m % 60
         return "\(h)h \(remainderMin)m"
+    }
+
+    private func localizedETA(_ seconds: TimeInterval) -> String {
+        let value = max(1, Int(seconds))
+        if value < 60 {
+            return i18n.t("download.eta_seconds", ["s": String(value)])
+        }
+        let minutes = value / 60
+        if minutes < 60 {
+            return i18n.t("download.eta_minutes", ["m": String(minutes)])
+        }
+        return i18n.t("download.eta_hours", ["h": String(minutes / 60)])
     }
 }

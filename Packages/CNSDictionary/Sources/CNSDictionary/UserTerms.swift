@@ -4,8 +4,8 @@ import Foundation
 /// Reads and writes `config["user_terms"]`.
 ///
 /// Ported from `add_term_to_user_terms` / `_term_str` / `_term_is_active` in
-/// `vocab_provider.py` and `utils.py`. Only the popup's ⌘D path is needed in
-/// Phase 3; the analyzers, decay and review panels arrive in Phase 5.
+/// `vocab_provider.py` and `utils.py` and shared by popup, analysis, decay, and
+/// dictionary review flows.
 public enum UserTerms {
     public enum Source: String, Sendable {
         case manual, auto, correction
@@ -102,5 +102,109 @@ public enum UserTerms {
             .replacingOccurrences(of: "\"", with: "'")
         let collapsed = cleaned.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         return TermCanonicalizer.canonicalize(collapsed)
+    }
+
+    /// Python `update_term_usage`: update metadata for terms present in a
+    /// confirmed phrase and reactivate any matching inactive entry.
+    @discardableResult
+    public static func updateUsage(
+        in config: inout Config,
+        phrase: String,
+        now: Date = Date()
+    ) -> Bool {
+        let phraseLower = phrase.lowercased()
+        let tokens = Set(tokenizeForUsage(phraseLower))
+        var byLang = config.raw["user_terms"]?.objectValue ?? JSONObject()
+        var dirty = false
+
+        for lang in byLang.keys {
+            guard var items = byLang[lang]?.arrayValue else { continue }
+            for index in items.indices {
+                guard var object = items[index].objectValue,
+                      let rawTerm = object["term"]?.stringValue else { continue }
+                let key = TermCanonicalizer.canonicalKey(rawTerm)
+                let found = key.contains(" ") ? phraseLower.contains(key) : tokens.contains(key)
+                guard found else { continue }
+                object["last_seen"] = .string(ISOTimestamp.now(now))
+                object["use_count"] = .int((object["use_count"]?.intValue ?? 0) + 1)
+                object.remove("inactive")
+                items[index] = .object(object)
+                dirty = true
+            }
+            byLang[lang] = .array(items)
+        }
+        if dirty { config.raw["user_terms"] = .object(byLang) }
+        return dirty
+    }
+
+    /// Python `apply_decay`: fast-deactivate unused auto terms after 14 days,
+    /// then deactivate low-use non-manual terms after the configured slow age.
+    @discardableResult
+    public static func applyDecay(
+        to config: inout Config,
+        now: Date = Date(),
+        maxAgeDays: Int? = nil
+    ) -> Int {
+        let fastCutoff = now.addingTimeInterval(-14 * 86_400)
+        let slowDays = maxAgeDays ?? Int(config.raw["max_dictionary_age_days"]?.intValue ?? 60)
+        let slowCutoff = now.addingTimeInterval(-TimeInterval(slowDays * 86_400))
+        var byLang = config.raw["user_terms"]?.objectValue ?? JSONObject()
+        var deactivated = 0
+
+        for lang in byLang.keys {
+            guard var items = byLang[lang]?.arrayValue else { continue }
+            for index in items.indices {
+                guard var object = items[index].objectValue else { continue }
+                let source = object["source"]?.stringValue ?? "manual"
+                if source == "manual" || object["inactive"]?.isTruthy == true { continue }
+                let useCount = Int(object["use_count"]?.intValue ?? 0)
+
+                var shouldDeactivate = false
+                if source == "auto", useCount < 1,
+                   let addedAt = parseTimestamp(object["added_at"]?.stringValue),
+                   addedAt <= fastCutoff {
+                    shouldDeactivate = true
+                }
+                if !shouldDeactivate, useCount < 3,
+                   let lastSeen = parseTimestamp(
+                       object["last_seen"]?.stringValue ?? object["added_at"]?.stringValue
+                   ), lastSeen < slowCutoff {
+                    shouldDeactivate = true
+                }
+                if shouldDeactivate {
+                    object["inactive"] = .bool(true)
+                    items[index] = .object(object)
+                    deactivated += 1
+                }
+            }
+            byLang[lang] = .array(items)
+        }
+        if deactivated > 0 { config.raw["user_terms"] = .object(byLang) }
+        return deactivated
+    }
+
+    private static func tokenizeForUsage(_ text: String) -> [String] {
+        var result: [String] = []
+        var current = ""
+        for character in text {
+            if character.isLetter || character.isNumber || character == "_" || character == "'" || character == "-" {
+                current.append(character)
+            } else if !current.isEmpty {
+                result.append(current)
+                current = ""
+            }
+        }
+        if !current.isEmpty { result.append(current) }
+        return result
+    }
+
+    static func parseTimestamp(_ value: String?) -> Date? {
+        guard let value, !value.isEmpty else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let regular = ISO8601DateFormatter()
+        regular.formatOptions = [.withInternetDateTime]
+        return regular.date(from: value)
     }
 }

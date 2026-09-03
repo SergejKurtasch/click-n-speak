@@ -1,11 +1,10 @@
-import os
+import multiprocessing as mp
+import queue
 import re
 import subprocess
 import tempfile
 import threading
 import time
-import multiprocessing as mp
-import queue
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -49,6 +48,7 @@ def _supports_strict_thresholds() -> bool:
         return _STRICT_THRESHOLDS_SUPPORTED
     try:
         import inspect
+
         import mlx_whisper  # type: ignore
         sig = inspect.signature(mlx_whisper.transcribe)
         _STRICT_THRESHOLDS_SUPPORTED = "no_speech_threshold" in sig.parameters
@@ -686,6 +686,7 @@ class TranscriberProcessWrapper:
                     # causing the child process to grow from ~2 GB to 6+ GB over time.
                     try:
                         import gc
+
                         import mlx.core
                         gc.collect()
                         mlx.core.metal.clear_cache()
@@ -712,6 +713,7 @@ class TranscriberProcessWrapper:
                         })
                     try:
                         import gc
+
                         import mlx.core
                         gc.collect()
                         mlx.core.metal.clear_cache()

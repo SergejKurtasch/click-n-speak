@@ -35,7 +35,6 @@ from Foundation import NSObject
 from . import i18n
 from .utils import LANG_NAMES, log_error
 
-
 _WIN_W = 600
 _WIN_H = 480
 _MARGIN = 12
@@ -233,7 +232,9 @@ class TermsPanel:
         if self._current_lang is None:
             self._filtered_rows = list(self._all_rows)
         else:
-            self._filtered_rows = [(l, it) for l, it in self._all_rows if l == self._current_lang]
+            self._filtered_rows = [
+                (lang, item) for lang, item in self._all_rows if lang == self._current_lang
+            ]
 
     def _reload_table(self) -> None:
         self._data_source.set_rows(self._filtered_rows)
@@ -275,7 +276,7 @@ class TermsPanel:
         list_w = _WIN_W - 2 * _MARGIN
 
         # Language filter — NSSegmentedControl (anchored to top)
-        langs_present = sorted({l for l, _ in self._all_rows})
+        langs_present = sorted({lang for lang, _ in self._all_rows})
         self._seg_langs = [None] + langs_present
         seg_ctrl = NSSegmentedControl.alloc().initWithFrame_(
             NSRect(NSPoint(_MARGIN, seg_y), NSSize(list_w, _SEG_H))
@@ -375,14 +376,14 @@ class TermsPanel:
     def _update_seg_labels_on(self, seg: NSSegmentedControl, langs: list[str]) -> None:
         seg.setLabel_forSegment_(i18n.t("terms.seg_all", n=len(self._all_rows)), 0)
         for i, lang in enumerate(langs):
-            count = sum(1 for l, _ in self._all_rows if l == lang)
+            count = sum(1 for row_lang, _ in self._all_rows if row_lang == lang)
             name = LANG_NAMES.get(lang, lang.upper())
             seg.setLabel_forSegment_(f"{name} ({count})", i + 1)
 
     def _update_seg_labels(self) -> None:
         if self._seg_ctrl is None:
             return
-        langs = [l for l in self._seg_langs if l is not None]
+        langs = [lang for lang in self._seg_langs if lang is not None]
         self._update_seg_labels_on(self._seg_ctrl, langs)
 
     def _on_lang_changed(self, idx: int) -> None:
@@ -401,12 +402,12 @@ class TermsPanel:
                 text += i18n.t("terms.stats_inactive_suffix", inactive=inactive)
         else:
             n_active = sum(
-                1 for l, it in self._all_rows
-                if l == self._current_lang and not it.get("inactive")
+                1 for lang, item in self._all_rows
+                if lang == self._current_lang and not item.get("inactive")
             )
             n_inactive = sum(
-                1 for l, it in self._all_rows
-                if l == self._current_lang and it.get("inactive")
+                1 for lang, item in self._all_rows
+                if lang == self._current_lang and item.get("inactive")
             )
             lang_name = LANG_NAMES.get(self._current_lang, self._current_lang.upper())
             text = i18n.t("terms.stats_lang_active", lang=lang_name, active=n_active)
@@ -462,8 +463,8 @@ class TermsPanel:
 
         to_delete_set: set[tuple[str, str]] = set(to_delete)
         self._all_rows = [
-            (l, it) for l, it in self._all_rows
-            if (l, str(it.get("term", ""))) not in to_delete_set
+            (lang, item) for lang, item in self._all_rows
+            if (lang, str(item.get("term", ""))) not in to_delete_set
         ]
         self._apply_filter()
         self._reload_table()

@@ -286,7 +286,7 @@ class TestKeepAliveLock(unittest.TestCase):
 class TestShortFinalChunkDiscarded(unittest.TestCase):
     @patch("src.transcriber._call_mlx_transcribe")
     def test_final_chunk_below_min_samples_returns_empty(self, mock_call):
-        from src.transcriber import WhisperTranscriber, MIN_FINAL_CHUNK_SAMPLES
+        from src.transcriber import MIN_FINAL_CHUNK_SAMPLES, WhisperTranscriber
 
         transcriber = WhisperTranscriber(model_name="fake/model")
         short_audio = np.zeros(MIN_FINAL_CHUNK_SAMPLES - 1, dtype=np.float32)
@@ -299,7 +299,7 @@ class TestShortFinalChunkDiscarded(unittest.TestCase):
     @patch("src.transcriber._call_mlx_transcribe")
     def test_final_chunk_at_min_samples_is_skipped(self, mock_call):
         """Final chunk at exactly MIN_FINAL_CHUNK_SAMPLES must be skipped (boundary fix: <= not <)."""
-        from src.transcriber import WhisperTranscriber, MIN_FINAL_CHUNK_SAMPLES
+        from src.transcriber import MIN_FINAL_CHUNK_SAMPLES, WhisperTranscriber
 
         transcriber = WhisperTranscriber(model_name="fake/model")
         audio = np.zeros(MIN_FINAL_CHUNK_SAMPLES, dtype=np.float32)
@@ -312,7 +312,7 @@ class TestShortFinalChunkDiscarded(unittest.TestCase):
     @patch("src.transcriber._call_mlx_transcribe")
     def test_final_chunk_one_above_min_is_transcribed(self, mock_call):
         """Final chunk one sample above MIN must reach Whisper."""
-        from src.transcriber import WhisperTranscriber, MIN_FINAL_CHUNK_SAMPLES
+        from src.transcriber import MIN_FINAL_CHUNK_SAMPLES, WhisperTranscriber
 
         mock_call.return_value = {"text": "нормальная речь", "language": "ru"}
         transcriber = WhisperTranscriber(model_name="fake/model")
@@ -445,8 +445,9 @@ class TestSpeechTagWrapping(unittest.TestCase):
 class TestMlxWhisperImportError(unittest.TestCase):
     def test_call_mlx_transcribe_raises_on_missing_mlx_whisper(self):
         """_call_mlx_transcribe must raise RuntimeError if mlx_whisper is missing."""
-        from src.transcriber import _call_mlx_transcribe
         import builtins
+
+        from src.transcriber import _call_mlx_transcribe
 
         real_import = builtins.__import__
 
@@ -474,7 +475,7 @@ class TestMlxWhisperImportError(unittest.TestCase):
 class TestMenuIconPath(unittest.TestCase):
     def test_dev_fallback_points_to_assets(self):
         """In dev mode (no bundle), get_menu_icon_path() must return assets/CnS.png."""
-        from src.utils import get_menu_icon_path, ROOT
+        from src.utils import ROOT, get_menu_icon_path
         with unittest.mock.patch("src.utils._get_app_bundle", return_value=None):
             path = get_menu_icon_path()
         expected = ROOT / "assets" / "CnS.png"

@@ -120,6 +120,16 @@ struct AtomicFileTests {
     }
 }
 
+@Suite("Keychain compatibility contract")
+struct KeychainCompatibilityTests {
+    @Test("Service and account names match the Python application")
+    func stableNames() {
+        #expect(KeychainHelper.defaultService == "click-n-speak")
+        #expect(KeychainHelper.geminiAccount == "google_api_key")
+        #expect(KeychainHelper.openAIAccount == "openai_api_key")
+    }
+}
+
 @Suite("SingleInstanceGuard")
 struct SingleInstanceGuardTests {
     @Test("Second guard on same lock fails while first holds it")

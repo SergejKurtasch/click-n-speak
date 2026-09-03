@@ -32,6 +32,7 @@ struct DatasetLoggerTests {
             rawWhisper: "привет \"мир\"",
             aiEdited: nil,
             aiStatus: nil,
+            sttBackend: "local",
             sttModel: "m",
             aiModel: nil,
             userFinal: "привет мир",
@@ -41,7 +42,7 @@ struct DatasetLoggerTests {
         )
         let line = DatasetLogger.jsonLine(record, at: date("2026-07-23T10:00:00Z"))
 
-        #expect(line == #"{"timestamp": "2026-07-23T10:00:00+00:00", "raw_whisper": "привет \"мир\"", "ai_edited": null, "ai_status": null, "stt_model": "m", "ai_model": null, "user_final": "привет мир", "lang": "ru", "prompt_hash": "abc", "vocab_terms_in_raw": ["мир"], "vocab_terms_in_final": ["мир"]}"#)
+        #expect(line == #"{"timestamp": "2026-07-23T10:00:00+00:00", "raw_whisper": "привет \"мир\"", "ai_edited": null, "ai_status": null, "stt_backend": "local", "stt_model": "m", "ai_model": null, "user_final": "привет мир", "lang": "ru", "prompt_hash": "abc", "vocab_terms_in_raw": ["мир"], "vocab_terms_in_final": ["мир"]}"#)
     }
 
     @Test("Records append one line each and stay parseable")

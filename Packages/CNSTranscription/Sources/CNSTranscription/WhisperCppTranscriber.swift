@@ -1,3 +1,4 @@
+import CNSCore
 import Foundation
 import whisper
 
@@ -18,7 +19,9 @@ public actor WhisperCppTranscriber: Transcribing {
     static let preWarmThrottleSeconds: TimeInterval = 45
 
     private let modelURL: URL
+    private let modelID: String
     private let threadCount: Int32
+    private let inferenceGate: InferenceExecutionGate?
     private var warmupDone = false
     private var lastDecodeAt: Date?
     /// Owns the whisper_context so a nonisolated deinit can free it (the pointer
@@ -28,10 +31,20 @@ public actor WhisperCppTranscriber: Transcribing {
     /// `abortInFlight()` from wherever the watchdog runs.
     private let abortFlag = AbortFlag()
 
-    public init(modelURL: URL, threadCount: Int = 0) {
+    public init(
+        modelURL: URL,
+        modelID: String? = nil,
+        threadCount: Int = 0,
+        inferenceGate: InferenceExecutionGate? = nil
+    ) {
         self.modelURL = modelURL
+        self.modelID = modelID ?? modelURL.deletingPathExtension().lastPathComponent
+        self.inferenceGate = inferenceGate
         let cpus = ProcessInfo.processInfo.activeProcessorCount
-        self.threadCount = Int32(threadCount > 0 ? threadCount : min(8, cpus))
+        // Four threads is the fastest stable configuration for the in-process
+        // Metal build on Apple Silicon; using efficiency cores increases both
+        // median latency and its tail.
+        self.threadCount = Int32(threadCount > 0 ? threadCount : min(4, cpus))
     }
 
     /// Load the model (idempotent). Called lazily on first transcribe and by warmup.
@@ -43,7 +56,10 @@ public actor WhisperCppTranscriber: Transcribing {
         }
         var cparams = whisper_context_default_params()
         cparams.use_gpu = true  // Metal
-        guard let created = modelURL.path.withCString({ whisper_init_from_file_with_params(($0), cparams) }) else {
+        cparams.flash_attn = true
+        guard let created = modelURL.path.withCString({
+            whisper_init_from_file_with_params($0, cparams)
+        }) else {
             throw LoadError.initFailed
         }
         contextBox.ptr = created
@@ -51,9 +67,36 @@ public actor WhisperCppTranscriber: Transcribing {
     }
 
     public func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
-        guard !request.audio.isEmpty, let ctx = try? load() else { return .empty }
+        guard !request.audio.isEmpty else { return .guarded(.emptyAudio) }
+        let inferenceLease: InferenceExecutionLease?
+        if let inferenceGate {
+            do {
+                inferenceLease = try await inferenceGate.acquire(
+                    timeout: request.decodeTimeout ?? TranscriptionDeadlinePolicy.coldDecodeSeconds
+                )
+            } catch {
+                return TranscriptionResult(text: "", outcome: .aborted)
+            }
+            guard inferenceLease != nil else {
+                return TranscriptionResult(text: "", outcome: .timedOut)
+            }
+        } else {
+            inferenceLease = nil
+        }
+        defer { inferenceLease?.release() }
+        let ctx: OpaquePointer
+        do {
+            ctx = try load()
+        } catch {
+            return .failed(.init(kind: .modelLoad, message: "The local speech model could not be loaded"))
+        }
 
         var params = makeParams()
+        // Each app chunk is an independent whisper_full invocation. Session
+        // context is already supplied explicitly through initial_prompt by
+        // ChunkContextBuilder; retaining whisper.cpp's prior-call tokens here
+        // contaminates later sessions and duplicates that bounded context.
+        params.no_context = true
 
         // Force the language only when exactly one is allowed (matches the
         // Python rule); otherwise auto-detect.
@@ -67,6 +110,91 @@ public actor WhisperCppTranscriber: Transcribing {
             return result
         }
         return retried
+    }
+
+    public func transcribeFile(
+        _ request: FileTranscriptionRequest,
+        progress: @escaping @Sendable (FileTranscriptionProgress) -> Void
+    ) async -> FileTranscriptionResult {
+        progress(.init(stage: .preparing))
+        let reader: MediaAudioSegmentReader
+        do {
+            reader = try await MediaAudioSegmentReader.open(url: request.url)
+        } catch is CancellationError {
+            return FileTranscriptionResult(text: "", status: .cancelled)
+        } catch MediaAudioDecoderError.unsupportedMedia {
+            return .failed(.init(kind: .unsupportedMedia, message: "This media type is not supported"))
+        } catch {
+            return .failed(.init(kind: .fileDecode, message: "The audio track could not be decoded"))
+        }
+
+        var parts: [String] = []
+        var detectedLanguage = ""
+        var segmentIndex = 0
+        do {
+            progress(.init(
+                stage: .decoding,
+                completedUnits: 0,
+                totalUnits: reader.estimatedSegmentCount
+            ))
+            var current = try reader.nextSegment()
+            while let audio = current {
+                try Task.checkCancellation()
+                let next = try reader.nextSegment()
+                progress(.init(
+                    stage: .transcribing,
+                    completedUnits: segmentIndex,
+                    totalUnits: reader.estimatedSegmentCount
+                ))
+                let result = await GuardedTranscriber(wrapping: self).transcribe(TranscriptionRequest(
+                    audio: audio,
+                    initialPrompt: request.initialPrompt,
+                    allowedLanguages: request.allowedLanguages,
+                    conditionOnPreviousText: true,
+                    isFinalChunk: next == nil,
+                    decodeTimeout: segmentIndex == 0
+                        ? TranscriptionDeadlinePolicy.coldDecodeSeconds
+                        : TranscriptionDeadlinePolicy.warmDecodeSeconds
+                ))
+                switch result.outcome {
+                case .success:
+                    let cleaned = HallucinationFilter().filter(result.text, isFinal: next == nil)
+                    if !cleaned.isEmpty { parts.append(cleaned) }
+                    if !result.detectedLanguage.isEmpty { detectedLanguage = result.detectedLanguage }
+                case .noSpeech, .guarded:
+                    break
+                case .aborted:
+                    reader.cancel()
+                    return FileTranscriptionResult(text: "", status: .cancelled, segmentCount: segmentIndex)
+                case .timedOut:
+                    reader.cancel()
+                    return .failed(.init(kind: .decode, message: "Local transcription timed out"))
+                case let .failed(failure):
+                    reader.cancel()
+                    return .failed(failure)
+                }
+                segmentIndex += 1
+                current = next
+            }
+        } catch is CancellationError {
+            abortInFlight()
+            reader.cancel()
+            return FileTranscriptionResult(text: "", status: .cancelled, segmentCount: segmentIndex)
+        } catch {
+            reader.cancel()
+            return .failed(.init(kind: .fileDecode, message: "The media file could not be decoded"))
+        }
+
+        let text = FileTranscriptAssembler.join(parts)
+        progress(.init(stage: .completed, completedUnits: segmentIndex, totalUnits: segmentIndex))
+        return FileTranscriptionResult(
+            text: text,
+            detectedLanguage: detectedLanguage,
+            backend: "local",
+            modelID: modelID,
+            status: text.isEmpty ? .noSpeech : .success,
+            segmentCount: segmentIndex
+        )
     }
 
     /// Language-mismatch retry, ported from `WhisperTranscriber.transcribe`.
@@ -97,7 +225,11 @@ public actor WhisperCppTranscriber: Transcribing {
         let language: String? = request.allowedLanguages.count == 1 ? request.allowedLanguages[0] : nil
         let retry = runDecode(ctx: ctx, audio: padded, params: &params,
                               language: language, prompt: request.initialPrompt)
-        return retry.text.isEmpty ? .empty : retry
+        guard !retry.text.isEmpty else { return retry }
+        var retried = retry
+        retried.retryCount = result.retryCount + 1
+        retried.durationSeconds += result.durationSeconds
+        return retried
     }
 
     private func makeParams() -> whisper_full_params {
@@ -111,7 +243,10 @@ public actor WhisperCppTranscriber: Transcribing {
         params.single_segment = false
         params.temperature = 0.0
         params.no_speech_thold = 0.5     // production strict
-        params.entropy_thold = 2.0       // ≈ compression_ratio_threshold
+        // whisper.cpp's entropy metric is only analogous to OpenAI's
+        // compression ratio. 2.4 is the accepted greedy bake-off setting;
+        // using Python's numeric 2.0 here triggers expensive fallback decodes.
+        params.entropy_thold = 2.4
         params.suppress_blank = true
         return params
     }
@@ -132,7 +267,7 @@ public actor WhisperCppTranscriber: Transcribing {
     /// between encoder/decoder steps and makes `whisper_full` return early.
     /// Callable from any isolation — the flag is the only thing touched.
     public nonisolated func abortInFlight() {
-        abortFlag.value = true
+        abortFlag.abortActiveGeneration()
     }
 
     /// Nested withCString calls keep the language/prompt C strings alive across
@@ -146,12 +281,15 @@ public actor WhisperCppTranscriber: Transcribing {
             return body(nil)
         }
 
-        abortFlag.value = false
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let abortToken = abortFlag.beginGeneration()
+        defer { abortFlag.endGeneration(abortToken.generation) }
         params.abort_callback = { userData in
             guard let userData else { return false }
-            return Unmanaged<AbortFlag>.fromOpaque(userData).takeUnretainedValue().value
+            return Unmanaged<AbortToken>.fromOpaque(userData).takeUnretainedValue().isAborted
+                || Task.isCancelled
         }
-        params.abort_callback_user_data = Unmanaged.passUnretained(abortFlag).toOpaque()
+        params.abort_callback_user_data = Unmanaged.passUnretained(abortToken).toOpaque()
 
         return withOptionalCString(language) { langPtr in
             withOptionalCString(prompt) { promptPtr in
@@ -160,7 +298,25 @@ public actor WhisperCppTranscriber: Transcribing {
                 let status = audio.withUnsafeBufferPointer { buf in
                     whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
                 }
-                guard status == 0 else { return TranscriptionResult.empty }
+                let duration = ProcessInfo.processInfo.systemUptime - startedAt
+                guard status == 0 else {
+                    if abortToken.isAborted || Task.isCancelled {
+                        return TranscriptionResult(
+                            text: "",
+                            outcome: .aborted,
+                            backend: "local",
+                            modelID: modelID,
+                            durationSeconds: duration
+                        )
+                    }
+                    return TranscriptionResult(
+                        text: "",
+                        outcome: .failed(.init(kind: .decode, message: "Local speech decoding failed")),
+                        backend: "local",
+                        modelID: modelID,
+                        durationSeconds: duration
+                    )
+                }
 
                 var text = ""
                 let n = whisper_full_n_segments(ctx)
@@ -176,7 +332,14 @@ public actor WhisperCppTranscriber: Transcribing {
                 if langId >= 0, let langStr = whisper_lang_str(langId) {
                     detected = String(cString: langStr)
                 }
-                return TranscriptionResult(text: text, detectedLanguage: detected)
+                return TranscriptionResult(
+                    text: text,
+                    detectedLanguage: detected,
+                    outcome: text.isEmpty ? .noSpeech : .success,
+                    backend: "local",
+                    modelID: modelID,
+                    durationSeconds: duration
+                )
             }
         }
     }
@@ -187,6 +350,11 @@ public actor WhisperCppTranscriber: Transcribing {
         guard !warmupDone else { return }
         warmupDone = true
         decodeSilence(seconds: 0.5, language: language)
+    }
+
+    public func prepare(language: String?) async throws {
+        _ = try load()
+        await warmup(language: language)
     }
 
     /// Cheap keep-warm before a session. Skipped when a real decode happened
@@ -220,12 +388,57 @@ public actor WhisperCppTranscriber: Transcribing {
     }
 }
 
-/// Abort switch polled by whisper.cpp during a decode.
-/// @unchecked Sendable: a single Bool, written by the watchdog and read by the
-/// decoding thread; a torn read is impossible and a late read only costs one
-/// more decode step.
+/// Generation-scoped abort state shared by the actor and whisper.cpp callback.
+/// A watchdog can only mark the generation that is active at that instant; a
+/// late abort therefore cannot leak into the next decode.
 final class AbortFlag: @unchecked Sendable {
-    var value: Bool = false
+    private let lock = NSLock()
+    private var nextGeneration = 0
+    private var activeGeneration: Int?
+    private var abortedGeneration: Int?
+
+    func beginGeneration() -> AbortToken {
+        lock.lock()
+        nextGeneration += 1
+        let generation = nextGeneration
+        activeGeneration = generation
+        abortedGeneration = nil
+        lock.unlock()
+        return AbortToken(owner: self, generation: generation)
+    }
+
+    func abortActiveGeneration() {
+        lock.lock()
+        abortedGeneration = activeGeneration
+        lock.unlock()
+    }
+
+    func isAborted(_ generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeGeneration == generation && abortedGeneration == generation
+    }
+
+    func endGeneration(_ generation: Int) {
+        lock.lock()
+        if activeGeneration == generation {
+            activeGeneration = nil
+            abortedGeneration = nil
+        }
+        lock.unlock()
+    }
+}
+
+final class AbortToken: @unchecked Sendable {
+    let generation: Int
+    private let owner: AbortFlag
+
+    init(owner: AbortFlag, generation: Int) {
+        self.owner = owner
+        self.generation = generation
+    }
+
+    var isAborted: Bool { owner.isAborted(generation) }
 }
 
 /// Holds the whisper_context pointer outside the actor so a nonisolated deinit

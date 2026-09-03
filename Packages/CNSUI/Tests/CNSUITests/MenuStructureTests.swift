@@ -3,6 +3,7 @@ import Foundation
 import AppKit
 @testable import CNSUI
 @testable import CNSCore
+@testable import CNSDictionary
 
 @MainActor
 @Suite("Menu structure")
@@ -28,7 +29,10 @@ struct MenuStructureTests {
         let i18n = I18n.load("en", localesDirectory: resources.localesDirectory)
         let value = try JSONValue.parse(configJSON)
         let config = Config.migrated(value.objectValue ?? JSONObject())
-        return MenuBarController(config: config, i18n: i18n, resources: resources,
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("cns-menu-tests-\(UUID().uuidString)")
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        return MenuBarController(config: config, i18n: i18n, resources: resources, paths: paths,
                                  installStatusItem: false)
     }
 
@@ -36,7 +40,7 @@ struct MenuStructureTests {
         menu.items.map { $0.isSeparatorItem ? "---" : $0.title }
     }
 
-    @Test("Top-level order and titles match the Python menu (with Input Monitoring dropped)")
+    @Test("Top-level order uses one consolidated AI Editor backend control")
     func topLevelOrder() throws {
         let c = try makeController()
         let titles = topTitles(c.menu)
@@ -47,15 +51,15 @@ struct MenuStructureTests {
             "API Keys",
             "Languages",
             "---",
-            "AI Editor (Punctuation & Cleanup)",
             "AI Editor Backend ▶",
-            "Download AI Editor Model",
-            "Delete Local Model…",
+            "Delete Local Models...",
             "Initial Prompt",
             "Last Phrases",
             "Transcribe Audio File...",
             "---",
+            "Setup...",
             "Check for Updates",
+            "About Click-n-speak",
             "Launch at Login",
             "Advanced",
             "Restart",
@@ -64,7 +68,7 @@ struct MenuStructureTests {
         ])
     }
 
-    @Test("Permissions submenu has two items (Input Monitoring removed)")
+    @Test("Permissions submenu has two items because Carbon needs no Input Monitoring")
     func permissionsSubmenu() throws {
         let c = try makeController()
         let permissions = try #require(c.menu.items.first { $0.title == "Permissions" })
@@ -84,27 +88,89 @@ struct MenuStructureTests {
         #expect(titles.contains("Local models"))
         #expect(titles.contains("Gemini 2.5 Flash-Lite"))
         #expect(titles.contains { $0.hasPrefix("Turbo · ") })
-        // 1 header + 6 cloud + separator + 1 header + 5 local = 14 rows.
-        #expect(sub.items.count == 14)
+        // Runtime status + separator + 1 header + 6 cloud + separator + 1 header + 5 local.
+        #expect(sub.items.count == 16)
     }
 
-    @Test("Local Turbo model is checked by default")
+    @Test("Desired Turbo is pending until a factual runtime becomes active")
     func defaultModelChecked() throws {
         let c = try makeController()
         let sub = try #require(c.menu.items.first { $0.title == "Model" }?.submenu)
         let turbo = try #require(sub.items.first { $0.title.hasPrefix("Turbo · ") })
-        #expect(turbo.state == .on)
+        #expect(turbo.state == .mixed)
     }
 
-    @Test("AI Editor checkmark reflects config")
-    func aiEditorChecked() throws {
-        let on = try makeController(configJSON: #"{"ai_editor_enabled": true}"#)
-        let item = try #require(on.menu.items.first { $0.title.hasPrefix("AI Editor (") })
-        #expect(item.state == .on)
+    @Test("AI Editor parent and backend choices show disabled, pending, and active states")
+    func aiEditorStates() throws {
+        let controller = try makeController(configJSON: #"{"ai_editor_enabled": false}"#)
+        var parent = try #require(controller.menu.items.first {
+            $0.identifier?.rawValue == "ai-editor.backend"
+        })
+        #expect(parent.state == .off)
+        #expect(parent.submenu?.items.allSatisfy { $0.state == .off } == true)
 
-        let off = try makeController(configJSON: #"{"ai_editor_enabled": false}"#)
-        let item2 = try #require(off.menu.items.first { $0.title.hasPrefix("AI Editor (") })
-        #expect(item2.state == .off)
+        var pending = controller.state
+        pending.config.raw["ai_editor_enabled"] = .bool(true)
+        pending.config.raw["ai_editor_backend"] = .string("local")
+        pending.runtime.desiredEditorBackend = "local"
+        controller.apply(pending)
+        parent = try #require(controller.menu.items.first {
+            $0.identifier?.rawValue == "ai-editor.backend"
+        })
+        let pendingLocal = try #require(parent.submenu?.items.first {
+            ($0.representedObject as? String) == "local"
+        })
+        #expect(parent.state == .mixed)
+        #expect(pendingLocal.state == .mixed)
+
+        var active = pending
+        active.runtime.phase = .ready
+        active.runtime.activeEditorBackend = "local"
+        active.runtime.activeEditorModel = ModelRegistry.defaultAiEditorModelID
+        controller.apply(active)
+        parent = try #require(controller.menu.items.first {
+            $0.identifier?.rawValue == "ai-editor.backend"
+        })
+        let activeLocal = try #require(parent.submenu?.items.first {
+            ($0.representedObject as? String) == "local"
+        })
+        #expect(parent.state == .on)
+        #expect(activeLocal.state == .on)
+    }
+
+    @Test("Backend choices enable, switch, and disable the AI Editor")
+    func aiEditorBackendActions() throws {
+        let controller = try makeController(configJSON: #"{"ai_editor_enabled": false}"#)
+        controller.onConfigChanged = { controller.updateConfig($0) }
+
+        var parent = try #require(controller.menu.items.first {
+            $0.identifier?.rawValue == "ai-editor.backend"
+        })
+        let local = try #require(parent.submenu?.items.first {
+            ($0.representedObject as? String) == "local"
+        })
+        _ = controller.perform(local.action)
+        #expect(controller.config.aiEditorEnabled)
+        #expect(controller.config.aiEditorBackend == "local")
+
+        parent = try #require(controller.menu.items.first {
+            $0.identifier?.rawValue == "ai-editor.backend"
+        })
+        let gemini = try #require(parent.submenu?.items.first {
+            ($0.representedObject as? String) == "gemini"
+        })
+        _ = controller.perform(gemini.action)
+        #expect(controller.config.aiEditorEnabled)
+        #expect(controller.config.aiEditorBackend == "gemini")
+
+        parent = try #require(controller.menu.items.first {
+            $0.identifier?.rawValue == "ai-editor.backend"
+        })
+        let selectedGemini = try #require(parent.submenu?.items.first {
+            ($0.representedObject as? String) == "gemini"
+        })
+        _ = controller.perform(selectedGemini.action)
+        #expect(!controller.config.aiEditorEnabled)
     }
 
     @Test("Initial Prompt submenu structure")
@@ -120,12 +186,81 @@ struct MenuStructureTests {
         ])
     }
 
+    @Test("Pending suggestion alert previews candidates and opens review")
+    func pendingSuggestionAlertPreview() throws {
+        let resources = repoResources()
+        let i18n = I18n.load("en", localesDirectory: resources.localesDirectory)
+        let pending = [
+            "ru": [
+                TermCandidate(
+                    term: "Проверь",
+                    count: 8,
+                    correctionCount: 8,
+                    frequencyCount: 0,
+                    source: "correction"
+                ),
+                TermCandidate(
+                    term: "Проанализируй",
+                    count: 19,
+                    correctionCount: 19,
+                    frequencyCount: 0,
+                    source: "correction"
+                ),
+                TermCandidate(
+                    term: "какие-то",
+                    count: 8,
+                    correctionCount: 8,
+                    frequencyCount: 0,
+                    source: "correction"
+                ),
+            ],
+            "en": [
+                TermCandidate(
+                    term: "Cognee",
+                    count: 17,
+                    correctionCount: 17,
+                    frequencyCount: 0,
+                    source: "correction"
+                ),
+            ],
+        ]
+
+        let model = MenuBarController.pendingSuggestionAlertModel(pending: pending, i18n: i18n)
+
+        #expect(model.title == "New terms for dictionary")
+        #expect(model.body.contains("Проанализируй (19×)"))
+        #expect(model.body.contains("Cognee (17×)"))
+        #expect(model.body.contains("and 1 more"))
+        #expect(model.buttons == ["View", "Remind later", "Auto mode"])
+    }
+
+    @Test("Pending suggestion alert is limited to suggest mode")
+    func pendingSuggestionAlertModeGuard() throws {
+        let suggest = Config.migrated(try JSONValue.parse(#"{"prompt_update_mode":"suggest"}"#).objectValue ?? JSONObject())
+        let automatic = Config.migrated(try JSONValue.parse(#"{"prompt_update_mode":"auto"}"#).objectValue ?? JSONObject())
+        let disabled = Config.migrated(try JSONValue.parse(#"{"prompt_update_mode":"disabled"}"#).objectValue ?? JSONObject())
+
+        #expect(MenuBarController.shouldPresentPendingSuggestionAlert(config: suggest, pendingCount: 4))
+        #expect(!MenuBarController.shouldPresentPendingSuggestionAlert(config: suggest, pendingCount: 0))
+        #expect(!MenuBarController.shouldPresentPendingSuggestionAlert(config: automatic, pendingCount: 4))
+        #expect(!MenuBarController.shouldPresentPendingSuggestionAlert(config: disabled, pendingCount: 4))
+    }
+
     @Test("Menu renders in Russian too")
     func russianMenu() throws {
         let resources = repoResources()
         let i18n = I18n.load("ru", localesDirectory: resources.localesDirectory)
         let config = Config.migrated(JSONObject())
-        let c = MenuBarController(config: config, i18n: i18n, resources: resources, installStatusItem: false)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("cns-menu-ru-\(UUID().uuidString)")
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        let c = MenuBarController(
+            config: config,
+            i18n: i18n,
+            resources: resources,
+            paths: paths,
+            installStatusItem: false
+        )
         // "Permissions" localized to Russian — just assert it's not the English key.
         let first = c.menu.items.first
         #expect(first?.title != "menu.permissions")

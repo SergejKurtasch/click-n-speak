@@ -5,6 +5,7 @@ from typing import Callable, Optional
 import numpy as np
 import sounddevice as sd
 
+from . import i18n as _i18n
 from .utils import (
     SOUND_RECORDING_START,
     SOUND_RECORDING_STOP,
@@ -14,7 +15,6 @@ from .utils import (
     play_sound,
     send_notification,
 )
-from . import i18n as _i18n
 
 try:
     import webrtcvad

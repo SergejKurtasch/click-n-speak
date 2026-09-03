@@ -9,16 +9,18 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../CNSCore"),
+        .package(path: "../CNSDictionary"),
+        .package(path: "../CNSTranscription"),
     ],
     targets: [
         .target(
             name: "CNSUI",
-            dependencies: ["CNSCore"],
+            dependencies: ["CNSCore", "CNSDictionary", "CNSTranscription"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "CNSUITests",
-            dependencies: ["CNSUI"],
+            dependencies: ["CNSUI", "CNSCore", "CNSDictionary", "CNSTranscription"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

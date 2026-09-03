@@ -11,8 +11,10 @@
 #   ./scripts/build_whisper_xcframework.sh
 set -euo pipefail
 
-# Pinned whisper.cpp version — bump deliberately, never silently.
-WHISPER_CPP_COMMIT="080bbbe85230f624f0b52127f1ae1218247989f9"
+# Pinned whisper.cpp release used by the accepted Phase 0 bake-off. Keep the
+# runtime and its quality/latency thresholds on the same decoder revision;
+# update both deliberately after a complete golden-corpus run.
+WHISPER_CPP_COMMIT="v1.9.1"
 WHISPER_CPP_REPO="https://github.com/ggml-org/whisper.cpp.git"
 
 export PATH="/opt/homebrew/bin:$PATH"

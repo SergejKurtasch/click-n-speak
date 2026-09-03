@@ -10,6 +10,8 @@
     <string>com.sergej.clicknspeak</string>
     <key>CFBundleExecutable</key>
     <string>ClickNSpeak</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -22,6 +24,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Click-n-speak records audio from your microphone to transcribe your speech.</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Click-n-speak uses Accessibility to register its global hotkey and insert transcribed text into the active application.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
