@@ -71,7 +71,7 @@ The config schema advances from 9 to 10 and adds:
 }
 ```
 
-Migration to schema 10 creates empty arrays and sets `replacement_policy_initialized` to `false`. At the first `DictionaryCoordinator` initialization after migration, the coordinator updates the correction index from the append-only dataset first. This also rebuilds a schema-4 index as schema 5 before policy seeding. The coordinator then copies every non-rejected pair with `count >= 3` into `approved_auto_replacements` and atomically persists the config with `replacement_policy_initialized = true`.
+Migration to schema 10 creates empty arrays and sets `replacement_policy_initialized` to `false`. At the first `DictionaryCoordinator` initialization after migration, the coordinator updates the correction index from the append-only dataset first. This also rebuilds a schema-4 index as schema 5 before policy seeding. Stale-pair pruning is suppressed for this one bootstrap update so previously effective replacements are not discarded before migration. The coordinator then copies every non-rejected pair with `count >= 3` into `approved_auto_replacements`, prunes stale observations, and atomically persists the config with `replacement_policy_initialized = true`.
 
 If the dataset or index cannot be read, initialization remains false and is retried on the next launch; a transient read failure must not silently discard previously effective pairs. If neither file exists, the installation is considered fresh and initialization completes with an empty approved list.
 
