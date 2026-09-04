@@ -40,6 +40,47 @@ final class UIPanelsTests: XCTestCase {
         )
     }
 
+    private func replacementValue(from: String, to: String, timestampKey: String) -> JSONValue {
+        var object = JSONObject()
+        object["from"] = .string(from)
+        object["to"] = .string(to)
+        object[timestampKey] = .string(ISOTimestamp.now())
+        return .object(object)
+    }
+
+    private func replacementFixture() throws -> DictionaryCoordinator {
+        var object = JSONObject()
+        object["schema_version"] = .int(10)
+        object["replacement_policy_initialized"] = .bool(true)
+        object["manual_replacements"] = .array([
+            replacementValue(from: "manual", to: "Manual", timestampKey: "added_at"),
+        ])
+        object["approved_auto_replacements"] = .array([
+            replacementValue(from: "approved", to: "Approved", timestampKey: "approved_at"),
+        ])
+        object["rejected_replacements"] = .array([
+            replacementValue(from: "blocked", to: "Blocked", timestampKey: "rejected_at"),
+        ])
+        let source = Config.migrated(object)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("cns-ui-replacements-\(UUID().uuidString)")
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        var index = CorrectionIndex.defaultIndex()
+        index.processedRows = 10
+        let now = ISOTimestamp.now()
+        index.replacementPairs["latin"] = [
+            ReplacementPair(from: "single", to: "Single", count: 1, lastSeen: now, lastSeenRow: 10),
+            ReplacementPair(from: "twice", to: "Twice", count: 2, lastSeen: now, lastSeenRow: 10),
+            ReplacementPair(from: "thrice", to: "Thrice", count: 3, lastSeen: now, lastSeenRow: 10),
+        ]
+        try CorrectionAnalyzer.writeIndex(index, to: paths.correctionsFile)
+        return DictionaryCoordinator(
+            config: source,
+            paths: paths,
+            phraseHistory: PhraseHistory(fileURL: paths.phraseHistoryFile)
+        )
+    }
+
     func testSuggestionsPanelInstantiation() {
         let i18n = i18n()
         let panel = SuggestionsPanel(coordinator: coordinator(), i18n: i18n)
@@ -56,6 +97,29 @@ final class UIPanelsTests: XCTestCase {
         let i18n = i18n()
         let panel = ReplacementsPanel(coordinator: coordinator(), i18n: i18n)
         XCTAssertEqual(panel.title, i18n.t("replacements.window_title"))
+    }
+
+    func testReplacementsPanelClassifiesPolicySectionsAndStartsRejectedCollapsed() throws {
+        let panel = ReplacementsPanel(coordinator: try replacementFixture(), i18n: i18n())
+
+        XCTAssertEqual(panel.activeReplacementCountForTesting, 2)
+        XCTAssertEqual(panel.candidateReplacementCountForTesting, 2)
+        XCTAssertEqual(panel.rejectedReplacementCountForTesting, 1)
+        XCTAssertFalse(panel.isRejectedSectionExpandedForTesting)
+    }
+
+    func testReplacementsPanelApprovesRejectsAndRestoresRows() throws {
+        let coordinator = try replacementFixture()
+        let panel = ReplacementsPanel(coordinator: coordinator, i18n: i18n())
+
+        panel.approveReplacementForTesting(from: "twice", to: "Twice")
+        XCTAssertTrue(coordinator.replacementSections().active.contains { $0.from == "twice" })
+
+        panel.rejectReplacementForTesting(from: "thrice", to: "Thrice")
+        XCTAssertTrue(coordinator.replacementSections().rejected.contains { $0.from == "thrice" })
+
+        panel.restoreReplacementForTesting(from: "blocked", to: "Blocked")
+        XCTAssertTrue(coordinator.replacementSections().active.contains { $0.from == "blocked" })
     }
 
     func testLanguagePickerInstantiation() {
