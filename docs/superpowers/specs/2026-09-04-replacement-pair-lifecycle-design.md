@@ -172,7 +172,7 @@ Local Qwen continues to ignore the hint list. This scope does not change its pro
 - Contains persistent rejection records even when their observations have expired.
 - Every row has a **Restore** action, which moves the pair directly to Active.
 
-Rows are sorted by state, descending observation count, and canonical source text. All labels, empty states, badges, actions, and accessibility identifiers are added to both English and Russian localization catalogs.
+Rows are sorted by state, descending observation count, and canonical source text. All labels, empty states, badges, actions, and accessibility identifiers are added to every supported localization catalog: English, Russian, Ukrainian, German, Spanish, and French.
 
 The window remains resizable and scrollable. Mutations go through `DictionaryCoordinator`; the SwiftUI view never writes `config.json` or `corrections.json` directly.
 
