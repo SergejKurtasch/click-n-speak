@@ -72,6 +72,7 @@ from .utils import (
     migrate_config_to_v7,
     migrate_config_to_v8,
     migrate_config_to_v9,
+    migrate_config_to_v10,
     normalize_ukrainian_lang_codes,
     save_config_to_disk,
     send_notification,
@@ -676,6 +677,7 @@ class SVoiceRecApp:
         data = migrate_config_to_v7(data)
         data = migrate_config_to_v8(data)
         data = migrate_config_to_v9(data)
+        data = migrate_config_to_v10(data)
         data = normalize_ukrainian_lang_codes(data)
         self.config = data
         self.config.setdefault("last_metrics_snapshot_ts", None)

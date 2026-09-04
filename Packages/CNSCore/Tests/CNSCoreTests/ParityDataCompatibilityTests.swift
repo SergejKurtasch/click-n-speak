@@ -64,7 +64,7 @@ struct ParityDataCompatibilityTests {
     func pythonSwiftPythonRoundTrip() throws {
         let root = try repositoryRoot()
         let fixtures = try schemaFixtures(repositoryRoot: root)
-        #expect(Set(fixtures.compactMap { $0["id"] as? String }).count == 9)
+        #expect(Set(fixtures.compactMap { $0["id"] as? String }).count == 10)
 
         for fixture in fixtures {
             let fixtureID = try #require(fixture["id"] as? String)
@@ -81,7 +81,7 @@ struct ParityDataCompatibilityTests {
             try runPythonBridge(repositoryRoot: root, input: original, output: pythonMigrated)
 
             let swiftLoaded = Config.load(from: pythonMigrated)
-            #expect(swiftLoaded.schemaVersion == 9, "Python output did not load as v9 for \(fixtureID)")
+            #expect(swiftLoaded.schemaVersion == 10, "Python output did not load as v10 for \(fixtureID)")
             #expect(swiftLoaded.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
             let swiftSaved = temporary.appendingPathComponent("swift-saved.json")
             try swiftLoaded.saveAtomically(to: swiftSaved)
@@ -94,7 +94,7 @@ struct ParityDataCompatibilityTests {
                 markUpdate: true
             )
             let finalSwiftLoad = Config.load(from: pythonReloaded)
-            #expect(finalSwiftLoad.schemaVersion == 9)
+            #expect(finalSwiftLoad.schemaVersion == 10)
             #expect(finalSwiftLoad.raw["parity_python_update"]?.boolValue == true)
             #expect(finalSwiftLoad.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
         }
@@ -126,7 +126,7 @@ struct ParityDataCompatibilityTests {
             )
 
             let reloaded = Config.load(from: pythonSaved)
-            #expect(reloaded.schemaVersion == 9)
+            #expect(reloaded.schemaVersion == 10)
             #expect(reloaded.raw["parity_python_update"]?.boolValue == true)
             #expect(reloaded.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
         }
@@ -141,7 +141,7 @@ struct ParityDataCompatibilityTests {
         try corrupt.write(to: temporary)
 
         let fallback = Config.load(from: temporary)
-        #expect(fallback.schemaVersion == 9)
+        #expect(fallback.schemaVersion == 10)
         #expect(try Data(contentsOf: temporary) == corrupt)
     }
 }

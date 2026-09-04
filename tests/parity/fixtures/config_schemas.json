@@ -9,6 +9,7 @@
     {"id": "schema-v6", "config": {"schema_version": 6, "primary_language": "ru", "additional_languages": ["en"], "user_terms": {}, "manual_replacements": [{"from": "свифт", "to": "Swift"}], "future_extension": {"owner": "parity", "value": 6}}},
     {"id": "schema-v7", "config": {"schema_version": 7, "primary_language": "uk", "additional_languages": ["en"], "user_terms": {}, "last_notified_update_version": null, "future_extension": {"owner": "parity", "value": 7}}},
     {"id": "schema-v8", "config": {"schema_version": 8, "primary_language": "en", "additional_languages": [], "user_terms": {}, "language_auto_detect": true, "future_extension": {"owner": "parity", "value": 8}}},
-    {"id": "schema-v9", "config": {"schema_version": 9, "primary_language": "ru", "additional_languages": ["en"], "user_terms": {}, "stt_backend": "local", "stt_cloud_model": "gemini-2.5-flash-lite", "future_extension": {"owner": "parity", "value": 9}}}
+    {"id": "schema-v9", "config": {"schema_version": 9, "primary_language": "ru", "additional_languages": ["en"], "user_terms": {}, "stt_backend": "local", "stt_cloud_model": "gemini-2.5-flash-lite", "future_extension": {"owner": "parity", "value": 9}}},
+    {"id": "schema-v10", "config": {"schema_version": 10, "primary_language": "ru", "additional_languages": ["en"], "user_terms": {}, "approved_auto_replacements": [{"from": "Cogni", "to": "Cognee", "approved_at": "2026-09-04T12:00:00Z"}], "rejected_replacements": [], "replacement_policy_initialized": true, "future_extension": {"owner": "parity", "value": 10}}}
   ]
 }

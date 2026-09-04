@@ -31,12 +31,45 @@ struct ConfigMigrationTests {
         )
     }
 
-    @Test("All inputs reach schema_version 9")
-    func reachesV9() throws {
+    @Test("All inputs reach schema_version 10")
+    func reachesV10() throws {
         for name in ["legacy_v1", "real_v6", "v4_strings", "ua_legacy"] {
             let migrated = Config.migrated(try loadObject("migration_inputs/\(name).json"), now: Self.fixedNow)
-            #expect(migrated.schemaVersion == 9, "\(name) did not reach v9")
+            #expect(migrated.schemaVersion == 10, "\(name) did not reach v10")
         }
+    }
+
+    @Test("Schema 9 adds replacement policy defaults")
+    func replacementPolicyDefaults() {
+        var input = JSONObject()
+        input["schema_version"] = .int(9)
+        input["future_extension"] = .string("preserved")
+
+        let migrated = Config.migrated(input, now: Self.fixedNow)
+
+        #expect(migrated.schemaVersion == 10)
+        #expect(migrated.raw["approved_auto_replacements"]?.arrayValue == [])
+        #expect(migrated.raw["rejected_replacements"]?.arrayValue == [])
+        #expect(migrated.raw["replacement_policy_initialized"]?.boolValue == false)
+        #expect(migrated.raw["future_extension"]?.stringValue == "preserved")
+    }
+
+    @Test("Schema 10 replacement policy migration is idempotent")
+    func replacementPolicyIdempotent() {
+        var approval = JSONObject()
+        approval["from"] = .string("Cogni")
+        approval["to"] = .string("Cognee")
+        approval["approved_at"] = .string(Self.fixedNow)
+        var input = JSONObject()
+        input["schema_version"] = .int(10)
+        input["approved_auto_replacements"] = .array([.object(approval)])
+        input["rejected_replacements"] = .array([])
+        input["replacement_policy_initialized"] = .bool(true)
+
+        let once = Config.migrated(input, now: Self.fixedNow)
+        let twice = Config.migrated(once.raw, now: Self.fixedNow)
+
+        #expect(JSONValue.object(once.raw).semanticallyEqual(to: .object(twice.raw)))
     }
 
     @Test("Migration is idempotent (re-running changes nothing)")

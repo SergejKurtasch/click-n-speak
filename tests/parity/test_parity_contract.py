@@ -73,9 +73,9 @@ def test_python_migrates_every_supported_schema_without_unknown_key_loss() -> No
         assert isinstance(config, dict)
         versions.add(int(config.get("schema_version", 1)))
         migrated = migrate(config)
-        assert migrated["schema_version"] == 9
+        assert migrated["schema_version"] == 10
         assert migrated["future_extension"]["owner"] == "parity"
-    assert versions == set(range(1, 10))
+    assert versions == set(range(1, 11))
 
 
 def test_metric_thresholds_are_complete_and_fail_closed() -> None:

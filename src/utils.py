@@ -1087,6 +1087,16 @@ def migrate_config_to_v9(config: dict) -> dict:
     return config
 
 
+def migrate_config_to_v10(config: dict) -> dict:
+    """Add durable automatic replacement approval and rejection state."""
+    config.setdefault("approved_auto_replacements", [])
+    config.setdefault("rejected_replacements", [])
+    config.setdefault("replacement_policy_initialized", False)
+    if config.get("schema_version", 1) < 10:
+        config["schema_version"] = 10
+    return config
+
+
 def normalize_ukrainian_lang_codes(config: dict) -> dict:
     """Normalize legacy 'ua' codes to canonical internal 'uk'.
 

@@ -213,6 +213,18 @@ public enum ConfigMigrations {
         obj["schema_version"] = .int(9)
     }
 
+    // MARK: v10
+
+    /// `migrate_config_to_v10`: add durable replacement approval policy.
+    public static func migrateToV10(_ obj: inout JSONObject) {
+        obj.setDefault("approved_auto_replacements", .array([]))
+        obj.setDefault("rejected_replacements", .array([]))
+        obj.setDefault("replacement_policy_initialized", .bool(false))
+        if schemaVersion(obj) < 10 {
+            obj["schema_version"] = .int(10)
+        }
+    }
+
     // MARK: Ukrainian normalization
 
     /// `normalize_ukrainian_lang_codes`: fold legacy "ua" into "uk".

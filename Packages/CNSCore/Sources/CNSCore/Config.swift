@@ -31,7 +31,7 @@ public struct Config: Sendable, Equatable {
         return migrated(obj)
     }
 
-    /// Apply the migration chain v2→v9 + Ukrainian normalization + the extra
+    /// Apply the migration chain v2→v10 + Ukrainian normalization + the extra
     /// `setdefault`s from `load_config_data`. `now` and `promptBuilder` are
     /// injectable for deterministic testing against Python's output.
     public static func migrated(
@@ -49,6 +49,7 @@ public struct Config: Sendable, Equatable {
         ConfigMigrations.migrateToV7(&obj)
         ConfigMigrations.migrateToV8(&obj)
         ConfigMigrations.migrateToV9(&obj)
+        ConfigMigrations.migrateToV10(&obj)
         ConfigMigrations.normalizeUkrainianLangCodes(&obj)
         obj.setDefault("last_metrics_snapshot_ts", .null)
         obj.setDefault("notify_on_metrics", .bool(true))

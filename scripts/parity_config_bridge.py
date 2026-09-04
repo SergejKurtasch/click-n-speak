@@ -50,6 +50,7 @@ def migrate(config: dict[str, Any]) -> dict[str, Any]:
         config = utils.migrate_config_to_v7(config)
         config = utils.migrate_config_to_v8(config)
         config = utils.migrate_config_to_v9(config)
+        config = utils.migrate_config_to_v10(config)
         config = utils.normalize_ukrainian_lang_codes(config)
         config.setdefault("last_metrics_snapshot_ts", None)
         config.setdefault("notify_on_metrics", True)
