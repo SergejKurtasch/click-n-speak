@@ -467,7 +467,6 @@ public final class SetupWizard {
             return markSetupDone(result: .skipped)
         }
 
-        _ = permissions.requestAccessibilityPrompt()
         permissions.openAccessibilitySettings()
         state = .waitingForAccessibility
         return await waitForPermission(

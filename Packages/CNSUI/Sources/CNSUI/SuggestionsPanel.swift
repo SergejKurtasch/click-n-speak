@@ -23,10 +23,19 @@ public final class SuggestionsPanel: NSWindow, RefreshablePanel {
         center()
     }
 
-    public func refresh() { viewModel.load(resetSelection: true) }
-    public func refreshForPresentation() { refresh() }
+    public func refresh() { viewModel.load(resetSelection: false) }
+    public func refreshForPresentation() { viewModel.load(resetSelection: true) }
     var suggestionCountForTesting: Int {
         viewModel.suggestions.values.reduce(0) { $0 + $1.count }
+    }
+    var selectedSuggestionCountForTesting: Int { viewModel.selected.count }
+
+    func setSuggestionSelectedForTesting(language: String, term: String, selected: Bool) {
+        viewModel.setSelected(selected, language: language, term: term)
+    }
+
+    func acceptSelectedForTesting() {
+        viewModel.acceptSelected()
     }
 
 }
@@ -73,7 +82,6 @@ private struct SuggestionsView: View {
                     : "suggestions.select_all")) { viewModel.toggleAll() }
                     .disabled(viewModel.languages.isEmpty)
                 Button(viewModel.i18n.t("btn.add_selected")) { viewModel.acceptSelected() }
-                    .disabled(viewModel.selected.isEmpty)
                     .keyboardShortcut(.defaultAction)
                 Button(viewModel.i18n.t("suggestions.reject_selected"), role: .destructive) {
                     viewModel.rejectSelected()
@@ -143,7 +151,7 @@ private final class SuggestionsViewModel: ObservableObject {
         let source = item.source == "correction" ? "correction"
             : item.source == "both" ? "both" : "frequency"
         return i18n.t("suggestions.count_detail", [
-            "count": String(item.count),
+            "count": String(item.evidenceCount),
             "frequency": String(item.frequencyCount),
             "correction": String(item.correctionCount),
             "source": i18n.t("suggestions.source_\(source)"),
@@ -151,6 +159,12 @@ private final class SuggestionsViewModel: ObservableObject {
     }
 
     func toggleAll() { selected = allSelected ? [] : allIDs }
+
+    func setSelected(_ isSelected: Bool, language: String, term: String) {
+        let key = "\(language)||\(TermCanonicalizer.canonicalKey(term))"
+        if isSelected { selected.insert(key) }
+        else { selected.remove(key) }
+    }
 
     func accept(_ item: TermCandidate, language: String) {
         perform { try coordinator.acceptSuggestion(language: language, term: item.term) }
@@ -162,8 +176,8 @@ private final class SuggestionsViewModel: ObservableObject {
 
     func addAll() { perform { try coordinator.addAllPendingSuggestions() } }
 
-    func acceptSelected() { mutateSelected(accept: true) }
-    func rejectSelected() { mutateSelected(accept: false) }
+    func acceptSelected() { resolveSelection(rejectUnchecked: true) }
+    func rejectSelected() { resolveSelection(rejectUnchecked: false) }
 
     func enableAutoAndAddSelected() {
         let alert = NSAlert()
@@ -176,23 +190,34 @@ private final class SuggestionsViewModel: ObservableObject {
         alert.addButton(withTitle: i18n.t("suggestions.btn_confirm_auto"))
         alert.addButton(withTitle: i18n.t("btn.cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        mutateSelected(accept: true, reload: false)
+        resolveSelection(rejectUnchecked: true, reload: false)
         guard errorMessage == nil else { return }
         perform {
             try coordinator.setPromptUpdateMode("auto")
         }
     }
 
-    private func mutateSelected(accept: Bool, reload: Bool = true) {
-        do {
-            for language in languages {
-                for item in suggestions[language] ?? [] where selected.contains(id(item, language: language)) {
-                    if accept { try coordinator.acceptSuggestion(language: language, term: item.term) }
-                    else { try coordinator.rejectSuggestion(language: language, term: item.term) }
+    private func resolveSelection(rejectUnchecked: Bool, reload: Bool = true) {
+        let selectionSnapshot = selected
+        var accepted: [String: Set<String>] = [:]
+        var rejected: [String: Set<String>] = [:]
+
+        for language in languages {
+            for item in suggestions[language] ?? [] {
+                let isSelected = selectionSnapshot.contains(id(item, language: language))
+                if rejectUnchecked {
+                    if isSelected { accepted[language, default: []].insert(item.term) }
+                    else { rejected[language, default: []].insert(item.term) }
+                } else if isSelected {
+                    rejected[language, default: []].insert(item.term)
                 }
             }
+        }
+
+        do {
+            try coordinator.resolveSuggestions(accepting: accepted, rejecting: rejected)
             errorMessage = nil
-            if reload { load(resetSelection: true) }
+            if reload { load(resetSelection: false) }
         } catch {
             errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
         }

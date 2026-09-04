@@ -469,28 +469,63 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
 
     public func acceptSuggestion(language: String, term: String) throws {
         let lang = LanguageCode.normalize(language)
-        guard let item = pendingSuggestions()[lang]?.first(where: {
-            TermCanonicalizer.canonicalKey($0.term) == TermCanonicalizer.canonicalKey(term)
-        }) else { throw DictionaryCoordinatorError.suggestionNotFound }
-        var candidate = snapshot
-        addCandidate(item, language: lang, to: &candidate)
-        removePending(term: term, language: lang, from: &candidate)
-        try commit(candidate, promptLanguages: [lang], invalidations: [.terms, .suggestions])
+        try resolveSuggestions(accepting: [lang: [term]], rejecting: [:])
     }
 
     public func rejectSuggestion(language: String, term: String) throws {
         let lang = LanguageCode.normalize(language)
-        guard pendingSuggestions()[lang]?.contains(where: {
-            TermCanonicalizer.canonicalKey($0.term) == TermCanonicalizer.canonicalKey(term)
-        }) == true else { throw DictionaryCoordinatorError.suggestionNotFound }
+        try resolveSuggestions(accepting: [:], rejecting: [lang: [term]])
+    }
+
+    /// Applies one review decision in a single config transaction. This keeps
+    /// UI refresh callbacks from changing the selection while it is processed.
+    public func resolveSuggestions(
+        accepting accepted: [String: Set<String>],
+        rejecting rejected: [String: Set<String>]
+    ) throws {
+        let pending = pendingSuggestions()
+        let acceptedKeys = Dictionary(uniqueKeysWithValues: accepted.map { language, terms in
+            (LanguageCode.normalize(language), Set(terms.map(TermCanonicalizer.canonicalKey)))
+        })
+        let rejectedKeys = Dictionary(uniqueKeysWithValues: rejected.map { language, terms in
+            (LanguageCode.normalize(language), Set(terms.map(TermCanonicalizer.canonicalKey)))
+        })
+        guard !acceptedKeys.isEmpty || !rejectedKeys.isEmpty else { return }
+
         var candidate = snapshot
         var skipped = candidate.raw["skipped_terms"]?.objectValue ?? JSONObject()
-        var bucket = skipped[lang]?.objectValue ?? JSONObject()
-        bucket[TermCanonicalizer.canonicalKey(term)] = .int(Int64(phraseHistory.count()))
-        skipped[lang] = .object(bucket)
+        var acceptedLanguages = Set<String>()
+        var resolvedCount = 0
+        let currentPhraseCount = phraseHistory.count()
+
+        for (language, items) in pending {
+            let lang = LanguageCode.normalize(language)
+            let accepting = acceptedKeys[lang] ?? []
+            let rejecting = rejectedKeys[lang] ?? []
+            var skippedBucket = skipped[lang]?.objectValue ?? JSONObject()
+
+            for item in items {
+                let key = TermCanonicalizer.canonicalKey(item.term)
+                if accepting.contains(key) {
+                    addCandidate(item, language: lang, to: &candidate)
+                    removePending(term: item.term, language: lang, from: &candidate)
+                    acceptedLanguages.insert(lang)
+                    resolvedCount += 1
+                } else if rejecting.contains(key) {
+                    skippedBucket[key] = .int(Int64(currentPhraseCount))
+                    removePending(term: item.term, language: lang, from: &candidate)
+                    resolvedCount += 1
+                }
+            }
+
+            if !skippedBucket.keys.isEmpty { skipped[lang] = .object(skippedBucket) }
+        }
+
+        guard resolvedCount > 0 else { throw DictionaryCoordinatorError.suggestionNotFound }
         candidate.raw["skipped_terms"] = .object(skipped)
-        removePending(term: term, language: lang, from: &candidate)
-        try commit(candidate, promptLanguages: [], invalidations: [.suggestions])
+        var invalidations: DictionaryInvalidations = [.suggestions]
+        if !acceptedLanguages.isEmpty { invalidations.insert(.terms) }
+        try commit(candidate, promptLanguages: acceptedLanguages, invalidations: invalidations)
     }
 
     public func addAllPendingSuggestions() throws {
@@ -715,8 +750,8 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
                 for item in items { addCandidate(item, language: language, to: &candidate) }
             }
             try commit(candidate, promptLanguages: Set(merged.keys), invalidations: [.terms, .suggestions])
-        } else if activeMode == "suggest", !merged.isEmpty {
-            mergePending(merged, into: &candidate)
+        } else if activeMode == "suggest" {
+            replacePending(with: merged, in: &candidate)
             try commit(candidate, promptLanguages: [], invalidations: [.suggestions])
         } else {
             try commit(candidate, promptLanguages: [], invalidations: [])
@@ -902,7 +937,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
                 let key = TermCanonicalizer.canonicalKey(item.term)
                 byKey[key] = TermCandidate(
                     term: item.term,
-                    count: item.correctionCount * 10,
+                    count: item.correctionCount,
                     correctionCount: item.correctionCount,
                     frequencyCount: 0,
                     source: "correction"
@@ -913,7 +948,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
                 if let old = byKey[key] {
                     byKey[key] = TermCandidate(
                         term: old.term,
-                        count: old.correctionCount * 10 + item.count,
+                        count: old.correctionCount + item.count,
                         correctionCount: old.correctionCount,
                         frequencyCount: item.count,
                         source: "both"
@@ -929,7 +964,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
                 }
             }
             result[bucket] = Array(byKey.values).sorted {
-                if $0.count != $1.count { return $0.count > $1.count }
+                if $0.rankingScore != $1.rankingScore { return $0.rankingScore > $1.rankingScore }
                 return TermCanonicalizer.canonicalKey($0.term) < TermCanonicalizer.canonicalKey($1.term)
             }.prefix(15).map { $0 }
         }
@@ -952,36 +987,16 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             for item in items where seen.insert(TermCanonicalizer.canonicalKey(item.term)).inserted {
                 current.append(item)
             }
-            result[language] = current.sorted { $0.count > $1.count }
+            result[language] = current.sorted { $0.rankingScore > $1.rankingScore }
         }
         return result
     }
 
-    private func mergePending(_ candidates: [String: [TermCandidate]], into config: inout Config) {
-        var pending = config.raw["pending_suggestions"]?.objectValue ?? JSONObject()
-        for language in Set(pending.keys).union(candidates.keys) {
-            var byKey: [String: TermCandidate] = [:]
-            for value in pending[language]?.arrayValue ?? [] {
-                if let item = Self.decodeCandidate(value) {
-                    byKey[TermCanonicalizer.canonicalKey(item.term)] = item
-                }
-            }
-            for item in candidates[language] ?? [] {
-                let key = TermCanonicalizer.canonicalKey(item.term)
-                if let previous = byKey[key] {
-                    byKey[key] = TermCandidate(
-                        term: previous.term,
-                        count: max(previous.count, item.count),
-                        correctionCount: max(previous.correctionCount, item.correctionCount),
-                        frequencyCount: max(previous.frequencyCount, item.frequencyCount),
-                        source: previous.source == item.source ? previous.source : "both"
-                    )
-                } else {
-                    byKey[key] = item
-                }
-            }
-            let values = byKey.values.sorted { $0.count > $1.count }.map(encodeCandidate)
-            if values.isEmpty { pending.remove(language) } else { pending[language] = .array(values) }
+    private func replacePending(with candidates: [String: [TermCandidate]], in config: inout Config) {
+        var pending = JSONObject()
+        for (language, items) in candidates {
+            let values = items.sorted { $0.rankingScore > $1.rankingScore }.map(encodeCandidate)
+            if !values.isEmpty { pending[language] = .array(values) }
         }
         config.raw["pending_suggestions"] = .object(pending)
     }

@@ -39,7 +39,6 @@ public protocol PermissionServicing: AnyObject {
     func openMicrophoneSettings()
 
     func accessibilityGranted() -> Bool
-    @discardableResult func requestAccessibilityPrompt() -> Bool
     func openAccessibilitySettings()
 
     func allPermissionsGranted() -> Bool
@@ -107,15 +106,6 @@ public final class SystemPermissionService: PermissionServicing {
 
     public func accessibilityGranted() -> Bool {
         AXIsProcessTrusted()
-    }
-
-    @discardableResult
-    public func requestAccessibilityPrompt() -> Bool {
-        // The SDK exposes kAXTrustedCheckOptionPrompt as mutable global state,
-        // which Swift 6 rejects under strict concurrency. Its documented CFString
-        // value is stable and safe to construct locally.
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
     }
 
     public func openAccessibilitySettings() {

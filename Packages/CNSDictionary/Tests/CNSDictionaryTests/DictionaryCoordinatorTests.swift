@@ -66,12 +66,19 @@ final class DictionaryCoordinatorTests: XCTestCase {
 
         let first = await coordinator.recordConfirmation(confirmation)
         let duplicate = await coordinator.recordConfirmation(confirmation)
+        let repeated = await coordinator.recordConfirmation(DictionaryConfirmation(
+            sessionID: 43,
+            datasetRecord: record(),
+            finalText: "Sergej",
+            date: date.addingTimeInterval(1)
+        ))
         XCTAssertTrue(first.datasetSaved)
         XCTAssertTrue(first.correctionsUpdated)
         XCTAssertTrue(first.historySaved)
         XCTAssertTrue(duplicate.duplicate)
-        XCTAssertEqual(PhraseHistory(fileURL: paths.phraseHistoryFile).count(), 1)
-        XCTAssertEqual(try String(contentsOf: paths.datasetFile).split(separator: "\n").count, 1)
+        XCTAssertTrue(repeated.datasetSaved)
+        XCTAssertEqual(PhraseHistory(fileURL: paths.phraseHistoryFile).count(), 2)
+        XCTAssertEqual(try String(contentsOf: paths.datasetFile).split(separator: "\n").count, 2)
 
         try coordinator.setPromptUpdateMode("suggest")
         try await coordinator.runPromptAnalysis()
@@ -135,6 +142,7 @@ final class DictionaryCoordinatorTests: XCTestCase {
             switch mode {
             case "suggest":
                 XCTAssertEqual(coordinator.pendingSuggestions()["en"]?.map(\.term), ["SwiftUI"])
+                XCTAssertEqual(coordinator.pendingSuggestions()["en"]?.first?.count, 2)
                 XCTAssertTrue(UserTerms.activeTerms(coordinator.snapshot, lang: "en").isEmpty)
             case "auto":
                 XCTAssertEqual(UserTerms.activeTerms(coordinator.snapshot, lang: "en"), ["SwiftUI"])

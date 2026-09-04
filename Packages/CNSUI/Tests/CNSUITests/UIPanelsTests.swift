@@ -107,6 +107,66 @@ final class UIPanelsTests: XCTestCase {
         XCTAssertEqual(suggestions.suggestionCountForTesting, 0)
     }
 
+    func testSuggestionSelectionSurvivesRoutineRefreshAndResetsOnPresentation() throws {
+        var source = config
+        var first = JSONObject()
+        first["term"] = .string("Cognee")
+        first["count"] = .int(17)
+        first["frequency_count"] = .int(0)
+        first["correction_count"] = .int(17)
+        first["source"] = .string("correction")
+        var second = JSONObject()
+        second["term"] = .string("SwiftUI")
+        second["count"] = .int(5)
+        second["frequency_count"] = .int(0)
+        second["correction_count"] = .int(5)
+        second["source"] = .string("correction")
+        var pending = JSONObject()
+        pending["en"] = .array([.object(first), .object(second)])
+        source.raw["pending_suggestions"] = .object(pending)
+
+        let panel = SuggestionsPanel(coordinator: coordinator(config: source), i18n: i18n())
+        XCTAssertEqual(panel.selectedSuggestionCountForTesting, 2)
+        panel.setSuggestionSelectedForTesting(language: "en", term: "SwiftUI", selected: false)
+        panel.refresh()
+        XCTAssertEqual(panel.selectedSuggestionCountForTesting, 1)
+        panel.refreshForPresentation()
+        XCTAssertEqual(panel.selectedSuggestionCountForTesting, 2)
+    }
+
+    func testAddSelectedRejectsUncheckedSuggestionsAtomically() throws {
+        var source = config
+        var accepted = JSONObject()
+        accepted["term"] = .string("Cognee")
+        accepted["count"] = .int(17)
+        accepted["frequency_count"] = .int(0)
+        accepted["correction_count"] = .int(17)
+        accepted["source"] = .string("correction")
+        var rejected = JSONObject()
+        rejected["term"] = .string("Проверь")
+        rejected["count"] = .int(8)
+        rejected["frequency_count"] = .int(0)
+        rejected["correction_count"] = .int(8)
+        rejected["source"] = .string("correction")
+        var pending = JSONObject()
+        pending["en"] = .array([.object(accepted)])
+        pending["ru"] = .array([.object(rejected)])
+        source.raw["pending_suggestions"] = .object(pending)
+        let coordinator = coordinator(config: source)
+        var publishCount = 0
+        coordinator.onSnapshotChanged = { _, _ in publishCount += 1 }
+        let panel = SuggestionsPanel(coordinator: coordinator, i18n: i18n())
+        panel.setSuggestionSelectedForTesting(language: "ru", term: "Проверь", selected: false)
+
+        panel.acceptSelectedForTesting()
+
+        XCTAssertEqual(UserTerms.activeTerms(coordinator.snapshot, lang: "en"), ["Cognee"])
+        XCTAssertTrue(UserTerms.activeTerms(coordinator.snapshot, lang: "ru").isEmpty)
+        XCTAssertTrue(coordinator.pendingSuggestions().isEmpty)
+        XCTAssertNotNil(coordinator.snapshot.raw["skipped_terms"]?.objectValue?["ru"]?.objectValue?["проверь"])
+        XCTAssertEqual(publishCount, 1)
+    }
+
     func testLanguagePickerValidatesSupportedLanguagesAndAutoDetect() {
         var source = config
         source.raw["primary_language"] = .string("it")

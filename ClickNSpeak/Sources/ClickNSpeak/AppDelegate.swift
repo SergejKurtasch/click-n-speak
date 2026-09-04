@@ -291,7 +291,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.startHotkeyIfAllowed(log: log)
             self.menuController?.checkAndDownloadLocalModelIfNeeded()
-            self.menuController?.presentPendingSuggestionAlertIfNeeded()
+            do {
+                try await dictionaryCoordinator.runPromptAnalysis(onDemand: true)
+            } catch {
+                log("Startup prompt analysis failed: \(error.localizedDescription)")
+            }
+            self.menuController?.presentPendingSuggestionsIfNeeded()
         }
 
         // Background Update Check

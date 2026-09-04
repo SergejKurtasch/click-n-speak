@@ -85,7 +85,7 @@ public struct CorrectionIndex: Codable, Sendable {
 
     public static func defaultIndex() -> CorrectionIndex {
         CorrectionIndex(
-            schemaVersion: 3,
+            schemaVersion: 4,
             lastProcessedTs: nil,
             lastProcessedOffset: nil,
             processedRows: 0,
@@ -111,7 +111,13 @@ struct OpcodeChunk {
 func getOpcodes<T: Equatable>(_ a: [T], _ b: [T]) -> [OpcodeChunk] {
     let m = a.count
     let n = b.count
-    guard m > 0 || n > 0 else { return [] }
+    if m == 0 {
+        guard n > 0 else { return [] }
+        return [OpcodeChunk(type: .insert, i1: 0, i2: 0, j1: 0, j2: n)]
+    }
+    if n == 0 {
+        return [OpcodeChunk(type: .delete, i1: 0, i2: m, j1: 0, j2: 0)]
+    }
 
     var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
 
@@ -189,7 +195,13 @@ public enum CorrectionAnalyzer {
                 index.replacementPairs.removeValue(forKey: "ru")
             }
             if index.schemaVersion < 3 { cleanReplacementPairs(in: &index) }
-            index.schemaVersion = 3
+            if index.schemaVersion < 4 {
+                // Schema 4 counts a term/replacement at most once per dataset
+                // row. Rebuild from the append-only dataset instead of keeping
+                // inflated legacy counters.
+                return CorrectionIndex.defaultIndex()
+            }
+            index.schemaVersion = 4
             if index.insertedTerms["latin"] == nil { index.insertedTerms["latin"] = [:] }
             if index.insertedTerms["cyrillic"] == nil { index.insertedTerms["cyrillic"] = [:] }
             if index.replacementPairs["latin"] == nil { index.replacementPairs["latin"] = [] }
@@ -277,6 +289,31 @@ public enum CorrectionAnalyzer {
         return true
     }
 
+    private static func hasTechnicalShape(_ token: String) -> Bool {
+        let canon = TermCanonicalizer.canonicalize(token)
+        let uppercaseCount = canon.reduce(into: 0) { count, character in
+            if character.isUppercase { count += 1 }
+        }
+        return uppercaseCount >= 2
+            || canon.contains(where: \.isNumber)
+            || canon.contains(where: { "+#._@".contains($0) })
+    }
+
+    private static func stableReplacementTargets(
+        in index: CorrectionIndex,
+        minimumCount: Int = 2
+    ) -> [String: Set<String>] {
+        var result: [String: Set<String>] = [:]
+        for bucket in ["latin", "cyrillic"] {
+            for pair in index.replacementPairs[bucket] ?? [] where pair.count >= minimumCount {
+                let targetTokens = tokenize(pair.to)
+                guard targetTokens.count == 1, let target = targetTokens.first else { continue }
+                result[bucket, default: []].insert(TermCanonicalizer.canonicalKey(target))
+            }
+        }
+        return result
+    }
+
     private static func upsertInserted(index: inout CorrectionIndex, token: String, ts: String, weight: Double) {
         let canon = TermCanonicalizer.canonicalize(token)
         guard let lang = langBucket(canon), isValidTerm(canon) else { return }
@@ -338,7 +375,14 @@ public enum CorrectionAnalyzer {
         index.replacementPairs[lang] = pairs
     }
 
-    private static func processDiff(index: inout CorrectionIndex, sourceText: String, userText: String, ts: String) {
+    private static func processDiff(
+        index: inout CorrectionIndex,
+        sourceText: String,
+        userText: String,
+        ts: String,
+        countedInserted: inout Set<String>,
+        countedReplacements: inout Set<String>
+    ) {
         let srcTokens = tokenize(sourceText)
         let usrTokens = tokenize(userText)
         let srcLower = Set(srcTokens.map(normCmp))
@@ -351,12 +395,27 @@ public enum CorrectionAnalyzer {
 
             if op.type == .insert || op.type == .replace {
                 for t in toToks {
+                    let canonical = TermCanonicalizer.canonicalize(t)
+                    guard let bucket = langBucket(canonical), isValidTerm(canonical) else { continue }
+                    let observationKey = "\(bucket)||\(TermCanonicalizer.canonicalKey(canonical))"
+                    guard countedInserted.insert(observationKey).inserted else { continue }
                     let weight = srcLower.contains(normCmp(t)) ? 0.5 : 1.0
-                    upsertInserted(index: &index, token: t, ts: ts, weight: weight)
+                    upsertInserted(index: &index, token: canonical, ts: ts, weight: weight)
                 }
             }
             if op.type == .replace {
-                upsertReplacementPair(index: &index, fromTokens: Array(srcTokens[op.i1..<op.i2]), toTokens: toToks, ts: ts)
+                let fromTokens = Array(srcTokens[op.i1..<op.i2])
+                let fromKey = TermCanonicalizer.canonicalKey(fromTokens.joined(separator: " "))
+                let toKey = TermCanonicalizer.canonicalKey(toToks.joined(separator: " "))
+                let observationKey = "\(fromKey)||\(toKey)"
+                if countedReplacements.insert(observationKey).inserted {
+                    upsertReplacementPair(
+                        index: &index,
+                        fromTokens: fromTokens,
+                        toTokens: toToks,
+                        ts: ts
+                    )
+                }
             }
         }
     }
@@ -429,9 +488,25 @@ public enum CorrectionAnalyzer {
 
         for (_, tsStr, raw, base, userFinal) in records {
             index.processedRows += 1
-            processDiff(index: &index, sourceText: base, userText: userFinal, ts: tsStr)
+            var countedInserted = Set<String>()
+            var countedReplacements = Set<String>()
+            processDiff(
+                index: &index,
+                sourceText: base,
+                userText: userFinal,
+                ts: tsStr,
+                countedInserted: &countedInserted,
+                countedReplacements: &countedReplacements
+            )
             if normCmp(raw) != normCmp(base) {
-                processDiff(index: &index, sourceText: raw, userText: userFinal, ts: tsStr)
+                processDiff(
+                    index: &index,
+                    sourceText: raw,
+                    userText: userFinal,
+                    ts: tsStr,
+                    countedInserted: &countedInserted,
+                    countedReplacements: &countedReplacements
+                )
             }
             index.lastProcessedTs = tsStr
         }
@@ -508,6 +583,7 @@ public enum CorrectionAnalyzer {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let formatterNoFrac = ISO8601DateFormatter()
         formatterNoFrac.formatOptions = [.withInternetDateTime]
+        let stableTargets = stableReplacementTargets(in: index)
 
         for lang in ["latin", "cyrillic"] {
             let existing = VocabProvider.existingTermsUnionForScript(existingLowerByLang, script: lang)
@@ -516,11 +592,15 @@ public enum CorrectionAnalyzer {
             var items: [TermCandidate] = []
 
             for (_, payload) in terms {
-                if payload.count < (minCorrectionCount[lang] ?? 2) { continue }
+                let minimumCount = minCorrectionCount[lang] ?? 2
+                if payload.weightedCount < Double(minimumCount) { continue }
                 if existing.contains(TermCanonicalizer.canonicalKey(payload.term)) { continue }
                 let key = TermCanonicalizer.canonicalKey(payload.term)
                 let skippedAt = skipped[key] ?? -1
                 if skippedAt >= 0, currentPhraseCount - skippedAt < cooldownPhrases { continue }
+                if !hasTechnicalShape(payload.term), stableTargets[lang]?.contains(key) != true {
+                    continue
+                }
 
                 var seenDt: Date? = formatter.date(from: payload.lastSeen.replacingOccurrences(of: "Z", with: "+00:00"))
                 if seenDt == nil { seenDt = formatterNoFrac.date(from: payload.lastSeen.replacingOccurrences(of: "Z", with: "+00:00")) }

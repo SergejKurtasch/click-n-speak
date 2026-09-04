@@ -3,12 +3,6 @@ import CNSCore
 import CNSDictionary
 import CNSTranscription
 
-struct PendingSuggestionAlertModel: Equatable {
-    let title: String
-    let body: String
-    let buttons: [String]
-}
-
 /// Owns the `NSStatusItem` and builds the full menu tree. The native menu keeps
 /// Python feature parity while consolidating model/runtime controls where the
 /// Swift implementation can expose factual readiness and download state.
@@ -183,76 +177,19 @@ public final class MenuBarController: NSObject {
         }
     }
 
-    public func presentPendingSuggestionAlertIfNeeded() {
+    public func presentPendingSuggestionsIfNeeded() {
         guard let dictionaryCoordinator else { return }
         let pending = dictionaryCoordinator.pendingSuggestions()
         let count = pending.values.reduce(0) { $0 + $1.count }
-        guard Self.shouldPresentPendingSuggestionAlert(config: config, pendingCount: count) else {
+        guard Self.shouldPresentPendingSuggestions(config: config, pendingCount: count) else {
             return
         }
-        let model = Self.pendingSuggestionAlertModel(pending: pending, i18n: i18n)
-        let alert = NSAlert()
-        alert.messageText = model.title
-        alert.informativeText = model.body
-        for title in model.buttons {
-            alert.addButton(withTitle: title)
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            Task { @MainActor [weak self, weak dictionaryCoordinator] in
-                await Task.yield()
-                guard let self, let dictionaryCoordinator else { return }
-                self.presentSuggestionsPanel(using: dictionaryCoordinator)
-            }
-        case .alertThirdButtonReturn:
-            do {
-                try dictionaryCoordinator.addAllPendingSuggestions()
-                try dictionaryCoordinator.setPromptUpdateMode("auto")
-            } catch {
-                log("Enabling automatic dictionary updates failed: \(error.localizedDescription)")
-            }
-        default:
-            break
-        }
+        presentSuggestionsPanel(using: dictionaryCoordinator)
     }
 
-    static func shouldPresentPendingSuggestionAlert(config: Config, pendingCount: Int) -> Bool {
+    static func shouldPresentPendingSuggestions(config: Config, pendingCount: Int) -> Bool {
         let mode = config.raw["prompt_update_mode"]?.stringValue ?? "suggest"
         return pendingCount > 0 && mode == "suggest"
-    }
-
-    static func pendingSuggestionAlertModel(
-        pending: [String: [TermCandidate]],
-        i18n: I18n
-    ) -> PendingSuggestionAlertModel {
-        let candidates = pending.values.flatMap { $0 }.sorted { left, right in
-            if left.count != right.count {
-                return left.count > right.count
-            }
-            return left.term.localizedCaseInsensitiveCompare(right.term) == .orderedAscending
-        }
-        var preview = candidates.prefix(3)
-            .map { "\($0.term) (\($0.count)×)" }
-            .joined(separator: ", ")
-        if candidates.count > 3 {
-            preview += i18n.t(
-                "dialog.suggestions_preview_more",
-                ["n": String(candidates.count - 3)]
-            )
-        }
-        return PendingSuggestionAlertModel(
-            title: i18n.t("suggestions.window_title"),
-            body: i18n.t(
-                "dialog.suggestions_body_detailed",
-                ["total": String(candidates.count), "preview": preview]
-            ),
-            buttons: [
-                i18n.t("btn.view"),
-                i18n.t("btn.remind_later"),
-                i18n.t("btn.auto_mode"),
-            ]
-        )
     }
 
     private func presentSuggestionsPanel(using coordinator: DictionaryCoordinator) {

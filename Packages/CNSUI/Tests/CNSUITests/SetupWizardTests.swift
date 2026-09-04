@@ -17,7 +17,6 @@ private final class FakePermissionService: PermissionServicing {
     private(set) var markCount = 0
     private(set) var openedMicrophoneSettings = 0
     private(set) var openedAccessibilitySettings = 0
-    private(set) var accessibilityPromptRequests = 0
 
     func isSetupDone() -> Bool { setupDone }
 
@@ -45,11 +44,6 @@ private final class FakePermissionService: PermissionServicing {
     }
 
     func accessibilityGranted() -> Bool { accessibility }
-
-    func requestAccessibilityPrompt() -> Bool {
-        accessibilityPromptRequests += 1
-        return accessibility
-    }
 
     func openAccessibilitySettings() {
         openedAccessibilitySettings += 1
@@ -161,7 +155,7 @@ struct SetupWizardTests {
         #expect(permissions.markCount == 1)
     }
 
-    @Test("Accessibility polling completes without a modal run loop")
+    @Test("Accessibility polling opens settings without a native prompt")
     func accessibilityTransition() async {
         let permissions = FakePermissionService()
         permissions.accessibility = false
@@ -182,7 +176,6 @@ struct SetupWizardTests {
         _ = await grantTask.value
 
         #expect(result == .completed)
-        #expect(permissions.accessibilityPromptRequests == 1)
         #expect(permissions.openedAccessibilitySettings == 1)
         #expect(permissions.markCount == 1)
     }

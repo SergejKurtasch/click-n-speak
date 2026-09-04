@@ -186,64 +186,16 @@ struct MenuStructureTests {
         ])
     }
 
-    @Test("Pending suggestion alert previews candidates and opens review")
-    func pendingSuggestionAlertPreview() throws {
-        let resources = repoResources()
-        let i18n = I18n.load("en", localesDirectory: resources.localesDirectory)
-        let pending = [
-            "ru": [
-                TermCandidate(
-                    term: "Проверь",
-                    count: 8,
-                    correctionCount: 8,
-                    frequencyCount: 0,
-                    source: "correction"
-                ),
-                TermCandidate(
-                    term: "Проанализируй",
-                    count: 19,
-                    correctionCount: 19,
-                    frequencyCount: 0,
-                    source: "correction"
-                ),
-                TermCandidate(
-                    term: "какие-то",
-                    count: 8,
-                    correctionCount: 8,
-                    frequencyCount: 0,
-                    source: "correction"
-                ),
-            ],
-            "en": [
-                TermCandidate(
-                    term: "Cognee",
-                    count: 17,
-                    correctionCount: 17,
-                    frequencyCount: 0,
-                    source: "correction"
-                ),
-            ],
-        ]
-
-        let model = MenuBarController.pendingSuggestionAlertModel(pending: pending, i18n: i18n)
-
-        #expect(model.title == "New terms for dictionary")
-        #expect(model.body.contains("Проанализируй (19×)"))
-        #expect(model.body.contains("Cognee (17×)"))
-        #expect(model.body.contains("and 1 more"))
-        #expect(model.buttons == ["View", "Remind later", "Auto mode"])
-    }
-
-    @Test("Pending suggestion alert is limited to suggest mode")
-    func pendingSuggestionAlertModeGuard() throws {
+    @Test("Pending suggestion panel is limited to suggest mode")
+    func pendingSuggestionPanelModeGuard() throws {
         let suggest = Config.migrated(try JSONValue.parse(#"{"prompt_update_mode":"suggest"}"#).objectValue ?? JSONObject())
         let automatic = Config.migrated(try JSONValue.parse(#"{"prompt_update_mode":"auto"}"#).objectValue ?? JSONObject())
         let disabled = Config.migrated(try JSONValue.parse(#"{"prompt_update_mode":"disabled"}"#).objectValue ?? JSONObject())
 
-        #expect(MenuBarController.shouldPresentPendingSuggestionAlert(config: suggest, pendingCount: 4))
-        #expect(!MenuBarController.shouldPresentPendingSuggestionAlert(config: suggest, pendingCount: 0))
-        #expect(!MenuBarController.shouldPresentPendingSuggestionAlert(config: automatic, pendingCount: 4))
-        #expect(!MenuBarController.shouldPresentPendingSuggestionAlert(config: disabled, pendingCount: 4))
+        #expect(MenuBarController.shouldPresentPendingSuggestions(config: suggest, pendingCount: 4))
+        #expect(!MenuBarController.shouldPresentPendingSuggestions(config: suggest, pendingCount: 0))
+        #expect(!MenuBarController.shouldPresentPendingSuggestions(config: automatic, pendingCount: 4))
+        #expect(!MenuBarController.shouldPresentPendingSuggestions(config: disabled, pendingCount: 4))
     }
 
     @Test("Menu renders in Russian too")

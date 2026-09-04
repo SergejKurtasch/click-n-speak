@@ -5,6 +5,32 @@ macOS menu-bar app: press hotkey → record speech → Whisper transcribes → o
 
 ---
 
+## Native Swift application
+
+The actively packaged application is the SwiftPM implementation in `ClickNSpeak/`, assembled at `dist/swift/Click-n-speak.app`. The Python implementation under `main.py` / `src/` remains the behavioral reference and compatibility implementation during cutover.
+
+| Package / file | Responsibility |
+|---|---|
+| `ClickNSpeak/Sources/ClickNSpeak/AppDelegate.swift` | Composition root, menu/runtime state wiring, lifecycle |
+| `ClickNSpeak/Sources/ClickNSpeak/AppRuntimeCoordinator.swift` | Transactional STT/editor runtime activation and rollback |
+| `Packages/CNSCore` | Config, paths, permissions, model registry/downloads, updates, telemetry, shared protocols |
+| `Packages/CNSAudio` | AVAudioEngine capture and speech chunking |
+| `Packages/CNSTranscription` | Local whisper.cpp and cloud STT backends, routing, file transcription |
+| `Packages/CNSEditors` | Local Qwen and Gemini AI editors, timeout/gating policy |
+| `Packages/CNSDictionary` | Terms, suggestions, correction/frequency analysis, metrics, persistence |
+| `Packages/CNSSession` | Recording → transcription → editor → popup → injection state machine |
+| `Packages/CNSInput` | Carbon hotkey and text delivery |
+| `Packages/CNSUI` | Menu bar, setup wizard, preview and management panels |
+
+Build and verification:
+
+- `bash scripts/swift_build_app.sh release` builds, assembles, ad-hoc signs, verifies, and writes `dist/swift/Click-n-speak.app`.
+- Non-production builds reset Accessibility and Microphone TCC records for `com.sergej.clicknspeak` after signing because an ad-hoc rebuild changes its designated requirement. Set `CNS_RESET_TCC_AFTER_BUILD=0` only for an explicit local opt-out; production builds always preserve TCC.
+- `bash scripts/swift_verify.sh` runs all Swift package and application tests. Real-model suites remain opt-in through `CNS_RUN_MODEL_TESTS` / `CNS_RUN_EDITOR_MODEL_TESTS`.
+- `bash scripts/swift_acceptance.sh` runs the Python-backed parity acceptance orchestrator from `venv`.
+
+---
+
 ## Process architecture
 
 ```
