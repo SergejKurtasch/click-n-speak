@@ -58,21 +58,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.notificationService = notificationService
 
         let configExisted = FileManager.default.fileExists(atPath: paths.configFile.path)
-        let config = Config.load(from: paths.configFile)
+        let loadedConfig = Config.load(from: paths.configFile)
         // Persist a migrated default on first run (Python copies config.example.json).
         if !configExisted {
-            try? config.saveAtomically(to: paths.configFile)
+            try? loadedConfig.saveAtomically(to: paths.configFile)
         }
 
         let resources = AppResources.resolve()
-        let i18n = I18n.load(config.primaryLanguage, localesDirectory: resources.localesDirectory)
         let phraseHistory = PhraseHistory(fileURL: paths.phraseHistoryFile, log: log)
-        let dictionaryCoordinator = DictionaryCoordinator(
-            config: config,
+        let preparedDictionary = Self.prepareDictionaryConfiguration(
+            config: loadedConfig,
             paths: paths,
             phraseHistory: phraseHistory,
             log: log
         )
+        let dictionaryCoordinator = preparedDictionary.coordinator
+        let config = preparedDictionary.config
+        let i18n = I18n.load(config.primaryLanguage, localesDirectory: resources.localesDirectory)
         self.dictionaryCoordinator = dictionaryCoordinator
         let initialMenuState = MenuState(
             config: config,
@@ -304,6 +306,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in
             Task { await self?.checkUpdatesInBackground(log: log) }
         }
+    }
+
+    /// Dictionary bootstrap may persist policy decisions during initialization.
+    /// Its resulting snapshot must be the sole startup config used by every
+    /// downstream coordinator, otherwise runtime activation can overwrite those
+    /// decisions with the stale value originally loaded from disk.
+    static func prepareDictionaryConfiguration(
+        config: Config,
+        paths: Paths,
+        phraseHistory: any PhraseHistoryProviding,
+        log: @escaping @Sendable (String) -> Void = { _ in }
+    ) -> (coordinator: DictionaryCoordinator, config: Config) {
+        let coordinator = DictionaryCoordinator(
+            config: config,
+            paths: paths,
+            phraseHistory: phraseHistory,
+            log: log
+        )
+        return (coordinator, coordinator.snapshot)
     }
 
     private func checkUpdatesInBackground(log: @escaping @Sendable (String) -> Void) async {

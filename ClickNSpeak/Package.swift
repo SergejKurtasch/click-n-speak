@@ -30,6 +30,7 @@ let package = Package(
             dependencies: [
                 "ClickNSpeak",
                 .product(name: "CNSCore", package: "CNSCore"),
+                .product(name: "CNSDictionary", package: "CNSDictionary"),
                 .product(name: "CNSTranscription", package: "CNSTranscription"),
                 .product(name: "CNSEditors", package: "CNSEditors"),
             ],

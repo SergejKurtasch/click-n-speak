@@ -107,6 +107,17 @@ public struct CorrectionIndex: Codable, Sendable {
     }
 }
 
+public enum CorrectionIndexReadError: LocalizedError, Sendable, Equatable {
+    case rebuildRequired(schemaVersion: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .rebuildRequired(schemaVersion):
+            "Correction index schema \(schemaVersion) must be rebuilt from the dataset"
+        }
+    }
+}
+
 // MARK: - Diff Opcodes
 enum Opcode {
     case equal, delete, insert, replace
@@ -233,46 +244,38 @@ public enum CorrectionAnalyzer {
     }
 
     public static func readIndex(at path: URL) -> CorrectionIndex {
+        (try? readIndexThrowing(at: path)) ?? CorrectionIndex.defaultIndex()
+    }
+
+    /// Loads a trustworthy schema-5 index. Older schemas require a full
+    /// dataset rebuild because their counters or row-age metadata cannot be
+    /// recovered from the index alone.
+    public static func readIndexThrowing(at path: URL) throws -> CorrectionIndex {
         guard FileManager.default.fileExists(atPath: path.path) else {
             return CorrectionIndex.defaultIndex()
         }
-        guard let data = try? Data(contentsOf: path) else {
-            return CorrectionIndex.defaultIndex()
+        let data = try Data(contentsOf: path)
+        var index = try JSONDecoder().decode(CorrectionIndex.self, from: data)
+        if index.schemaVersion < 2 {
+            if index.insertedTerms["latin"] == nil { index.insertedTerms["latin"] = index.insertedTerms["en"] ?? [:] }
+            if index.insertedTerms["cyrillic"] == nil { index.insertedTerms["cyrillic"] = index.insertedTerms["ru"] ?? [:] }
+            if index.replacementPairs["latin"] == nil { index.replacementPairs["latin"] = index.replacementPairs["en"] ?? [] }
+            if index.replacementPairs["cyrillic"] == nil { index.replacementPairs["cyrillic"] = index.replacementPairs["ru"] ?? [] }
+            index.insertedTerms.removeValue(forKey: "en")
+            index.insertedTerms.removeValue(forKey: "ru")
+            index.replacementPairs.removeValue(forKey: "en")
+            index.replacementPairs.removeValue(forKey: "ru")
         }
-
-        do {
-            var index = try JSONDecoder().decode(CorrectionIndex.self, from: data)
-            if index.schemaVersion < 2 {
-                if index.insertedTerms["latin"] == nil { index.insertedTerms["latin"] = index.insertedTerms["en"] ?? [:] }
-                if index.insertedTerms["cyrillic"] == nil { index.insertedTerms["cyrillic"] = index.insertedTerms["ru"] ?? [:] }
-                if index.replacementPairs["latin"] == nil { index.replacementPairs["latin"] = index.replacementPairs["en"] ?? [] }
-                if index.replacementPairs["cyrillic"] == nil { index.replacementPairs["cyrillic"] = index.replacementPairs["ru"] ?? [] }
-                index.insertedTerms.removeValue(forKey: "en")
-                index.insertedTerms.removeValue(forKey: "ru")
-                index.replacementPairs.removeValue(forKey: "en")
-                index.replacementPairs.removeValue(forKey: "ru")
-            }
-            if index.schemaVersion < 3 { cleanReplacementPairs(in: &index) }
-            if index.schemaVersion < 4 {
-                // Schema 4 counts a term/replacement at most once per dataset
-                // row. Rebuild from the append-only dataset instead of keeping
-                // inflated legacy counters.
-                return CorrectionIndex.defaultIndex()
-            }
-            if index.schemaVersion < 5 {
-                // Schema 5 records replacement last_seen_row for deterministic
-                // 300-dictation expiry. Rebuild rather than guessing row ages.
-                return CorrectionIndex.defaultIndex()
-            }
-            index.schemaVersion = 5
-            if index.insertedTerms["latin"] == nil { index.insertedTerms["latin"] = [:] }
-            if index.insertedTerms["cyrillic"] == nil { index.insertedTerms["cyrillic"] = [:] }
-            if index.replacementPairs["latin"] == nil { index.replacementPairs["latin"] = [] }
-            if index.replacementPairs["cyrillic"] == nil { index.replacementPairs["cyrillic"] = [] }
-            return index
-        } catch {
-            return CorrectionIndex.defaultIndex()
+        if index.schemaVersion < 3 { cleanReplacementPairs(in: &index) }
+        guard index.schemaVersion >= 5 else {
+            throw CorrectionIndexReadError.rebuildRequired(schemaVersion: index.schemaVersion)
         }
+        index.schemaVersion = 5
+        if index.insertedTerms["latin"] == nil { index.insertedTerms["latin"] = [:] }
+        if index.insertedTerms["cyrillic"] == nil { index.insertedTerms["cyrillic"] = [:] }
+        if index.replacementPairs["latin"] == nil { index.replacementPairs["latin"] = [] }
+        if index.replacementPairs["cyrillic"] == nil { index.replacementPairs["cyrillic"] = [] }
+        return index
     }
 
     private static func cleanReplacementPairs(in index: inout CorrectionIndex) {
@@ -515,9 +518,19 @@ public enum CorrectionAnalyzer {
         now: Date = Date(),
         pruneStale: Bool = true
     ) throws -> CorrectionIndex {
-        var index = readIndex(at: indexPath)
+        let datasetExists = FileManager.default.fileExists(atPath: datasetPath.path)
+        var index: CorrectionIndex
+        if datasetExists {
+            // Any unreadable/obsolete index can be rebuilt from the canonical
+            // append-only dataset without losing observations.
+            index = (try? readIndexThrowing(at: indexPath)) ?? CorrectionIndex.defaultIndex()
+        } else {
+            // Without the dataset, silently replacing an existing bad index
+            // would make one-time replacement approvals unrecoverable.
+            index = try readIndexThrowing(at: indexPath)
+        }
 
-        guard FileManager.default.fileExists(atPath: datasetPath.path) else {
+        guard datasetExists else {
             if pruneStale, pruneStaleReplacementPairs(in: &index, now: now) > 0 {
                 try writeIndex(index, to: indexPath)
             }

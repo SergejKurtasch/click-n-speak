@@ -5,6 +5,10 @@ import XCTest
 
 @MainActor
 final class DictionaryCoordinatorTests: XCTestCase {
+    private enum FixtureError: Error {
+        case correctionIndexWriteFailed
+    }
+
     private func makePaths(_ name: String = UUID().uuidString) -> Paths {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("cns-dictionary-\(name)", isDirectory: true)
@@ -245,6 +249,145 @@ final class DictionaryCoordinatorTests: XCTestCase {
         XCTAssertEqual(second.replacementSections().rejected.map(\.from), ["Cogni"])
     }
 
+    func testPolicyInitializationRetriesWhenExistingIndexCannotBeRebuilt() throws {
+        for fixture in ["malformed", "schema4"] {
+            let paths = makePaths(fixture)
+            try paths.ensureDataDirectory()
+            if fixture == "malformed" {
+                try Data("{not-json".utf8).write(to: paths.correctionsFile)
+            } else {
+                var index = CorrectionIndex.defaultIndex()
+                index.schemaVersion = 4
+                try CorrectionAnalyzer.writeIndex(index, to: paths.correctionsFile)
+            }
+            var pending = makeConfig()
+            pending.raw["replacement_policy_initialized"] = .bool(false)
+
+            let coordinator = makeCoordinator(config: pending, paths: paths)
+
+            XCTAssertFalse(
+                coordinator.snapshot.raw["replacement_policy_initialized"]?.boolValue ?? false,
+                "Fixture \(fixture) must remain eligible for a later retry"
+            )
+        }
+    }
+
+    func testPolicyInitializationKeepsHighestCountTargetForConflictingSource() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let timestamp = ISOTimestamp.now(now)
+        let paths = makePaths()
+        try writeReplacementIndex([
+            ReplacementPair(from: "Cogni", to: "Cogney", count: 3, lastSeen: timestamp, lastSeenRow: 10),
+            ReplacementPair(from: "Cogni", to: "Cognee", count: 8, lastSeen: timestamp, lastSeenRow: 10),
+        ], processedRows: 10, to: paths.correctionsFile)
+        var pending = makeConfig()
+        pending.raw["replacement_policy_initialized"] = .bool(false)
+
+        let coordinator = makeCoordinator(config: pending, paths: paths, clock: { now })
+
+        XCTAssertEqual(coordinator.replacementSections().active.map(\.to), ["Cognee"])
+    }
+
+    func testReplacementSectionPruningIsSerializedWithConfirmationUpdates() async throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let paths = makePaths()
+        try writeReplacementIndex([
+            ReplacementPair(from: "old", to: "Old", count: 4, lastSeen: "2000-01-01T00:00:00Z", lastSeenRow: 10),
+        ], processedRows: 10, to: paths.correctionsFile)
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths, clock: { now })
+
+        XCTAssertTrue(coordinator.replacementSections().candidates.isEmpty)
+        let persisted = await coordinator.recordConfirmation(DictionaryConfirmation(
+            sessionID: 77,
+            datasetRecord: record(),
+            finalText: "Sergej",
+            date: now
+        ))
+        XCTAssertTrue(persisted.correctionsUpdated)
+
+        var index = CorrectionAnalyzer.readIndex(at: paths.correctionsFile)
+        for _ in 0..<50 where index.replacementPairs["latin"]?.contains(where: { $0.from == "old" }) == true {
+            try await Task.sleep(for: .milliseconds(10))
+            index = CorrectionAnalyzer.readIndex(at: paths.correctionsFile)
+        }
+        XCTAssertFalse(index.replacementPairs["latin"]?.contains(where: { $0.from == "old" }) ?? true)
+        XCTAssertTrue(index.replacementPairs["latin"]?.contains(where: {
+            $0.from == "search" && $0.to == "Sergej"
+        }) ?? false)
+        XCTAssertEqual(index.processedRows, 11)
+    }
+
+    func testPolicyInitializationFinalizesOnlyAfterPrunedIndexIsPersisted() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let paths = makePaths()
+        try writeReplacementIndex([
+            ReplacementPair(from: "fresh", to: "Fresh", count: 3, lastSeen: ISOTimestamp.now(now), lastSeenRow: 10),
+            ReplacementPair(from: "old", to: "Old", count: 3, lastSeen: "2000-01-01T00:00:00Z", lastSeenRow: 10),
+        ], processedRows: 10, to: paths.correctionsFile)
+        var pending = makeConfig()
+        pending.raw["replacement_policy_initialized"] = .bool(false)
+
+        let coordinator = DictionaryCoordinator(
+            config: pending,
+            paths: paths,
+            phraseHistory: PhraseHistory(fileURL: paths.phraseHistoryFile),
+            clock: { now },
+            correctionIndexWriter: { _, _ in throw FixtureError.correctionIndexWriteFailed }
+        )
+
+        XCTAssertFalse(coordinator.snapshot.raw["replacement_policy_initialized"]?.boolValue ?? true)
+        XCTAssertEqual(coordinator.snapshot.raw["approved_auto_replacements"]?.arrayValue?.count, 2)
+        let persisted = Config.load(from: paths.configFile)
+        XCTAssertFalse(persisted.raw["replacement_policy_initialized"]?.boolValue ?? true)
+        XCTAssertEqual(persisted.raw["approved_auto_replacements"]?.arrayValue?.count, 2)
+    }
+
+    func testReplacementSectionsSortEveryStateByCountThenCanonicalKey() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let timestamp = ISOTimestamp.now(now)
+        let paths = makePaths()
+        try writeReplacementIndex([
+            ReplacementPair(from: "active-low", to: "Active Low", count: 2, lastSeen: timestamp, lastSeenRow: 10),
+            ReplacementPair(from: "active-high", to: "Active High", count: 7, lastSeen: timestamp, lastSeenRow: 10),
+            ReplacementPair(from: "reject-low", to: "Reject Low", count: 3, lastSeen: timestamp, lastSeenRow: 10),
+            ReplacementPair(from: "reject-high", to: "Reject High", count: 9, lastSeen: timestamp, lastSeenRow: 10),
+        ], processedRows: 10, to: paths.correctionsFile)
+        var config = makeConfig()
+        config.raw["manual_replacements"] = .array([
+            replacementDecision(from: "active-low", to: "Active Low", timestampKey: "added_at", timestamp: timestamp),
+            replacementDecision(from: "active-high", to: "Active High", timestampKey: "added_at", timestamp: timestamp),
+        ])
+        config.raw["rejected_replacements"] = .array([
+            replacementDecision(from: "reject-low", to: "Reject Low", timestampKey: "rejected_at", timestamp: timestamp),
+            replacementDecision(from: "reject-high", to: "Reject High", timestampKey: "rejected_at", timestamp: timestamp),
+        ])
+        let coordinator = makeCoordinator(config: config, paths: paths, clock: { now })
+
+        let sections = coordinator.replacementSections()
+
+        XCTAssertEqual(sections.active.map(\.from), ["active-high", "active-low"])
+        XCTAssertEqual(sections.rejected.map(\.from), ["reject-high", "reject-low"])
+    }
+
+    func testConflictingApprovedConfigReturnsErrorInsteadOfTrapping() throws {
+        let timestamp = ISOTimestamp.now(Date(timeIntervalSince1970: 2_000_000_000))
+        var config = makeConfig()
+        config.raw["approved_auto_replacements"] = .array([
+            replacementDecision(from: "api", to: "API", timestampKey: "approved_at", timestamp: timestamp),
+            replacementDecision(from: "api", to: "SDK", timestampKey: "approved_at", timestamp: timestamp),
+        ])
+        let coordinator = makeCoordinator(config: config, paths: makePaths())
+
+        XCTAssertThrowsError(try coordinator.saveManualReplacements([("other", "Other")])) { error in
+            guard let typed = error as? DictionaryCoordinatorError else {
+                return XCTFail("Expected DictionaryCoordinatorError, got \(error)")
+            }
+            guard case .conflictingReplacement = typed else {
+                return XCTFail("Expected conflictingReplacement, got \(typed)")
+            }
+        }
+    }
+
     func testApproveRejectAndRestorePersistPolicyTransitions() throws {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let timestamp = ISOTimestamp.now(now)
@@ -368,5 +511,20 @@ final class DictionaryCoordinatorTests: XCTestCase {
         let nextMetrics = try await coordinator.runMetricsIfDue()
         XCTAssertNotNil(nextMetrics)
         XCTAssertEqual(Metrics.loadHistory(at: paths.metricsHistoryFile).count, 2)
+    }
+
+    func testDailyMaintenanceContinuesWhenReplacementPruningFails() async throws {
+        let paths = makePaths()
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths)
+        try paths.ensureDataDirectory()
+        try Data("{not-json".utf8).write(to: paths.correctionsFile)
+
+        coordinator.runDailyMaintenanceIfDue()
+        for _ in 0..<50 where coordinator.snapshot.raw["last_metrics_snapshot_ts"]?.stringValue == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertNotNil(coordinator.snapshot.raw["last_decay_run_ts"]?.stringValue)
+        XCTAssertNotNil(coordinator.snapshot.raw["last_metrics_snapshot_ts"]?.stringValue)
     }
 }

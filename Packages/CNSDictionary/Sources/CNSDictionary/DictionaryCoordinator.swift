@@ -145,6 +145,15 @@ private actor DictionaryPersistenceWorker {
             frequency: frequency
         )
     }
+
+    func pruneReplacementObservations(now: Date) throws -> Int {
+        var index = try CorrectionAnalyzer.readIndexThrowing(at: paths.correctionsFile)
+        let removed = CorrectionAnalyzer.pruneStaleReplacementPairs(in: &index, now: now)
+        if removed > 0 {
+            try CorrectionAnalyzer.writeIndex(index, to: paths.correctionsFile)
+        }
+        return removed
+    }
 }
 
 private struct PromptAnalysisOutput: Sendable {
@@ -199,11 +208,13 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     private let persistenceWorker: DictionaryPersistenceWorker
     private let promptBuilder: InitialPromptBuilder
     private let clock: @Sendable () -> Date
+    private let correctionIndexWriter: @Sendable (CorrectionIndex, URL) throws -> Void
     private let log: @Sendable (String) -> Void
     private var dirty = false
     private var processedSessionIDs = Set<Int>()
     private var analysisRunning = false
     private var maintenanceRunning = false
+    private var replacementPruneRunning = false
     private var lastFastPathProcessedRows = 0
 
     private lazy var promptSynchronizer = PromptFileSynchronizer(
@@ -226,6 +237,9 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         datasetLogger: DatasetLogger? = nil,
         promptBuilder: InitialPromptBuilder = InitialPromptBuilder(),
         clock: @escaping @Sendable () -> Date = Date.init,
+        correctionIndexWriter: @escaping @Sendable (CorrectionIndex, URL) throws -> Void = {
+            try CorrectionAnalyzer.writeIndex($0, to: $1)
+        },
         log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.snapshot = config
@@ -240,6 +254,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         )
         self.promptBuilder = promptBuilder
         self.clock = clock
+        self.correctionIndexWriter = correctionIndexWriter
         self.log = log
         initializeReplacementPolicyIfNeeded()
     }
@@ -541,15 +556,28 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     public func replacementSections(languages: [String]? = nil) -> ReplacementSections {
         let allowedScripts = languages.map { Set($0.map(VocabProvider.getLanguageScript)) }
             ?? Set(["latin", "cyrillic"])
-        var index = CorrectionAnalyzer.readIndex(at: paths.correctionsFile)
-        if CorrectionAnalyzer.pruneStaleReplacementPairs(in: &index, now: clock()) > 0 {
-            do { try CorrectionAnalyzer.writeIndex(index, to: paths.correctionsFile) }
-            catch { log("Replacement observation pruning failed: \(error.localizedDescription)") }
+        let index = CorrectionAnalyzer.readIndex(at: paths.correctionsFile)
+        let now = clock()
+        if ["latin", "cyrillic"].contains(where: { bucket in
+            (index.replacementPairs[bucket] ?? []).contains {
+                CorrectionAnalyzer.isReplacementPairStale(
+                    $0,
+                    processedRows: index.processedRows,
+                    now: now
+                )
+            }
+        }) {
+            scheduleReplacementObservationPruning(now: now)
         }
 
         var observationByKey: [String: (ReplacementPair, String)] = [:]
         for bucket in allowedScripts {
-            for pair in index.replacementPairs[bucket] ?? [] {
+            for pair in index.replacementPairs[bucket] ?? []
+                where !CorrectionAnalyzer.isReplacementPairStale(
+                    pair,
+                    processedRows: index.processedRows,
+                    now: now
+                ) {
                 observationByKey[ReplacementPolicy.key(from: pair.from, to: pair.to)] = (pair, bucket)
             }
         }
@@ -626,9 +654,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         }
         candidates.sort {
             if $0.state != $1.state { return $0.state == .readyForReview }
-            if $0.count != $1.count { return $0.count > $1.count }
-            return ReplacementPolicy.key(from: $0.from, to: $0.to)
-                < ReplacementPolicy.key(from: $1.from, to: $1.to)
+            return Self.replacementRowPrecedes($0, $1)
         }
 
         let rejectedRows = rejected.map { decision in
@@ -645,12 +671,23 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
                 state: .rejected
             )
         }
-        return ReplacementSections(active: active, candidates: candidates, rejected: rejectedRows)
+        active.sort(by: Self.replacementRowPrecedes)
+        return ReplacementSections(
+            active: active,
+            candidates: candidates,
+            rejected: rejectedRows.sorted(by: Self.replacementRowPrecedes)
+        )
     }
 
     public func replacementRows(languages: [String]? = nil) -> [ReplacementRow] {
         let sections = replacementSections(languages: languages)
         return sections.active + sections.candidates
+    }
+
+    private static func replacementRowPrecedes(_ lhs: ReplacementRow, _ rhs: ReplacementRow) -> Bool {
+        if lhs.count != rhs.count { return lhs.count > rhs.count }
+        return ReplacementPolicy.key(from: lhs.from, to: lhs.to)
+            < ReplacementPolicy.key(from: rhs.from, to: rhs.to)
     }
 
     public func saveManualReplacements(_ pairs: [(String, String)]) throws {
@@ -672,9 +709,15 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         let previousByKey = Dictionary(uniqueKeysWithValues: previous.map {
             (ReplacementPolicy.key(from: $0.from, to: $0.to), $0)
         })
-        let approvedTargetBySource = Dictionary(uniqueKeysWithValues: approved.map {
-            (ReplacementPolicy.sourceKey($0.from), TermCanonicalizer.canonicalKey($0.to))
-        })
+        var approvedTargetBySource = [String: String]()
+        for decision in approved {
+            let source = ReplacementPolicy.sourceKey(decision.from)
+            let target = TermCanonicalizer.canonicalKey(decision.to)
+            if let existing = approvedTargetBySource[source], existing != target {
+                throw DictionaryCoordinatorError.conflictingReplacement
+            }
+            approvedTargetBySource[source] = target
+        }
         let now = ISOTimestamp.now(clock())
         var seen = Set<String>()
         var targetBySource = [String: String]()
@@ -847,6 +890,12 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             guard let self else { return }
             defer { self.maintenanceRunning = false }
             do {
+                let removed = try await self.persistenceWorker.pruneReplacementObservations(now: self.clock())
+                if removed > 0 { self.publish(.replacements) }
+            } catch {
+                self.log("Replacement observation pruning failed: \(error.localizedDescription)")
+            }
+            do {
                 _ = try self.runDecayIfDue()
                 _ = try await self.runMetricsIfDue()
             } catch {
@@ -981,16 +1030,22 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             }
             let approvedAt = ISOTimestamp.now(now)
             if let index {
-                for bucket in ["latin", "cyrillic"] {
-                    for pair in index.replacementPairs[bucket] ?? [] where pair.count >= 3 {
-                        let identity = ReplacementPolicy.key(from: pair.from, to: pair.to)
-                        let source = ReplacementPolicy.sourceKey(pair.from)
-                        let target = TermCanonicalizer.canonicalKey(pair.to)
-                        guard !rejectedKeys.contains(identity), activeKeys.insert(identity).inserted else { continue }
-                        if let existing = targetBySource[source], existing != target { continue }
-                        targetBySource[source] = target
-                        approved.append(ReplacementDecision(from: pair.from, to: pair.to, timestamp: approvedAt))
+                let eligiblePairs = ["latin", "cyrillic"]
+                    .flatMap { index.replacementPairs[$0] ?? [] }
+                    .filter { $0.count >= 3 }
+                    .sorted {
+                        if $0.count != $1.count { return $0.count > $1.count }
+                        return ReplacementPolicy.key(from: $0.from, to: $0.to)
+                            < ReplacementPolicy.key(from: $1.from, to: $1.to)
                     }
+                for pair in eligiblePairs {
+                    let identity = ReplacementPolicy.key(from: pair.from, to: pair.to)
+                    let source = ReplacementPolicy.sourceKey(pair.from)
+                    let target = TermCanonicalizer.canonicalKey(pair.to)
+                    guard !rejectedKeys.contains(identity), activeKeys.insert(identity).inserted else { continue }
+                    if let existing = targetBySource[source], existing != target { continue }
+                    targetBySource[source] = target
+                    approved.append(ReplacementDecision(from: pair.from, to: pair.to, timestamp: approvedAt))
                 }
             }
 
@@ -999,16 +1054,33 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
                 approved,
                 timestampKey: "approved_at"
             )
-            candidate.raw["replacement_policy_initialized"] = .bool(true)
+            candidate.raw["replacement_policy_initialized"] = .bool(false)
             try candidate.saveAtomically(to: paths.configFile)
             snapshot = candidate
 
             if var index, CorrectionAnalyzer.pruneStaleReplacementPairs(in: &index, now: now) > 0 {
-                do { try CorrectionAnalyzer.writeIndex(index, to: paths.correctionsFile) }
-                catch { log("Post-migration replacement pruning failed: \(error.localizedDescription)") }
+                try correctionIndexWriter(index, paths.correctionsFile)
             }
+            candidate.raw["replacement_policy_initialized"] = .bool(true)
+            try candidate.saveAtomically(to: paths.configFile)
+            snapshot = candidate
         } catch {
             log("Replacement policy initialization failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func scheduleReplacementObservationPruning(now: Date) {
+        guard !replacementPruneRunning else { return }
+        replacementPruneRunning = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.replacementPruneRunning = false }
+            do {
+                let removed = try await self.persistenceWorker.pruneReplacementObservations(now: now)
+                if removed > 0 { self.publish(.replacements) }
+            } catch {
+                self.log("Replacement observation pruning failed: \(error.localizedDescription)")
+            }
         }
     }
 

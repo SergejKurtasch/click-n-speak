@@ -171,6 +171,9 @@ IDLE  (_do_finish_cleanup on main thread)
 - `save_config_to_disk()` writes atomically via sibling tmp file + `os.replace` + `fsync` — `config.json` is never corrupted by SIGKILL mid-write.
 - `chunk_queue.put_nowait()` carries `AudioChunk(session_id, index, timestamps, audio)` — never use blocking `put()`; `chunk_index` must remain monotonic within a session.
 - Structured `runtime_event` fields must never contain transcript, prompt, or clipboard content; `scripts/analyze_runtime_log.py` is the canonical 14-day latency/order report.
+- Native Swift `CorrectionAnalyzer` uses `corrections.json` schema 5: replacement observations record `last_seen_row`, schema 4 rebuilds from the dataset, and observations expire after 90 days or 300 newer dataset rows (inclusive boundary).
+- Native Swift replacement decisions are config-owned by `DictionaryCoordinator`: count 1 observations stay hidden, count 2 are candidates and Gemini hints, count 3+ are ready for review and Gemini hints, and only `manual_replacements` plus `approved_auto_replacements` may drive direct replacement. `rejected_replacements` are durable tombstones and must not be removed when `corrections.json` is rebuilt.
+- Runtime correction-index writes stay serialized in `DictionaryPersistenceWorker`; replacement-panel snapshots read the atomically replaced index, filter stale rows in memory, and schedule physical pruning through that worker. After dictionary bootstrap, `AppDelegate` must pass `DictionaryCoordinator.snapshot` (not the originally loaded config) to every downstream coordinator.
 - **`ModelDownloader` callbacks never mutate `_download_state`/`_download_progress` directly** — `on_error` and `on_cancelled` post `_apply_error`/`_apply_cancel` closures to `_main_thread_queue`. The guard in `_start_whisper_model_download` iterates `WHISPER_MODELS` (constant list), not `_download_state.values()`, to avoid `RuntimeError` from concurrent `.pop()`.
 - `_call_mlx_transcribe()` sets `HF_HUB_OFFLINE=1` around every `mlx_whisper.transcribe()` call and restores the previous value in `finally` — prevents the transcriber child from triggering a network download mid-transcription when mlx_whisper probes for model updates.
 - On macOS 15+, **never auto-start pynput listener after permission grant** — `TSMGetInputSourceProperty` crashes unless the process was started with permissions already held. Require app restart instead.
@@ -282,11 +285,11 @@ Supporting mechanisms in `main.py`:
 
 Stored at root in dev mode; copied to `~/Library/Application Support/Click-n-speak/config.json` on first `.app` launch.
 
-### v5 schema (current — after all migrations)
+### v10 schema (current — after all migrations)
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 10,
   "primary_language": "ru",
   "additional_languages": ["en"],
   "initial_prompt": "...",
@@ -307,6 +310,10 @@ Stored at root in dev mode; copied to `~/Library/Application Support/Click-n-spe
   "last_analysis_phrase_count": 0,
   "last_decay_run_ts": null,
   "max_dictionary_age_days": 60,
+  "manual_replacements": [],
+  "approved_auto_replacements": [],
+  "rejected_replacements": [],
+  "replacement_policy_initialized": false,
   "ai_editor_enabled": true,
   "ai_editor_backend": "local",
   "ai_editor_model": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
@@ -346,12 +353,16 @@ Stored at root in dev mode; copied to `~/Library/Application Support/Click-n-spe
 - `last_analysis_phrase_count` — счётчик фраз на момент последнего анализа
 - `last_decay_run_ts` — ISO datetime последнего запуска `apply_decay()`; раз в 24 h
 - `max_dictionary_age_days` — порог устаревания для decay (default **60** дней)
+- `manual_replacements` — пары, заданные пользователем вручную
+- `approved_auto_replacements` — автоматически найденные пары, явно разрешённые для прямой замены
+- `rejected_replacements` — устойчивые запреты; пересборка `corrections.json` их не снимает
+- `replacement_policy_initialized` — завершён ли одноразовый импорт прежних пар с `count >= 3`
 - `last_metrics_snapshot_ts` — ISO datetime последнего снимка `compute_metrics()` (не чаще раза в 24 h в `run_metrics_if_due`, кроме `force=True` / меню Statistics)
 - `notify_on_metrics` — если `true`, при резком росте edit-score относительно 90-дневного минимума возможна редкая (≤ раз в 30 дней) подсказка через `send_notification` (`last_metrics_notification_ts` хранит throttle)
 
 `initial_prompt` строится автоматически через `build_initial_prompt(config)` и **не редактируется напрямую**. Термины сортируются: manual → correction → auto (use_count desc); inactive пропускаются.
 
-**Migration chain:** `migrate_config_to_v2` → `migrate_config_to_v3` → `migrate_config_to_v4` → `migrate_config_to_v5` (list[str] → list[dict], все старые термины получают `source="manual"`).
+**Migration chain:** `migrate_config_to_v2` → … → `migrate_config_to_v10`; v5 converts term strings to metadata dicts, v10 adds durable replacement approval/rejection state.
 
 ---
 
