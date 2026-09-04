@@ -558,7 +558,7 @@ public final class SessionController {
         if config.aiEditorEnabled, let editor = aiEditor {
             let langs = allowedLanguages()
             let known = VocabProvider.collectKnownTerms(config: .object(config.raw), languages: langs.isEmpty ? nil : langs)
-            let mis = VocabProvider.collectMisrecognitions(
+            let mis = VocabProvider.collectEditorHints(
                 config: .object(config.raw),
                 languages: langs.isEmpty ? nil : langs,
                 correctionsURL: dictionaryCoordinator?.correctionsURL
@@ -591,10 +591,9 @@ public final class SessionController {
             hintsInPrompt: activeSessionRuntimeDescriptor.aiEditor.kind == .cloud
         ) {
             let languages = allowedLanguages()
-            let pairs = VocabProvider.collectMisrecognitions(
+            let pairs = VocabProvider.collectDirectReplacements(
                 config: .object(config.raw),
-                languages: languages.isEmpty ? nil : languages,
-                correctionsURL: dictionaryCoordinator?.correctionsURL
+                languages: languages.isEmpty ? nil : languages
             )
             fullText = VocabProvider.applyReplacements(fullText, pairs: pairs)
         }
@@ -927,7 +926,7 @@ public final class SessionController {
                 config: .object(config.raw),
                 languages: languages.isEmpty ? nil : languages
             )
-            let misrecognitions = VocabProvider.collectMisrecognitions(
+            let misrecognitions = VocabProvider.collectEditorHints(
                 config: .object(config.raw),
                 languages: languages.isEmpty ? nil : languages,
                 correctionsURL: dictionaryCoordinator?.correctionsURL
@@ -946,10 +945,9 @@ public final class SessionController {
             after: refineStatus,
             hintsInPrompt: fileRuntime.aiEditor.kind == .cloud
         ) {
-            let pairs = VocabProvider.collectMisrecognitions(
+            let pairs = VocabProvider.collectDirectReplacements(
                 config: .object(config.raw),
-                languages: languages.isEmpty ? nil : languages,
-                correctionsURL: dictionaryCoordinator?.correctionsURL
+                languages: languages.isEmpty ? nil : languages
             )
             result.text = VocabProvider.applyReplacements(result.text, pairs: pairs)
         }

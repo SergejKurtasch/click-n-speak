@@ -207,13 +207,128 @@ public enum VocabProvider {
         return out
     }
 
-    private static func loadCorrectionsIndex(at path: URL?) -> CorrectionIndex? {
-        guard let path else { return nil }
-        guard FileManager.default.fileExists(atPath: path.path) else { return nil }
-        guard let data = try? Data(contentsOf: path) else { return nil }
-        return try? JSONDecoder().decode(CorrectionIndex.self, from: data)
+    public static func collectDirectReplacements(
+        config: JSONValue?,
+        languages: [String]? = nil,
+        cap: Int = replacementApplyCap
+    ) -> [(String, String)] {
+        guard cap > 0, let object = config?.objectValue else { return [] }
+        let allowedScripts = languages.map { Set($0.map(getLanguageScript)) }
+        let rejected = ReplacementPolicy.decisions(
+            in: object,
+            key: ReplacementPolicy.rejectedKey,
+            timestampKey: "rejected_at"
+        )
+        let rejectedKeys = Set(rejected.map { ReplacementPolicy.key(from: $0.from, to: $0.to) })
+        let manual = ReplacementPolicy.decisions(
+            in: object,
+            key: "manual_replacements",
+            timestampKey: "added_at"
+        )
+        let approved = ReplacementPolicy.decisions(
+            in: object,
+            key: ReplacementPolicy.approvedKey,
+            timestampKey: "approved_at"
+        )
+
+        var result: [(String, String)] = []
+        var seen = Set<String>()
+        var targetBySource: [String: String] = [:]
+        for decision in manual + approved {
+            if let allowedScripts,
+               let bucket = ReplacementPolicy.bucket(for: decision.from),
+               !allowedScripts.contains(bucket) { continue }
+            let identity = ReplacementPolicy.key(from: decision.from, to: decision.to)
+            guard !rejectedKeys.contains(identity), seen.insert(identity).inserted else { continue }
+            let source = ReplacementPolicy.sourceKey(decision.from)
+            let target = TermCanonicalizer.canonicalKey(decision.to)
+            if let existing = targetBySource[source], existing != target { continue }
+            targetBySource[source] = target
+            result.append((decision.from, decision.to))
+            if result.count >= cap { break }
+        }
+        return result
     }
 
+    public static func collectEditorHints(
+        config: JSONValue? = nil,
+        languages: [String]? = nil,
+        cap: Int = misrecognitionsCap,
+        correctionsURL: URL? = nil,
+        now: Date = Date()
+    ) -> [(String, String)] {
+        collectEditorHints(
+            config: config,
+            languages: languages,
+            cap: cap,
+            minimumCount: 2,
+            correctionsURL: correctionsURL,
+            now: now
+        )
+    }
+
+    private static func collectEditorHints(
+        config: JSONValue?,
+        languages: [String]?,
+        cap: Int,
+        minimumCount: Int,
+        correctionsURL: URL?,
+        now: Date
+    ) -> [(String, String)] {
+        guard cap > 0 else { return [] }
+        var result = collectDirectReplacements(config: config, languages: languages, cap: cap)
+        if result.count >= cap { return result }
+
+        let configObject = config?.objectValue ?? JSONObject()
+        let rejected = ReplacementPolicy.decisions(
+            in: configObject,
+            key: ReplacementPolicy.rejectedKey,
+            timestampKey: "rejected_at"
+        )
+        let rejectedKeys = Set(rejected.map { ReplacementPolicy.key(from: $0.from, to: $0.to) })
+        var seen = Set(result.map { ReplacementPolicy.key(from: $0.0, to: $0.1) })
+        var targetBySource = Dictionary(uniqueKeysWithValues: result.map {
+            (ReplacementPolicy.sourceKey($0.0), TermCanonicalizer.canonicalKey($0.1))
+        })
+        let allowedScripts = languages.map { Set($0.map(getLanguageScript)) }
+            ?? Set(["latin", "cyrillic"])
+        guard let correctionsURL else { return result }
+        let index = CorrectionAnalyzer.readIndex(at: correctionsURL)
+        var observations: [(ReplacementPair, String)] = []
+        for bucket in allowedScripts where bucket == "latin" || bucket == "cyrillic" {
+            for pair in index.replacementPairs[bucket] ?? [] {
+                observations.append((pair, bucket))
+            }
+        }
+        observations.sort {
+            if $0.0.count != $1.0.count { return $0.0.count > $1.0.count }
+            let left = ReplacementPolicy.key(from: $0.0.from, to: $0.0.to)
+            let right = ReplacementPolicy.key(from: $1.0.from, to: $1.0.to)
+            return left < right
+        }
+        for (pair, _) in observations {
+            guard pair.count >= minimumCount,
+                  !CorrectionAnalyzer.isReplacementPairStale(
+                    pair,
+                    processedRows: index.processedRows,
+                    now: now
+                  ) else { continue }
+            let from = normalizeReplacementSide(pair.from)
+            let to = normalizeReplacementSide(pair.to)
+            guard !from.isEmpty, !to.isEmpty else { continue }
+            let identity = ReplacementPolicy.key(from: from, to: to)
+            guard !rejectedKeys.contains(identity), seen.insert(identity).inserted else { continue }
+            let source = ReplacementPolicy.sourceKey(from)
+            let target = TermCanonicalizer.canonicalKey(to)
+            if let existing = targetBySource[source], existing != target { continue }
+            targetBySource[source] = target
+            result.append((from, to))
+            if result.count >= cap { break }
+        }
+        return result
+    }
+
+    @available(*, deprecated, message: "Use collectEditorHints or collectDirectReplacements explicitly")
     public static func collectMisrecognitions(
         config: JSONValue? = nil,
         languages: [String]? = nil,
@@ -221,44 +336,14 @@ public enum VocabProvider {
         minCount: Int = misrecognitionsMinCount,
         correctionsURL: URL? = nil
     ) -> [(String, String)] {
-        let manual = manualReplacementTuples(config: config)
-        if manual.count >= cap { return Array(manual.prefix(cap)) }
-
-        var scripts = Set(["latin", "cyrillic"])
-        if let langs = languages {
-            scripts = Set(langs.map { getLanguageScript($0) })
-        }
-
-        let index = loadCorrectionsIndex(at: correctionsURL)
-        let autoPairs = index?.replacementPairs ?? [:]
-
-        var seen = Set<String>()
-        for (a, b) in manual {
-            seen.insert("\(TermCanonicalizer.canonicalKey(a))||\(TermCanonicalizer.canonicalKey(b))")
-        }
-
-        var result = manual
-        var allAuto: [ReplacementPair] = []
-        for script in scripts {
-            if script != "latin" && script != "cyrillic" { continue }
-            if let pairs = autoPairs[script] {
-                allAuto.append(contentsOf: pairs)
-            }
-        }
-        allAuto.sort { $0.count > $1.count }
-
-        for item in allAuto {
-            if item.count < minCount { continue }
-            let left = sanitizeTerm(item.from)
-            let right = sanitizeTerm(item.to)
-            if left.isEmpty || right.isEmpty { continue }
-            let ck = "\(TermCanonicalizer.canonicalKey(left))||\(TermCanonicalizer.canonicalKey(right))"
-            if seen.contains(ck) { continue }
-            seen.insert(ck)
-            result.append((left, right))
-            if result.count >= cap { break }
-        }
-        return result
+        collectEditorHints(
+            config: config,
+            languages: languages,
+            cap: cap,
+            minimumCount: minCount,
+            correctionsURL: correctionsURL,
+            now: Date()
+        )
     }
 
     private static func compileReplacementPattern(_ fromPhrase: String) -> NSRegularExpression? {
@@ -319,12 +404,12 @@ public enum VocabProvider {
         minCount: Int = misrecognitionsMinCount,
         correctionsURL: URL? = nil
     ) -> [(String, String)] {
-        var merged = collectMisrecognitions(
+        _ = minCount
+        _ = correctionsURL
+        var merged = collectDirectReplacements(
             config: config,
             languages: languages,
-            cap: cap,
-            minCount: minCount,
-            correctionsURL: correctionsURL
+            cap: cap
         )
         merged.sort { a, b in
             let aKey = TermCanonicalizer.canonicalKey(a.0)

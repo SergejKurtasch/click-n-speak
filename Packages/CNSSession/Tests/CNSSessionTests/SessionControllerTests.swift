@@ -634,6 +634,112 @@ struct SessionControllerTests {
 
         #expect(rig.panel.shownText == source)
     }
+
+    @Test("Unapproved automatic pair never changes fallback text")
+    func unapprovedAutomaticPairIsHintOnly() async throws {
+        let source = "Cogni stores memory"
+        var config = Self.makeConfig(primary: "en", additional: [])
+        config.raw["replacement_policy_initialized"] = .bool(true)
+        let coordinator = FakeDictionaryCoordinator(config: config)
+        try writeReplacementIndex(
+            from: "Cogni",
+            to: "Cognee",
+            count: 5,
+            indexURL: coordinator.correctionsURL
+        )
+        let rig = makeRig(
+            texts: [source],
+            config: config,
+            dictionaryCoordinator: coordinator
+        )
+
+        await runSession(rig)
+
+        #expect(rig.panel.shownText == source)
+    }
+
+    @Test("Approved automatic pair changes eligible fallback text")
+    func approvedAutomaticPairApplies() async throws {
+        let source = "Cogni stores memory"
+        var config = Self.makeConfig(primary: "en", additional: [])
+        config.raw["replacement_policy_initialized"] = .bool(true)
+        config.raw["approved_auto_replacements"] = .array([
+            replacementValue(from: "Cogni", to: "Cognee", timestampKey: "approved_at"),
+        ])
+        let coordinator = FakeDictionaryCoordinator(config: config)
+        try writeReplacementIndex(
+            from: "Cogni",
+            to: "Cognee",
+            count: 5,
+            indexURL: coordinator.correctionsURL
+        )
+        let rig = makeRig(
+            texts: [source],
+            config: config,
+            dictionaryCoordinator: coordinator
+        )
+
+        await runSession(rig)
+
+        #expect(rig.panel.shownText == "Cognee stores memory")
+    }
+
+    @Test("Count-two pair reaches cloud editor but not direct fallback")
+    func countTwoPairIsCloudHintOnly() async throws {
+        let source = "Cogni stores memory"
+        var config = Self.makeConfig(primary: "en", additional: [])
+        config.raw["replacement_policy_initialized"] = .bool(true)
+        config.raw["ai_editor_enabled"] = .bool(true)
+        let coordinator = FakeDictionaryCoordinator(config: config)
+        try writeReplacementIndex(
+            from: "Cogni",
+            to: "Cognee",
+            count: 2,
+            indexURL: coordinator.correctionsURL
+        )
+        let editor = FakeAiEditor()
+        editor.refinedText = source
+        editor.refineStatus = .error
+        let runtime = RuntimeDescriptor(
+            transcriber: .init(backend: "local", modelID: "whisper-test", kind: .local),
+            aiEditor: .init(backend: "gemini", modelID: "gemini-test", kind: .cloud)
+        )
+        let rig = makeRig(
+            texts: [source],
+            config: config,
+            aiEditor: editor,
+            dictionaryCoordinator: coordinator,
+            runtimeDescriptorProvider: { runtime }
+        )
+
+        await runSession(rig)
+
+        #expect(editor.lastMisrecognitions?.contains { $0.0 == "Cogni" && $0.1 == "Cognee" } == true)
+        #expect(rig.panel.shownText == source)
+    }
+
+    private func replacementValue(from: String, to: String, timestampKey: String) -> JSONValue {
+        var object = JSONObject()
+        object["from"] = .string(from)
+        object["to"] = .string(to)
+        object[timestampKey] = .string(ISOTimestamp.now())
+        return .object(object)
+    }
+
+    private func writeReplacementIndex(from: String, to: String, count: Int, indexURL url: URL) throws {
+        var index = CorrectionIndex.defaultIndex()
+        index.processedRows = count
+        index.replacementPairs["latin"] = [
+            ReplacementPair(
+                from: from,
+                to: to,
+                count: count,
+                lastSeen: ISOTimestamp.now(),
+                lastSeenRow: count
+            ),
+        ]
+        try CorrectionAnalyzer.writeIndex(index, to: url)
+    }
 }
 
 enum RecorderErrorStub: Error { case failed }

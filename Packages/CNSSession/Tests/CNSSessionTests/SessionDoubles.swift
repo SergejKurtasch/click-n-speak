@@ -296,6 +296,7 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
     var refinedText: String = "refined text"
     var refineStatus: RefineStatus = .ok
     var lastInputText: String?
+    var lastMisrecognitions: [(String, String)]?
     var didCallRefine = false
 
     func refine(
@@ -306,6 +307,7 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
     ) async -> RefineResult {
         didCallRefine = true
         lastInputText = text
+        lastMisrecognitions = misrecognitions
         if refineDelay > 0 {
             try? await Task.sleep(nanoseconds: UInt64(refineDelay * 1_000_000_000))
         }
@@ -318,6 +320,7 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
         knownTerms: [String]?,
         misrecognitions: [(String, String)]?
     ) async -> RefineResult {
+        lastMisrecognitions = misrecognitions
         return RefineResult(text: refinedText, status: refineStatus)
     }
 }
