@@ -22,7 +22,28 @@ final class DictionaryCoordinatorTests: XCTestCase {
         object["auto_prompt_check_min_count_additional"] = .int(1)
         object["auto_prompt_lookback"] = .int(300)
         object["user_terms"] = .object(JSONObject())
-        return Config.migrated(object)
+        var config = Config.migrated(object)
+        config.raw["replacement_policy_initialized"] = .bool(true)
+        return config
+    }
+
+    private func writeReplacementIndex(
+        _ pairs: [ReplacementPair],
+        processedRows: Int,
+        to url: URL
+    ) throws {
+        var index = CorrectionIndex.defaultIndex()
+        index.processedRows = processedRows
+        index.replacementPairs["latin"] = pairs
+        try CorrectionAnalyzer.writeIndex(index, to: url)
+    }
+
+    private func replacementDecision(from: String, to: String, timestampKey: String, timestamp: String) -> JSONValue {
+        var object = JSONObject()
+        object["from"] = .string(from)
+        object["to"] = .string(to)
+        object[timestampKey] = .string(timestamp)
+        return .object(object)
     }
 
     private func makeCoordinator(
@@ -176,6 +197,152 @@ final class DictionaryCoordinatorTests: XCTestCase {
         try coordinator.saveManualReplacements([("ap eye", "API")])
         rows = coordinator.replacementRows()
         XCTAssertEqual(rows.first?.addedAt, originalAddedAt)
+    }
+
+    func testReplacementSectionsHideSinglesAndClassifyRepeatedPairs() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let timestamp = ISOTimestamp.now(now)
+        let paths = makePaths()
+        try writeReplacementIndex([
+            ReplacementPair(from: "once", to: "Once", count: 1, lastSeen: timestamp, lastSeenRow: 10),
+            ReplacementPair(from: "twice", to: "Twice", count: 2, lastSeen: timestamp, lastSeenRow: 10),
+            ReplacementPair(from: "thrice", to: "Thrice", count: 3, lastSeen: timestamp, lastSeenRow: 10),
+        ], processedRows: 10, to: paths.correctionsFile)
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths, clock: { now })
+
+        let sections = coordinator.replacementSections()
+
+        XCTAssertTrue(sections.active.isEmpty)
+        XCTAssertEqual(sections.candidates.map(\.from), ["thrice", "twice"])
+        XCTAssertEqual(sections.candidates.map(\.state), [.readyForReview, .candidate])
+        XCTAssertFalse(sections.candidates.contains { $0.from == "once" })
+    }
+
+    func testFirstPolicyInitializationApprovesExistingFrequentPairsExactlyOnce() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let timestamp = ISOTimestamp.now(now)
+        let paths = makePaths()
+        try writeReplacementIndex([
+            ReplacementPair(from: "Cogni", to: "Cognee", count: 3, lastSeen: timestamp, lastSeenRow: 10),
+            ReplacementPair(from: "twice", to: "Twice", count: 2, lastSeen: timestamp, lastSeenRow: 10),
+        ], processedRows: 10, to: paths.correctionsFile)
+        var pending = makeConfig()
+        pending.raw["replacement_policy_initialized"] = .bool(false)
+
+        let first = makeCoordinator(config: pending, paths: paths, clock: { now })
+
+        XCTAssertTrue(first.snapshot.raw["replacement_policy_initialized"]?.boolValue == true)
+        XCTAssertEqual(first.replacementSections().active.map(\.from), ["Cogni"])
+        XCTAssertEqual(first.replacementSections().candidates.map(\.from), ["twice"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.configFile.path))
+
+        let active = try XCTUnwrap(first.replacementSections().active.first)
+        try first.rejectReplacement(active)
+        let reloaded = Config.load(from: paths.configFile)
+        let second = makeCoordinator(config: reloaded, paths: paths, clock: { now })
+
+        XCTAssertTrue(second.replacementSections().active.isEmpty)
+        XCTAssertEqual(second.replacementSections().rejected.map(\.from), ["Cogni"])
+    }
+
+    func testApproveRejectAndRestorePersistPolicyTransitions() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let timestamp = ISOTimestamp.now(now)
+        let paths = makePaths()
+        try writeReplacementIndex([
+            ReplacementPair(from: "Cogni", to: "Cognee", count: 2, lastSeen: timestamp, lastSeenRow: 10),
+        ], processedRows: 10, to: paths.correctionsFile)
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths, clock: { now })
+        let candidate = try XCTUnwrap(coordinator.replacementSections().candidates.first)
+
+        try coordinator.approveReplacement(candidate)
+        XCTAssertEqual(coordinator.replacementSections().active.map(\.from), ["Cogni"])
+        XCTAssertEqual(coordinator.snapshot.raw["approved_auto_replacements"]?.arrayValue?.count, 1)
+
+        let active = try XCTUnwrap(coordinator.replacementSections().active.first)
+        try coordinator.rejectReplacement(active)
+        XCTAssertTrue(coordinator.replacementSections().active.isEmpty)
+        XCTAssertEqual(coordinator.replacementSections().rejected.map(\.from), ["Cogni"])
+        XCTAssertTrue(coordinator.replacementSections().candidates.isEmpty)
+
+        let rejected = try XCTUnwrap(coordinator.replacementSections().rejected.first)
+        try coordinator.restoreReplacement(rejected)
+        XCTAssertEqual(coordinator.replacementSections().active.map(\.from), ["Cogni"])
+        XCTAssertTrue(coordinator.replacementSections().rejected.isEmpty)
+        XCTAssertEqual(Config.load(from: paths.configFile).raw["approved_auto_replacements"]?.arrayValue?.count, 1)
+    }
+
+    func testRejectedPairStaysHiddenAfterObservationIndexReturns() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let timestamp = ISOTimestamp.now(now)
+        let paths = makePaths()
+        let pair = ReplacementPair(from: "Cogni", to: "Cognee", count: 3, lastSeen: timestamp, lastSeenRow: 10)
+        try writeReplacementIndex([pair], processedRows: 10, to: paths.correctionsFile)
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths, clock: { now })
+        let candidate = try XCTUnwrap(coordinator.replacementSections().candidates.first)
+        try coordinator.rejectReplacement(candidate)
+
+        try writeReplacementIndex([pair], processedRows: 10, to: paths.correctionsFile)
+
+        XCTAssertTrue(coordinator.replacementSections().candidates.isEmpty)
+        XCTAssertEqual(coordinator.replacementSections().rejected.map(\.from), ["Cogni"])
+    }
+
+    func testManualRemovalCreatesTombstoneAndRestoreActivatesPair() throws {
+        let paths = makePaths()
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths)
+        try coordinator.saveManualReplacements([("ap eye", "API")])
+        let manual = try XCTUnwrap(coordinator.replacementSections().active.first)
+
+        try coordinator.removeReplacement(manual)
+
+        XCTAssertTrue(coordinator.replacementSections().active.isEmpty)
+        let rejected = try XCTUnwrap(coordinator.replacementSections().rejected.first)
+        XCTAssertEqual(rejected.from, "ap eye")
+        try coordinator.restoreReplacement(rejected)
+        XCTAssertEqual(coordinator.replacementSections().active.map(\.from), ["ap eye"])
+    }
+
+    func testManualEditRejectsOldIdentityAndClearsNewRejection() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        var config = makeConfig()
+        config.raw["rejected_replacements"] = .array([
+            replacementDecision(
+                from: "ap eye",
+                to: "API",
+                timestampKey: "rejected_at",
+                timestamp: ISOTimestamp.now(now)
+            ),
+        ])
+        let paths = makePaths()
+        let coordinator = makeCoordinator(config: config, paths: paths, clock: { now })
+
+        try coordinator.saveManualReplacements([("ap eye", "API")])
+        XCTAssertTrue(coordinator.replacementSections().rejected.isEmpty)
+        try coordinator.saveManualReplacements([("ap eyes", "APIs")])
+
+        XCTAssertEqual(coordinator.replacementSections().active.map(\.from), ["ap eyes"])
+        XCTAssertEqual(coordinator.replacementSections().rejected.map(\.from), ["ap eye"])
+    }
+
+    func testManualReplacementConflictsWithApprovedTarget() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        var config = makeConfig()
+        config.raw["approved_auto_replacements"] = .array([
+            replacementDecision(
+                from: "api",
+                to: "API",
+                timestampKey: "approved_at",
+                timestamp: ISOTimestamp.now(now)
+            ),
+        ])
+        let coordinator = makeCoordinator(config: config, paths: makePaths(), clock: { now })
+
+        XCTAssertThrowsError(try coordinator.saveManualReplacements([("api", "SDK")])) { error in
+            guard case .conflictingReplacement = error as? DictionaryCoordinatorError else {
+                return XCTFail("Expected conflictingReplacement, got \(error)")
+            }
+        }
     }
 
     func testDailyMaintenanceUsesInjectedClockAndPersistsTimestamps() async throws {

@@ -58,19 +58,6 @@ public struct DictionaryTerm: Sendable, Equatable, Identifiable {
     public let inactive: Bool
 }
 
-public struct ReplacementRow: Sendable, Equatable, Identifiable {
-    public var id: String {
-        "\(source)||\(bucket ?? "manual")||\(TermCanonicalizer.canonicalKey(from))||\(TermCanonicalizer.canonicalKey(to))"
-    }
-    public let source: String
-    public let bucket: String?
-    public let from: String
-    public let to: String
-    public let count: Int
-    public let lastSeen: String?
-    public let addedAt: String?
-}
-
 public struct DictionaryNotification: Sendable, Equatable {
     public let titleKey: String
     public let bodyKey: String
@@ -254,6 +241,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         self.promptBuilder = promptBuilder
         self.clock = clock
         self.log = log
+        initializeReplacementPolicyIfNeeded()
     }
 
     public func startPromptWatching() {
@@ -550,71 +538,239 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         try commit(candidate, promptLanguages: [], invalidations: [.suggestions])
     }
 
-    public func replacementRows(languages: [String]? = nil) -> [ReplacementRow] {
-        let manual = VocabProvider.manualReplacementTuples(config: .object(snapshot.raw)).map {
-            ReplacementRow(source: "manual", bucket: nil, from: $0.0, to: $0.1, count: 0, lastSeen: nil, addedAt: nil)
-        }
+    public func replacementSections(languages: [String]? = nil) -> ReplacementSections {
         let allowedScripts = languages.map { Set($0.map(VocabProvider.getLanguageScript)) }
             ?? Set(["latin", "cyrillic"])
-        let index = CorrectionAnalyzer.readIndex(at: paths.correctionsFile)
-        var automatic: [ReplacementRow] = []
+        var index = CorrectionAnalyzer.readIndex(at: paths.correctionsFile)
+        if CorrectionAnalyzer.pruneStaleReplacementPairs(in: &index, now: clock()) > 0 {
+            do { try CorrectionAnalyzer.writeIndex(index, to: paths.correctionsFile) }
+            catch { log("Replacement observation pruning failed: \(error.localizedDescription)") }
+        }
+
+        var observationByKey: [String: (ReplacementPair, String)] = [:]
         for bucket in allowedScripts {
             for pair in index.replacementPairs[bucket] ?? [] {
-                automatic.append(ReplacementRow(
-                    source: "auto",
-                    bucket: bucket,
-                    from: pair.from,
-                    to: pair.to,
-                    count: pair.count,
-                    lastSeen: pair.lastSeen,
-                    addedAt: nil
-                ))
+                observationByKey[ReplacementPolicy.key(from: pair.from, to: pair.to)] = (pair, bucket)
             }
         }
-        return manual + automatic.sorted { $0.count > $1.count }
+
+        let manual = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: "manual_replacements",
+            timestampKey: "added_at"
+        )
+        let approved = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: ReplacementPolicy.approvedKey,
+            timestampKey: "approved_at"
+        )
+        let rejected = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: ReplacementPolicy.rejectedKey,
+            timestampKey: "rejected_at"
+        )
+        let rejectedKeys = Set(rejected.map { ReplacementPolicy.key(from: $0.from, to: $0.to) })
+
+        var active: [ReplacementRow] = []
+        var activeKeys = Set<String>()
+        var activeSourceKeys = Set<String>()
+        for decision in manual {
+            let identity = ReplacementPolicy.key(from: decision.from, to: decision.to)
+            guard !rejectedKeys.contains(identity), activeKeys.insert(identity).inserted else { continue }
+            activeSourceKeys.insert(ReplacementPolicy.sourceKey(decision.from))
+            let observation = observationByKey[identity]
+            active.append(ReplacementRow(
+                source: "manual",
+                bucket: observation?.1 ?? ReplacementPolicy.bucket(for: decision.from),
+                from: decision.from,
+                to: decision.to,
+                count: observation?.0.count ?? 0,
+                lastSeen: observation?.0.lastSeen,
+                addedAt: decision.timestamp,
+                state: .active
+            ))
+        }
+        for decision in approved {
+            let identity = ReplacementPolicy.key(from: decision.from, to: decision.to)
+            let sourceIdentity = ReplacementPolicy.sourceKey(decision.from)
+            guard !rejectedKeys.contains(identity), !activeSourceKeys.contains(sourceIdentity),
+                  activeKeys.insert(identity).inserted else { continue }
+            activeSourceKeys.insert(sourceIdentity)
+            let observation = observationByKey[identity]
+            active.append(ReplacementRow(
+                source: "auto",
+                bucket: observation?.1 ?? ReplacementPolicy.bucket(for: decision.from),
+                from: decision.from,
+                to: decision.to,
+                count: observation?.0.count ?? 0,
+                lastSeen: observation?.0.lastSeen,
+                addedAt: decision.timestamp,
+                state: .active
+            ))
+        }
+
+        var candidates: [ReplacementRow] = []
+        for (identity, observation) in observationByKey {
+            let pair = observation.0
+            guard pair.count >= 2, !activeKeys.contains(identity), !rejectedKeys.contains(identity) else { continue }
+            candidates.append(ReplacementRow(
+                source: "auto",
+                bucket: observation.1,
+                from: pair.from,
+                to: pair.to,
+                count: pair.count,
+                lastSeen: pair.lastSeen,
+                addedAt: nil,
+                state: pair.count >= 3 ? .readyForReview : .candidate
+            ))
+        }
+        candidates.sort {
+            if $0.state != $1.state { return $0.state == .readyForReview }
+            if $0.count != $1.count { return $0.count > $1.count }
+            return ReplacementPolicy.key(from: $0.from, to: $0.to)
+                < ReplacementPolicy.key(from: $1.from, to: $1.to)
+        }
+
+        let rejectedRows = rejected.map { decision in
+            let identity = ReplacementPolicy.key(from: decision.from, to: decision.to)
+            let observation = observationByKey[identity]
+            return ReplacementRow(
+                source: "auto",
+                bucket: observation?.1 ?? ReplacementPolicy.bucket(for: decision.from),
+                from: decision.from,
+                to: decision.to,
+                count: observation?.0.count ?? 0,
+                lastSeen: observation?.0.lastSeen,
+                addedAt: decision.timestamp,
+                state: .rejected
+            )
+        }
+        return ReplacementSections(active: active, candidates: candidates, rejected: rejectedRows)
+    }
+
+    public func replacementRows(languages: [String]? = nil) -> [ReplacementRow] {
+        let sections = replacementSections(languages: languages)
+        return sections.active + sections.candidates
     }
 
     public func saveManualReplacements(_ pairs: [(String, String)]) throws {
-        var previous: [String: String] = [:]
-        for row in replacementRows() where row.source == "manual" {
-            let key = "\(TermCanonicalizer.canonicalKey(row.from))||\(TermCanonicalizer.canonicalKey(row.to))"
-            if let addedAt = row.addedAt, previous[key] == nil { previous[key] = addedAt }
-        }
+        let previous = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: "manual_replacements",
+            timestampKey: "added_at"
+        )
+        let approved = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: ReplacementPolicy.approvedKey,
+            timestampKey: "approved_at"
+        )
+        var rejected = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: ReplacementPolicy.rejectedKey,
+            timestampKey: "rejected_at"
+        )
+        let previousByKey = Dictionary(uniqueKeysWithValues: previous.map {
+            (ReplacementPolicy.key(from: $0.from, to: $0.to), $0)
+        })
+        let approvedTargetBySource = Dictionary(uniqueKeysWithValues: approved.map {
+            (ReplacementPolicy.sourceKey($0.from), TermCanonicalizer.canonicalKey($0.to))
+        })
+        let now = ISOTimestamp.now(clock())
         var seen = Set<String>()
         var targetBySource = [String: String]()
-        var values: [JSONValue] = []
+        var decisions: [ReplacementDecision] = []
         for pair in pairs {
             let from = VocabProvider.normalizeReplacementSide(pair.0)
             let to = VocabProvider.normalizeReplacementSide(pair.1)
             guard !from.isEmpty, !to.isEmpty else { throw DictionaryCoordinatorError.invalidReplacement }
-            let sourceKey = TermCanonicalizer.canonicalKey(from)
+            let sourceKey = ReplacementPolicy.sourceKey(from)
             let targetKey = TermCanonicalizer.canonicalKey(to)
             if let existing = targetBySource[sourceKey], existing != targetKey {
                 throw DictionaryCoordinatorError.conflictingReplacement
             }
+            if let existing = approvedTargetBySource[sourceKey], existing != targetKey {
+                throw DictionaryCoordinatorError.conflictingReplacement
+            }
             targetBySource[sourceKey] = targetKey
-            let key = "\(sourceKey)||\(targetKey)"
-            guard seen.insert(key).inserted else { continue }
-            var object = JSONObject()
-            object["from"] = .string(from)
-            object["to"] = .string(to)
-            object["added_at"] = .string(previous[key] ?? ISOTimestamp.now(clock()))
-            values.append(.object(object))
+            let identity = ReplacementPolicy.key(from: from, to: to)
+            guard seen.insert(identity).inserted else { continue }
+            decisions.append(ReplacementDecision(
+                from: from,
+                to: to,
+                timestamp: previousByKey[identity]?.timestamp ?? now
+            ))
         }
+
+        let newKeys = Set(decisions.map { ReplacementPolicy.key(from: $0.from, to: $0.to) })
+        let rejectedKeys = Set(rejected.map { ReplacementPolicy.key(from: $0.from, to: $0.to) })
+        for old in previous {
+            let identity = ReplacementPolicy.key(from: old.from, to: old.to)
+            if !newKeys.contains(identity), !rejectedKeys.contains(identity) {
+                rejected.append(ReplacementDecision(from: old.from, to: old.to, timestamp: now))
+            }
+        }
+        rejected.removeAll { newKeys.contains(ReplacementPolicy.key(from: $0.from, to: $0.to)) }
+
         var candidate = snapshot
-        candidate.raw["manual_replacements"] = .array(values)
+        candidate.raw["manual_replacements"] = ReplacementPolicy.encode(decisions, timestampKey: "added_at")
+        candidate.raw[ReplacementPolicy.approvedKey] = ReplacementPolicy.encode(
+            approved.filter { !newKeys.contains(ReplacementPolicy.key(from: $0.from, to: $0.to)) },
+            timestampKey: "approved_at"
+        )
+        candidate.raw[ReplacementPolicy.rejectedKey] = ReplacementPolicy.encode(
+            rejected,
+            timestampKey: "rejected_at"
+        )
         try commit(candidate, promptLanguages: [], invalidations: [.replacements])
     }
 
+    public func approveReplacement(_ row: ReplacementRow) throws {
+        try activateReplacement(row, removingRejection: true)
+    }
+
+    public func restoreReplacement(_ row: ReplacementRow) throws {
+        try activateReplacement(row, removingRejection: true)
+    }
+
+    public func rejectReplacement(_ row: ReplacementRow) throws {
+        let from = VocabProvider.normalizeReplacementSide(row.from)
+        let to = VocabProvider.normalizeReplacementSide(row.to)
+        guard !from.isEmpty, !to.isEmpty else { throw DictionaryCoordinatorError.invalidReplacement }
+        let identity = ReplacementPolicy.key(from: from, to: to)
+        var manual = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: "manual_replacements",
+            timestampKey: "added_at"
+        )
+        var approved = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: ReplacementPolicy.approvedKey,
+            timestampKey: "approved_at"
+        )
+        var rejected = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: ReplacementPolicy.rejectedKey,
+            timestampKey: "rejected_at"
+        )
+        manual.removeAll { ReplacementPolicy.key(from: $0.from, to: $0.to) == identity }
+        approved.removeAll { ReplacementPolicy.key(from: $0.from, to: $0.to) == identity }
+        if !rejected.contains(where: { ReplacementPolicy.key(from: $0.from, to: $0.to) == identity }) {
+            rejected.append(ReplacementDecision(from: from, to: to, timestamp: ISOTimestamp.now(clock())))
+        }
+        var candidate = snapshot
+        candidate.raw["manual_replacements"] = ReplacementPolicy.encode(manual, timestampKey: "added_at")
+        candidate.raw[ReplacementPolicy.approvedKey] = ReplacementPolicy.encode(approved, timestampKey: "approved_at")
+        candidate.raw[ReplacementPolicy.rejectedKey] = ReplacementPolicy.encode(rejected, timestampKey: "rejected_at")
+        try commit(candidate, promptLanguages: [], invalidations: [.replacements])
+    }
+
+    public func removeReplacement(_ row: ReplacementRow) throws {
+        try rejectReplacement(row)
+    }
+
     public func removeAutomaticReplacement(_ row: ReplacementRow) throws {
-        guard row.source == "auto", let bucket = row.bucket else { return }
-        guard try CorrectionAnalyzer.removeReplacementPairFromIndexThrowing(
-            bucket: bucket,
-            fromText: row.from,
-            toText: row.to,
-            indexPath: paths.correctionsFile
-        ) else { return }
-        publish(.replacements)
+        guard row.source == "auto" else { return }
+        try rejectReplacement(row)
     }
 
     public func flushIfNeeded() throws {
@@ -780,6 +936,121 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             do { try await self?.runPromptAnalysis() }
             catch { self?.log("Prompt analysis failed: \(error.localizedDescription)") }
         }
+    }
+
+    private func initializeReplacementPolicyIfNeeded() {
+        guard snapshot.raw["replacement_policy_initialized"]?.boolValue != true else { return }
+        do {
+            let now = clock()
+            var index: CorrectionIndex?
+            if FileManager.default.fileExists(atPath: paths.datasetFile.path)
+                || FileManager.default.fileExists(atPath: paths.correctionsFile.path) {
+                index = try CorrectionAnalyzer.updateCorrectionsIndexThrowing(
+                    datasetPath: paths.datasetFile,
+                    indexPath: paths.correctionsFile,
+                    now: now,
+                    pruneStale: false
+                )
+            }
+
+            let manual = ReplacementPolicy.decisions(
+                in: snapshot,
+                key: "manual_replacements",
+                timestampKey: "added_at"
+            )
+            var approved = ReplacementPolicy.decisions(
+                in: snapshot,
+                key: ReplacementPolicy.approvedKey,
+                timestampKey: "approved_at"
+            )
+            let rejected = ReplacementPolicy.decisions(
+                in: snapshot,
+                key: ReplacementPolicy.rejectedKey,
+                timestampKey: "rejected_at"
+            )
+            let rejectedKeys = Set(rejected.map { ReplacementPolicy.key(from: $0.from, to: $0.to) })
+            var activeKeys = Set((manual + approved).map {
+                ReplacementPolicy.key(from: $0.from, to: $0.to)
+            })
+            var targetBySource: [String: String] = [:]
+            for decision in manual + approved {
+                let source = ReplacementPolicy.sourceKey(decision.from)
+                if targetBySource[source] == nil {
+                    targetBySource[source] = TermCanonicalizer.canonicalKey(decision.to)
+                }
+            }
+            let approvedAt = ISOTimestamp.now(now)
+            if let index {
+                for bucket in ["latin", "cyrillic"] {
+                    for pair in index.replacementPairs[bucket] ?? [] where pair.count >= 3 {
+                        let identity = ReplacementPolicy.key(from: pair.from, to: pair.to)
+                        let source = ReplacementPolicy.sourceKey(pair.from)
+                        let target = TermCanonicalizer.canonicalKey(pair.to)
+                        guard !rejectedKeys.contains(identity), activeKeys.insert(identity).inserted else { continue }
+                        if let existing = targetBySource[source], existing != target { continue }
+                        targetBySource[source] = target
+                        approved.append(ReplacementDecision(from: pair.from, to: pair.to, timestamp: approvedAt))
+                    }
+                }
+            }
+
+            var candidate = snapshot
+            candidate.raw[ReplacementPolicy.approvedKey] = ReplacementPolicy.encode(
+                approved,
+                timestampKey: "approved_at"
+            )
+            candidate.raw["replacement_policy_initialized"] = .bool(true)
+            try candidate.saveAtomically(to: paths.configFile)
+            snapshot = candidate
+
+            if var index, CorrectionAnalyzer.pruneStaleReplacementPairs(in: &index, now: now) > 0 {
+                do { try CorrectionAnalyzer.writeIndex(index, to: paths.correctionsFile) }
+                catch { log("Post-migration replacement pruning failed: \(error.localizedDescription)") }
+            }
+        } catch {
+            log("Replacement policy initialization failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func activateReplacement(_ row: ReplacementRow, removingRejection: Bool) throws {
+        let from = VocabProvider.normalizeReplacementSide(row.from)
+        let to = VocabProvider.normalizeReplacementSide(row.to)
+        guard !from.isEmpty, !to.isEmpty else { throw DictionaryCoordinatorError.invalidReplacement }
+        let identity = ReplacementPolicy.key(from: from, to: to)
+        let source = ReplacementPolicy.sourceKey(from)
+        let target = TermCanonicalizer.canonicalKey(to)
+        let manual = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: "manual_replacements",
+            timestampKey: "added_at"
+        )
+        var approved = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: ReplacementPolicy.approvedKey,
+            timestampKey: "approved_at"
+        )
+        var rejected = ReplacementPolicy.decisions(
+            in: snapshot,
+            key: ReplacementPolicy.rejectedKey,
+            timestampKey: "rejected_at"
+        )
+        for decision in manual + approved where ReplacementPolicy.sourceKey(decision.from) == source {
+            if TermCanonicalizer.canonicalKey(decision.to) != target {
+                throw DictionaryCoordinatorError.conflictingReplacement
+            }
+        }
+        let isManual = manual.contains { ReplacementPolicy.key(from: $0.from, to: $0.to) == identity }
+        let isApproved = approved.contains { ReplacementPolicy.key(from: $0.from, to: $0.to) == identity }
+        if !isManual, !isApproved {
+            approved.append(ReplacementDecision(from: from, to: to, timestamp: ISOTimestamp.now(clock())))
+        }
+        if removingRejection {
+            rejected.removeAll { ReplacementPolicy.key(from: $0.from, to: $0.to) == identity }
+        }
+        var candidate = snapshot
+        candidate.raw[ReplacementPolicy.approvedKey] = ReplacementPolicy.encode(approved, timestampKey: "approved_at")
+        candidate.raw[ReplacementPolicy.rejectedKey] = ReplacementPolicy.encode(rejected, timestampKey: "rejected_at")
+        try commit(candidate, promptLanguages: [], invalidations: [.replacements])
     }
 
     private func commit(
