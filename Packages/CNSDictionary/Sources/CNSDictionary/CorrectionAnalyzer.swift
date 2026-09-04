@@ -52,17 +52,29 @@ public struct ReplacementPair: Codable, Sendable, Equatable {
     public var to: String
     public var count: Int
     public var lastSeen: String
+    public var lastSeenRow: Int
 
     private enum CodingKeys: String, CodingKey {
         case from, to, count
         case lastSeen = "last_seen"
+        case lastSeenRow = "last_seen_row"
     }
 
-    public init(from: String, to: String, count: Int, lastSeen: String) {
+    public init(from: String, to: String, count: Int, lastSeen: String, lastSeenRow: Int = 0) {
         self.from = from
         self.to = to
         self.count = count
         self.lastSeen = lastSeen
+        self.lastSeenRow = lastSeenRow
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        from = try values.decode(String.self, forKey: .from)
+        to = try values.decode(String.self, forKey: .to)
+        count = try values.decodeIfPresent(Int.self, forKey: .count) ?? 0
+        lastSeen = try values.decodeIfPresent(String.self, forKey: .lastSeen) ?? ""
+        lastSeenRow = try values.decodeIfPresent(Int.self, forKey: .lastSeenRow) ?? 0
     }
 }
 
@@ -85,7 +97,7 @@ public struct CorrectionIndex: Codable, Sendable {
 
     public static func defaultIndex() -> CorrectionIndex {
         CorrectionIndex(
-            schemaVersion: 4,
+            schemaVersion: 5,
             lastProcessedTs: nil,
             lastProcessedOffset: nil,
             processedRows: 0,
@@ -173,6 +185,52 @@ func getOpcodes<T: Equatable>(_ a: [T], _ b: [T]) -> [OpcodeChunk] {
 public enum CorrectionAnalyzer {
 
     private static let maxPairTokenLen = 30
+    private static let replacementMaxAgeSeconds: TimeInterval = 90 * 86_400
+    private static let replacementMaxRowAge = 300
+
+    private static func parseTimestamp(_ value: String) -> Date? {
+        let normalized = value.replacingOccurrences(of: "Z", with: "+00:00")
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: normalized) { return date }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: normalized)
+    }
+
+    public static func isReplacementPairStale(
+        _ pair: ReplacementPair,
+        processedRows: Int,
+        now: Date
+    ) -> Bool {
+        if processedRows - pair.lastSeenRow >= replacementMaxRowAge { return true }
+        guard let lastSeen = parseTimestamp(pair.lastSeen) else { return true }
+        return now.timeIntervalSince(lastSeen) >= replacementMaxAgeSeconds
+    }
+
+    @discardableResult
+    public static func pruneStaleReplacementPairs(
+        in index: inout CorrectionIndex,
+        now: Date
+    ) -> Int {
+        var removed = 0
+        for bucket in ["latin", "cyrillic"] {
+            var pairs = index.replacementPairs[bucket] ?? []
+            let originalCount = pairs.count
+            pairs.removeAll { isReplacementPairStale($0, processedRows: index.processedRows, now: now) }
+            removed += originalCount - pairs.count
+            index.replacementPairs[bucket] = pairs
+        }
+        return removed
+    }
+
+    public static func writeIndex(_ index: CorrectionIndex, to indexPath: URL) throws {
+        let data = try JSONEncoder().encode(index)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
+        try AtomicFile.writeText(text, to: indexPath)
+    }
 
     public static func readIndex(at path: URL) -> CorrectionIndex {
         guard FileManager.default.fileExists(atPath: path.path) else {
@@ -201,7 +259,12 @@ public enum CorrectionAnalyzer {
                 // inflated legacy counters.
                 return CorrectionIndex.defaultIndex()
             }
-            index.schemaVersion = 4
+            if index.schemaVersion < 5 {
+                // Schema 5 records replacement last_seen_row for deterministic
+                // 300-dictation expiry. Rebuild rather than guessing row ages.
+                return CorrectionIndex.defaultIndex()
+            }
+            index.schemaVersion = 5
             if index.insertedTerms["latin"] == nil { index.insertedTerms["latin"] = [:] }
             if index.insertedTerms["cyrillic"] == nil { index.insertedTerms["cyrillic"] = [:] }
             if index.replacementPairs["latin"] == nil { index.replacementPairs["latin"] = [] }
@@ -224,10 +287,21 @@ public enum CorrectionAnalyzer {
                 let key = "\(TermCanonicalizer.canonicalKey(from))||\(TermCanonicalizer.canonicalKey(to))"
                 if var existing = merged[key] {
                     existing.count += pair.count
-                    if pair.lastSeen > existing.lastSeen { existing.lastSeen = pair.lastSeen }
+                    if pair.lastSeen > existing.lastSeen {
+                        existing.lastSeen = pair.lastSeen
+                        existing.lastSeenRow = pair.lastSeenRow
+                    } else if pair.lastSeen == existing.lastSeen {
+                        existing.lastSeenRow = max(existing.lastSeenRow, pair.lastSeenRow)
+                    }
                     merged[key] = existing
                 } else {
-                    merged[key] = ReplacementPair(from: from, to: to, count: pair.count, lastSeen: pair.lastSeen)
+                    merged[key] = ReplacementPair(
+                        from: from,
+                        to: to,
+                        count: pair.count,
+                        lastSeen: pair.lastSeen,
+                        lastSeenRow: pair.lastSeenRow
+                    )
                 }
             }
             index.replacementPairs[bucket] = merged.values.sorted {
@@ -367,11 +441,18 @@ public enum CorrectionAnalyzer {
                TermCanonicalizer.canonicalKey(pairs[i].to) == TermCanonicalizer.canonicalKey(toStr) {
                 pairs[i].count += 1
                 pairs[i].lastSeen = ts
+                pairs[i].lastSeenRow = index.processedRows
                 index.replacementPairs[lang] = pairs
                 return
             }
         }
-        pairs.append(ReplacementPair(from: fromStr, to: toStr, count: 1, lastSeen: ts))
+        pairs.append(ReplacementPair(
+            from: fromStr,
+            to: toStr,
+            count: 1,
+            lastSeen: ts,
+            lastSeenRow: index.processedRows
+        ))
         index.replacementPairs[lang] = pairs
     }
 
@@ -430,21 +511,16 @@ public enum CorrectionAnalyzer {
 
     public static func updateCorrectionsIndexThrowing(
         datasetPath: URL,
-        indexPath: URL
+        indexPath: URL,
+        now: Date = Date(),
+        pruneStale: Bool = true
     ) throws -> CorrectionIndex {
         var index = readIndex(at: indexPath)
 
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let formatterNoFrac = ISO8601DateFormatter()
-        formatterNoFrac.formatOptions = [.withInternetDateTime]
-
-        func parseIso(_ ts: String) -> Date? {
-            if let d = formatter.date(from: ts) { return d }
-            return formatterNoFrac.date(from: ts)
-        }
-
         guard FileManager.default.fileExists(atPath: datasetPath.path) else {
+            if pruneStale, pruneStaleReplacementPairs(in: &index, now: now) > 0 {
+                try writeIndex(index, to: indexPath)
+            }
             return index
         }
         let attributes = try FileManager.default.attributesOfItem(atPath: datasetPath.path)
@@ -462,7 +538,7 @@ public enum CorrectionAnalyzer {
 
         var lastDate: Date?
         if !canResumeFromOffset, let lastTs = index.lastProcessedTs {
-            lastDate = parseIso(lastTs.replacingOccurrences(of: "Z", with: "+00:00"))
+            lastDate = parseTimestamp(lastTs)
         }
 
         var records: [(Date, String, String, String, String)] = []
@@ -472,7 +548,7 @@ public enum CorrectionAnalyzer {
             guard let json = try? JSONValue.parse(s) else { continue }
             guard let obj = json.objectValue else { continue }
             guard let tsStr = obj["timestamp"]?.stringValue,
-                  let d = parseIso(tsStr.replacingOccurrences(of: "Z", with: "+00:00")) else { continue }
+                  let d = parseTimestamp(tsStr) else { continue }
 
             if let ld = lastDate, d <= ld { continue }
 
@@ -511,12 +587,8 @@ public enum CorrectionAnalyzer {
             index.lastProcessedTs = tsStr
         }
         index.lastProcessedOffset = fileSize
-
-        let data = try JSONEncoder().encode(index)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw CocoaError(.fileWriteInapplicableStringEncoding)
-        }
-        try AtomicFile.writeText(text, to: indexPath)
+        if pruneStale { pruneStaleReplacementPairs(in: &index, now: now) }
+        try writeIndex(index, to: indexPath)
 
         return index
     }
@@ -557,11 +629,7 @@ public enum CorrectionAnalyzer {
         if pairs.count == originalCount { return false }
 
         index.replacementPairs[bucket] = pairs
-        let data = try JSONEncoder().encode(index)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw CocoaError(.fileWriteInapplicableStringEncoding)
-        }
-        try AtomicFile.writeText(text, to: indexPath)
+        try writeIndex(index, to: indexPath)
         return true
     }
 

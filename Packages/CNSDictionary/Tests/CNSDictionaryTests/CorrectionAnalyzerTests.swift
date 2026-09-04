@@ -89,9 +89,84 @@ final class CorrectionAnalyzerTests: XCTestCase {
         try Data(json.utf8).write(to: url)
 
         let migrated = CorrectionAnalyzer.readIndex(at: url)
-        XCTAssertEqual(migrated.schemaVersion, 4)
+        XCTAssertEqual(migrated.schemaVersion, 5)
         XCTAssertEqual(migrated.processedRows, 0)
         XCTAssertTrue(migrated.replacementPairs["latin"]?.isEmpty == true)
+    }
+
+    func testSchemaFourReplacementPairsRebuildWithLastSeenRows() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cns-corrections-schema-five-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dataset = directory.appendingPathComponent("dataset.jsonl")
+        let indexURL = directory.appendingPathComponent("corrections.json")
+        let rows = [
+            #"{"timestamp":"2026-09-02T12:00:00+00:00","raw_whisper":"Cogni","user_final":"Cognee"}"#,
+            #"{"timestamp":"2026-09-03T12:00:00+00:00","raw_whisper":"Cogni","user_final":"Cognee"}"#,
+        ].joined(separator: "\n") + "\n"
+        try Data(rows.utf8).write(to: dataset)
+        let legacy = #"{"schema_version":4,"processed_rows":99,"inserted_terms":{"latin":{},"cyrillic":{}},"replacement_pairs":{"latin":[{"from":"Cogni","to":"Cognee","count":99,"last_seen":"2026-09-03T12:00:00+00:00"}],"cyrillic":[]}}"#
+        try Data(legacy.utf8).write(to: indexURL)
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-04T12:00:00+00:00"))
+
+        let rebuilt = try CorrectionAnalyzer.updateCorrectionsIndexThrowing(
+            datasetPath: dataset,
+            indexPath: indexURL,
+            now: now
+        )
+
+        XCTAssertEqual(rebuilt.schemaVersion, 5)
+        XCTAssertEqual(rebuilt.processedRows, 2)
+        let pair = try XCTUnwrap(rebuilt.replacementPairs["latin"]?.first)
+        XCTAssertEqual(pair.count, 2)
+        XCTAssertEqual(pair.lastSeenRow, 2)
+    }
+
+    func testReplacementPairStalenessUsesEitherInclusiveBoundary() throws {
+        let formatter = ISO8601DateFormatter()
+        let now = try XCTUnwrap(formatter.date(from: "2026-09-04T12:00:00+00:00"))
+        let fresh = ReplacementPair(
+            from: "Cogni",
+            to: "Cognee",
+            count: 2,
+            lastSeen: "2026-06-07T12:00:01+00:00",
+            lastSeenRow: 701
+        )
+        let oldByDate = ReplacementPair(
+            from: "Drylabs",
+            to: "Drylabz",
+            count: 2,
+            lastSeen: "2026-06-06T12:00:00+00:00",
+            lastSeenRow: 999
+        )
+        let oldByRows = ReplacementPair(
+            from: "continue",
+            to: "Continue",
+            count: 2,
+            lastSeen: "2026-09-04T12:00:00+00:00",
+            lastSeenRow: 700
+        )
+
+        XCTAssertFalse(CorrectionAnalyzer.isReplacementPairStale(fresh, processedRows: 1_000, now: now))
+        XCTAssertTrue(CorrectionAnalyzer.isReplacementPairStale(oldByDate, processedRows: 1_000, now: now))
+        XCTAssertTrue(CorrectionAnalyzer.isReplacementPairStale(oldByRows, processedRows: 1_000, now: now))
+    }
+
+    func testPruneStaleReplacementPairsRemovesEitherExpiredKind() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-04T12:00:00+00:00"))
+        var index = CorrectionIndex.defaultIndex()
+        index.processedRows = 1_000
+        index.replacementPairs["latin"] = [
+            ReplacementPair(from: "fresh", to: "Fresh", count: 2, lastSeen: "2026-09-04T12:00:00+00:00", lastSeenRow: 999),
+            ReplacementPair(from: "old rows", to: "Old rows", count: 2, lastSeen: "2026-09-04T12:00:00+00:00", lastSeenRow: 700),
+            ReplacementPair(from: "old date", to: "Old date", count: 2, lastSeen: "2026-06-06T12:00:00+00:00", lastSeenRow: 999),
+        ]
+
+        let removed = CorrectionAnalyzer.pruneStaleReplacementPairs(in: &index, now: now)
+
+        XCTAssertEqual(removed, 2)
+        XCTAssertEqual(index.replacementPairs["latin"]?.map(\.from), ["fresh"])
     }
 
     func testIncrementalUpdateReadsOnlyNewBytesAndKeepsEqualTimestamps() throws {
