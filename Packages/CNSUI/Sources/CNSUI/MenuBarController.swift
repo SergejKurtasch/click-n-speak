@@ -1421,7 +1421,21 @@ public final class MenuBarController: NSObject {
     @objc private func onEditConfig() { openEnsuringFile(paths.configFile, defaultContents: config.serialized()) }
     @objc private func onOpenLog() { openEnsuringFile(paths.logFile, defaultContents: "") }
     @objc private func onReloadConfig() {
-        let newConfig = Config.load(from: paths.configFile)
+        do {
+            try reloadConfiguration()
+        } catch {
+            log("Configuration reload failed; the active configuration was retained.")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = t("config.recovery_title")
+            alert.informativeText = t("config.reload_failed")
+            alert.addButton(withTitle: t("btn.ok"))
+            alert.runModal()
+        }
+    }
+
+    func reloadConfiguration() throws {
+        let newConfig = try Config.loadValidated(from: paths.configFile)
         onConfigChanged?(newConfig)
         log("Config reloaded from disk")
     }

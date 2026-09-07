@@ -463,5 +463,14 @@
   "btn.retry": "Retry",
   "ui.error_conflicting_replacement": "A source phrase can have only one replacement target.",
   "dialog.api_key_save_failed_title": "Could Not Update API Key",
-  "dialog.api_key_save_failed_body": "The key could not be stored in macOS Keychain. Check Keychain access and try again."
+  "dialog.api_key_save_failed_body": "The key could not be stored in macOS Keychain. Check Keychain access and try again.",
+  "config.recovery_title": "Configuration could not be loaded",
+  "config.recovery_body": "The configuration is unreadable or invalid. Startup is paused and your profile has not been changed. Open the original to repair it, restore an existing backup, or retry reading.",
+  "config.recovery_open": "Open Original",
+  "config.recovery_restore": "Restore Backup…",
+  "config.recovery_retry": "Retry Reading",
+  "config.recovery_quit": "Quit",
+  "config.recovery_choose": "Choose a configuration backup. It will be validated before restoration. The current file will first be preserved in a new recovery backup.",
+  "config.recovery_restore_failed": "The backup could not be restored. Check that it is valid and that the original file can be read and backed up. Startup remains paused.",
+  "config.reload_failed": "The configuration could not be reloaded. The active settings are retained. Repair the configuration file and try Reload Config again."
 }

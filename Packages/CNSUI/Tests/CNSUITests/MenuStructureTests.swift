@@ -8,6 +8,35 @@ import AppKit
 @MainActor
 @Suite("Menu structure")
 struct MenuStructureTests {
+    @Test("A failed menu reload retains active settings and never forwards defaults")
+    func invalidReloadPreservesConfiguration() throws {
+        let resources = repoResources()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        try paths.ensureDataDirectory()
+        var config = Config.migrated(JSONObject())
+        config.raw["primary_language"] = .string("de")
+        config.raw["rejected_replacements"] = .array([.object(JSONObject([
+            ("from", .string("keep")), ("to", .string("decision")),
+        ]))])
+        let controller = MenuBarController(
+            config: config, i18n: I18n.load("en", localesDirectory: resources.localesDirectory),
+            resources: resources, paths: paths, installStatusItem: false
+        )
+        var forwarded: Config?
+        controller.onConfigChanged = { forwarded = $0 }
+        let corrupt = Data("{broken".utf8)
+        try corrupt.write(to: paths.configFile)
+        #expect(throws: Config.LoadError.self) { try controller.reloadConfiguration() }
+        #expect(forwarded == nil)
+        #expect(controller.config == config)
+        #expect(try Data(contentsOf: paths.configFile) == corrupt)
+        try config.saveAtomically(to: paths.configFile)
+        try controller.reloadConfiguration()
+        #expect(forwarded == config)
+    }
+
     /// Locate the repo root (which holds `locales/`) by walking up from this
     /// source file, so the test uses the real locale files.
     private func repoResources() -> AppResources {

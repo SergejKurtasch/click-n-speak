@@ -13,6 +13,8 @@ import CNSUI
 /// config load → i18n → coordinators → menu/runtime/session activation).
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let paths: Paths
+    private let recoveryPresenter: (ConfigRecoveryCoordinator) -> Config?
     private var instanceGuard: SingleInstanceGuard?
     private var menuController: MenuBarController?
     private var modelDownloader: ModelDownloader?
@@ -34,8 +36,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var terminationStarted = false
     private var menuState: MenuState?
 
+    init(
+        paths: Paths = .resolveDefault(),
+        recoveryPresenter: @escaping (ConfigRecoveryCoordinator) -> Config? = { $0.present() }
+    ) {
+        self.paths = paths
+        self.recoveryPresenter = recoveryPresenter
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let paths = Paths.resolveDefault()
         try? paths.ensureDataDirectory()
         let permissionService = SystemPermissionService(paths: paths)
         self.permissionService = permissionService
@@ -54,16 +64,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let log: @Sendable (String) -> Void = { message in
             Task { await logger.info(message) }
         }
-        let notificationService = UserNotificationService(log: log)
-        self.notificationService = notificationService
-
         let configExisted = FileManager.default.fileExists(atPath: paths.configFile.path)
-        let loadedConfig = Config.load(from: paths.configFile)
+        let loadedConfig: Config
+        do {
+            loadedConfig = try Config.loadValidated(from: paths.configFile)
+        } catch {
+            log("Configuration could not be loaded; startup is awaiting explicit recovery.")
+            // Recovery retries only configuration reading, retaining the instance
+            // lock. No dictionary/history, watchers, timers or runtime exist yet.
+            let recovery = ConfigRecoveryCoordinator(configURL: paths.configFile)
+            guard let recovered = recoveryPresenter(recovery) else { return }
+            loadedConfig = recovered
+        }
         // Persist a migrated default on first run (Python copies config.example.json).
         if !configExisted {
             try? loadedConfig.saveAtomically(to: paths.configFile)
         }
 
+        let notificationService = UserNotificationService(log: log)
+        self.notificationService = notificationService
         let resources = AppResources.resolve()
         let phraseHistory = PhraseHistory(fileURL: paths.phraseHistoryFile, log: log)
         let preparedDictionary = Self.prepareDictionaryConfiguration(

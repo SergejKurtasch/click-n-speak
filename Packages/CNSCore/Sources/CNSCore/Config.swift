@@ -18,6 +18,33 @@ public struct Config: Sendable, Equatable {
         case decode(String)
     }
 
+    /// Validate and migrate bytes without retaining parser diagnostics that may
+    /// contain private configuration content.
+    public init(validating data: Data) throws {
+        let value: JSONValue
+        do {
+            value = try JSONValue.parse(data: data)
+        } catch {
+            throw LoadError.decode("Configuration is not valid JSON")
+        }
+        guard case let .object(object) = value else {
+            throw LoadError.decode("Configuration root must be an object")
+        }
+        self = Self.migrated(object)
+    }
+
+    /// Only a missing file means a new profile. Existing unreadable or invalid
+    /// configuration must stop startup before any profile writes occur.
+    public static func loadValidated(from url: URL) throws -> Config {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return migrated(JSONObject())
+        }
+        return try Config(validating: data)
+    }
+
     /// Read config.json, run the full migration chain, and return the migrated
     /// config. Missing file yields an empty (fully migrated) config, matching
     /// the Python `load_config` behaviour.

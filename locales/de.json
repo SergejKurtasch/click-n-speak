@@ -463,5 +463,14 @@
   "btn.retry": "Erneut versuchen",
   "ui.error_conflicting_replacement": "Eine Ausgangsphrase darf nur ein Ersetzungsziel haben.",
   "dialog.api_key_save_failed_title": "API-Schlüssel konnte nicht aktualisiert werden",
-  "dialog.api_key_save_failed_body": "Der Schlüssel konnte nicht im macOS-Schlüsselbund gespeichert werden. Prüfe den Zugriff und versuche es erneut."
+  "dialog.api_key_save_failed_body": "Der Schlüssel konnte nicht im macOS-Schlüsselbund gespeichert werden. Prüfe den Zugriff und versuche es erneut.",
+  "config.recovery_title": "Einstellungen konnten nicht geladen werden",
+  "config.recovery_body": "Die Einstellungsdatei ist nicht lesbar oder ungültig. Der Start ist angehalten und Ihr Profil bleibt unverändert. Öffnen und korrigieren Sie das Original, stellen Sie eine vorhandene Sicherung wieder her oder versuchen Sie es erneut.",
+  "config.recovery_open": "Original öffnen",
+  "config.recovery_restore": "Sicherung wiederherstellen…",
+  "config.recovery_retry": "Erneut lesen",
+  "config.recovery_quit": "Beenden",
+  "config.recovery_choose": "Wählen Sie eine Sicherung der Einstellungen. Sie wird vor der Wiederherstellung geprüft. Die aktuelle Datei wird zuerst als neue Sicherung gespeichert.",
+  "config.recovery_restore_failed": "Die Sicherung konnte nicht wiederhergestellt werden. Prüfen Sie ihre Gültigkeit und ob die Originaldatei gelesen und gesichert werden kann. Der Start bleibt angehalten.",
+  "config.reload_failed": "Die Einstellungen konnten nicht neu geladen werden. Die aktiven Einstellungen bleiben erhalten. Korrigieren Sie die Datei und laden Sie die Einstellungen erneut."
 }

@@ -146,3 +146,64 @@ struct SingleInstanceGuardTests {
         third.release()
     }
 }
+
+@Suite("Validated configuration loading")
+struct ValidatedConfigTests {
+    @Test("Only an absent file yields defaults")
+    func missingConfigReturnsDefaults() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let config = try Config.loadValidated(from: url)
+        #expect(config.schemaVersion == 10)
+        #expect(config.primaryLanguage == "ru")
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test("Malformed and non-object roots fail without altering their bytes", arguments: ["{broken", "[]", "null", "42", "\"secret\""])
+    func invalidConfigIsPreserved(contents: String) throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let bytes = Data(contents.utf8)
+        try bytes.write(to: url)
+        #expect(throws: Config.LoadError.self) { try Config.loadValidated(from: url) }
+        #expect(try Data(contentsOf: url) == bytes)
+    }
+
+    @Test("An unreadable existing file is not treated as missing")
+    func unreadableConfigThrows() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try? FileManager.default.removeItem(at: url)
+        }
+        try Data("{}".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
+        do {
+            _ = try Config.loadValidated(from: url)
+            Issue.record("Unreadable configuration returned defaults")
+        } catch let error as CocoaError {
+            #expect(error.code != .fileReadNoSuchFile)
+            #expect(error.code == .fileReadNoPermission)
+        }
+    }
+
+    @Test("Every supported schema retains unknown fields and replacement decisions", arguments: 1...10)
+    func migrationsPreserveDecisions(version: Int) throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let json = """
+        {"schema_version": \(version), "future_field": {"nested": [1, "keep"]},
+         "manual_replacements": [{"from": "manual", "to": "Manual"}],
+         "approved_auto_replacements": [{"from": "approved", "to": "Approved"}],
+         "rejected_replacements": [{"from": "rejected", "to": "Rejected"}]}
+        """
+        let original = try #require(JSONValue.parse(json).objectValue)
+        try Data(json.utf8).write(to: url)
+        let config = try Config.loadValidated(from: url)
+        #expect(config.schemaVersion == 10)
+        for key in ["future_field", "manual_replacements", "approved_auto_replacements", "rejected_replacements"] {
+            #expect(config.raw[key] == original[key])
+        }
+        try config.saveAtomically(to: url)
+        #expect(try Config.loadValidated(from: url) == config)
+    }
+}

@@ -463,5 +463,14 @@
   "btn.retry": "Réessayer",
   "ui.error_conflicting_replacement": "Une phrase source ne peut avoir qu’une seule cible de remplacement.",
   "dialog.api_key_save_failed_title": "Impossible de mettre à jour la clé API",
-  "dialog.api_key_save_failed_body": "La clé n’a pas pu être enregistrée dans le trousseau macOS. Vérifiez l’accès et réessayez."
+  "dialog.api_key_save_failed_body": "La clé n’a pas pu être enregistrée dans le trousseau macOS. Vérifiez l’accès et réessayez.",
+  "config.recovery_title": "Impossible de charger la configuration",
+  "config.recovery_body": "Le fichier de configuration est illisible ou invalide. Le démarrage est suspendu et votre profil reste inchangé. Ouvrez et corrigez l’original, restaurez une sauvegarde existante ou réessayez la lecture.",
+  "config.recovery_open": "Ouvrir l’original",
+  "config.recovery_restore": "Restaurer une sauvegarde…",
+  "config.recovery_retry": "Relire",
+  "config.recovery_quit": "Quitter",
+  "config.recovery_choose": "Choisissez une sauvegarde de la configuration. Elle sera vérifiée avant la restauration. Le fichier actuel sera d’abord conservé dans une nouvelle sauvegarde.",
+  "config.recovery_restore_failed": "Impossible de restaurer la sauvegarde. Vérifiez sa validité et que le fichier original peut être lu et sauvegardé. Le démarrage reste suspendu.",
+  "config.reload_failed": "Impossible de recharger la configuration. Les réglages actifs sont conservés. Corrigez le fichier puis rechargez la configuration."
 }
