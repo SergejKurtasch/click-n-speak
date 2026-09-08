@@ -212,30 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             configURL: paths.configFile,
             log: log
         )
-        runtimeCoordinator.onConfigActivated = { [weak self] updated in
-            self?.dictionaryCoordinator?.adoptConfiguration(updated)
-            self?.updateDesiredMenuConfig(updated)
-        }
-        runtimeCoordinator.onStateChanged = { [weak self] state in
-            self?.updateMenuRuntimeState(state)
-            if case .ready = state { self?.startHotkeyIfAllowed() }
-            if case let .degraded(active, _, _, _) = state,
-               active?.transcriber.readiness == .ready {
-                self?.startHotkeyIfAllowed()
-            }
-        }
-        self.runtimeCoordinator = runtimeCoordinator
-
-        dictionaryCoordinator.onSnapshotChanged = { [weak self] updated, invalidations in
-            guard let self else { return }
-            if invalidations.contains(.config) {
-                self.runtimeCoordinator?.updateDictionarySnapshot(updated)
-                self.updateDesiredMenuConfig(self.runtimeCoordinator?.desiredConfiguration ?? updated)
-            }
-            if invalidations.contains(.history) {
-                self.menuController?.refreshHistory(reset: true)
-            }
-        }
+        connectConfiguration(dictionary: dictionaryCoordinator, runtime: runtimeCoordinator, menu: menuCtrl)
         dictionaryCoordinator.onNotification = { [weak notificationService] notification in
             notificationService?.deliver(
                 title: i18n.t(notification.titleKey),
@@ -244,13 +221,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         dictionaryCoordinator.startPromptWatching()
 
-        menuCtrl.onConfigChanged = { [weak self, weak runtimeCoordinator] updated in
-            runtimeCoordinator?.requestConfiguration(updated)
-            self?.updateDesiredMenuConfig(runtimeCoordinator?.desiredConfiguration ?? updated)
-        }
-        menuCtrl.onConfigurationReloaded = { [weak runtimeCoordinator] updated in
-            runtimeCoordinator?.adoptPersistedConfiguration(updated)
-        }
         menuCtrl.onCredentialsChanged = { [weak runtimeCoordinator] in
             runtimeCoordinator?.revalidateDesiredConfiguration()
         }
@@ -262,9 +232,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menuCtrl.onDownloadStateChanged = { [weak self] download in
             self?.updateMenuDownloadState(download)
-        }
-        menuCtrl.onHistorySnapshotChanged = { [weak self] history in
-            self?.mutateMenuState { $0.history = history }
         }
         menuCtrl.onLocalModelsChanged = { [weak self] in
             guard let self else { return }
@@ -453,6 +420,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 _ = await session?.warmupIfIdle(full: false)
             }
+        }
+    }
+
+    /// Connect configuration ownership and menu projections independently of
+    /// permission setup, inference preparation, and other launch side effects.
+    func connectConfiguration(
+        dictionary dictionaryCoordinator: DictionaryCoordinator,
+        runtime runtimeCoordinator: AppRuntimeCoordinator,
+        menu menuCtrl: MenuBarController
+    ) {
+        self.dictionaryCoordinator = dictionaryCoordinator
+        self.runtimeCoordinator = runtimeCoordinator
+        self.menuController = menuCtrl
+        self.menuState = menuCtrl.state
+        runtimeCoordinator.onConfigActivated = { [weak self] updated in
+            self?.dictionaryCoordinator?.adoptConfiguration(updated)
+            self?.updateDesiredMenuConfig(updated)
+        }
+        runtimeCoordinator.onStateChanged = { [weak self] state in
+            self?.updateMenuRuntimeState(state)
+            if case .ready = state { self?.startHotkeyIfAllowed() }
+            if case let .degraded(active, _, _, _) = state,
+               active?.transcriber.readiness == .ready {
+                self?.startHotkeyIfAllowed()
+            }
+        }
+
+        dictionaryCoordinator.onSnapshotChanged = { [weak self] updated, invalidations in
+            guard let self else { return }
+            if invalidations.contains(.config) {
+                self.runtimeCoordinator?.updateDictionarySnapshot(updated)
+                self.updateDesiredMenuConfig(self.runtimeCoordinator?.desiredConfiguration ?? updated)
+            }
+            if invalidations.contains(.history) {
+                self.menuController?.refreshHistory(reset: true)
+            }
+        }
+        menuCtrl.onConfigChanged = { [weak self, weak runtimeCoordinator] updated in
+            runtimeCoordinator?.requestConfiguration(updated)
+            self?.updateDesiredMenuConfig(runtimeCoordinator?.desiredConfiguration ?? updated)
+        }
+        menuCtrl.onConfigurationReloaded = { [weak runtimeCoordinator] updated in
+            runtimeCoordinator?.adoptPersistedConfiguration(updated)
+        }
+        menuCtrl.onHistorySnapshotChanged = { [weak self] history in
+            self?.mutateMenuState { $0.history = history }
         }
     }
 

@@ -7,7 +7,7 @@ import Testing
 @testable import ClickNSpeak
 
 @MainActor
-private final class RuntimeSessionDouble: RuntimeSessionCoordinating {
+final class RuntimeSessionDouble: RuntimeSessionCoordinating {
     var isRuntimeIdle = true
     private(set) var runtimeAvailable = false
     private(set) var configs: [Config] = []
@@ -16,7 +16,7 @@ private final class RuntimeSessionDouble: RuntimeSessionCoordinating {
     func setRuntimeAvailable(_ available: Bool) { runtimeAvailable = available }
 }
 
-private actor RuntimeTranscriberDouble: Transcribing {
+actor RuntimeTranscriberDouble: Transcribing {
     let name: String
     private(set) var stopCount = 0
 
@@ -29,7 +29,7 @@ private actor RuntimeTranscriberDouble: Transcribing {
     func stop() async { stopCount += 1 }
 }
 
-private final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
+final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
     private let lock = NSLock()
     var beforePreparation: (@Sendable (String) async -> Void)?
     var failEditor = false

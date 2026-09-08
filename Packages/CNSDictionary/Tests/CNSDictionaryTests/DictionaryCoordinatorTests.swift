@@ -78,6 +78,44 @@ final class DictionaryCoordinatorTests: XCTestCase {
         )
     }
 
+    func testFailedFlushRetainsLatestDirtyConfirmation() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths)
+        XCTAssertTrue(coordinator.addManualTerm("Sergej", language: "en"))
+        _ = await coordinator.recordConfirmation(.init(sessionID: 1, datasetRecord: record(), finalText: "Sergej"))
+        try FileManager.default.removeItem(at: paths.configFile)
+        try FileManager.default.createDirectory(at: paths.configFile, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try coordinator.flushIfNeeded())
+        _ = await coordinator.recordConfirmation(.init(sessionID: 2, datasetRecord: record(), finalText: "Sergej"))
+        let latest = coordinator.snapshot
+        XCTAssertEqual(latest.raw["user_terms"]?.objectValue?["en"]?.arrayValue?.first?.objectValue?["use_count"]?.intValue, 2)
+        XCTAssertThrowsError(try coordinator.flushIfNeeded())
+        try FileManager.default.removeItem(at: paths.configFile)
+        try coordinator.flushIfNeeded()
+        XCTAssertEqual(try Config.loadValidated(from: paths.configFile), latest)
+    }
+
+    func testPersistedExternalAdoptionReleasesOnlyAcknowledgedOwnership() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths)
+        XCTAssertTrue(coordinator.addManualTerm("Sergej", language: "en"))
+        _ = await coordinator.recordConfirmation(.init(sessionID: 1, datasetRecord: record(), finalText: "Sergej"))
+        var external = makeConfig()
+        external.raw["future_extension"] = .string("external")
+        try external.saveAtomically(to: paths.configFile)
+        coordinator.adoptConfiguration(external)
+        XCTAssertEqual(coordinator.snapshot, external)
+        // A released dirty owner must not attempt another write.
+        try FileManager.default.removeItem(at: paths.configFile)
+        try FileManager.default.createDirectory(at: paths.configFile, withIntermediateDirectories: false)
+        XCTAssertNoThrow(try coordinator.flushIfNeeded())
+        try FileManager.default.removeItem(at: paths.configFile)
+        try external.saveAtomically(to: paths.configFile)
+        XCTAssertEqual(try Config.loadValidated(from: paths.configFile), external)
+    }
+
     func testFullLearningFlowAndConfirmIdempotency() async throws {
         let date = Date(timeIntervalSince1970: 2_000_000_000)
         let paths = makePaths()

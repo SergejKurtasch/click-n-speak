@@ -1,5 +1,8 @@
 import CNSCore
 import CNSDictionary
+import CNSEditors
+import CNSTranscription
+import CNSUI
 import Foundation
 import Testing
 @testable import ClickNSpeak
@@ -7,8 +10,105 @@ import Testing
 @MainActor
 @Suite("App delegate startup configuration")
 struct AppDelegateStartupTests {
+    @Test("Production dictionary publications preserve the pending backend in the menu")
+    func dictionaryPublicationPreservesPendingMenuSelection() async throws {
+        let (app, runtime, session, dictionary, menu, paths) = makeConfigurationBridge()
+        defer {
+            withExtendedLifetime(app) {}
+            try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent())
+        }
+        await runtime.activateInitial(dictionary.snapshot)
+        session.isRuntimeIdle = false
+        var desired = dictionary.snapshot
+        desired.raw["stt_backend"] = .string("gemini")
+        desired.raw["stt_cloud_model"] = .string("pending-model")
+        menu.onConfigChanged?(desired)
+
+        #expect(dictionary.addManualTerm("NewTerm", language: "en"))
+
+        #expect(!menu.state.history.isLoading)
+        #expect(menu.state.history.totalCount == 0)
+        #expect(menu.state.runtime.phase == .reconfiguring)
+        #expect(menu.state.runtime.desiredSTTBackend == "gemini")
+        #expect(menu.state.runtime.desiredSTTModel == "pending-model")
+        #expect(menu.state.config.sttBackend == "gemini")
+        #expect(UserTerms.activeTerms(menu.state.config, lang: "en") == ["NewTerm"])
+        #expect(runtime.desiredConfiguration.sttBackend == "gemini")
+        #expect(session.configs.last?.sttBackend == "local")
+        #expect(try Config.loadValidated(from: paths.configFile) == dictionary.snapshot)
+        #expect(try Config.loadValidated(from: paths.configFile).sttBackend == "local")
+        await runtime.shutdown()
+    }
+
+    @Test("Production history-only publications refresh history without adopting their config payload")
+    func historyPublicationOnlyRefreshesMenuHistory() async throws {
+        let (app, runtime, session, dictionary, menu, paths) = makeConfigurationBridge()
+        defer {
+            withExtendedLifetime(app) {}
+            try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent())
+        }
+        await runtime.activateInitial(dictionary.snapshot)
+        session.isRuntimeIdle = false
+        var desired = dictionary.snapshot
+        desired.raw["stt_backend"] = .string("gemini")
+        menu.onConfigChanged?(desired)
+        let menuBefore = menu.state.config
+        let activeBefore = session.configs.last
+        let diskBefore = try Data(contentsOf: paths.configFile)
+        let record = DatasetRecord(rawWhisper: "history only", userFinal: "history only", lang: "en")
+        _ = await dictionary.recordConfirmation(.init(sessionID: 1, datasetRecord: record, finalText: "history only"))
+        var obsoletePayload = dictionary.snapshot
+        obsoletePayload.raw["stt_backend"] = .string("openai")
+        obsoletePayload.raw["primary_language"] = .string("de")
+        dictionary.onSnapshotChanged?(obsoletePayload, .history)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while menu.state.history.isLoading && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(!menu.state.history.isLoading)
+        #expect(menu.state.history.totalCount == 1)
+        #expect(menu.state.history.rows.first?.text == "history only")
+        #expect(menu.state.config == menuBefore)
+        #expect(menu.state.runtime.desiredSTTBackend == "gemini")
+        #expect(menu.state.runtime.phase == .reconfiguring)
+        #expect(runtime.desiredConfiguration == menuBefore)
+        #expect(session.configs.last == activeBefore)
+        #expect(try Data(contentsOf: paths.configFile) == diskBefore)
+        await runtime.shutdown()
+    }
+
+    private func makeConfigurationBridge() -> (
+        AppDelegate, AppRuntimeCoordinator, RuntimeSessionDouble,
+        DictionaryCoordinator, MenuBarController, Paths
+    ) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        var initial = Config.migrated(JSONObject())
+        initial.raw["primary_language"] = .string("en")
+        initial.raw["ai_editor_enabled"] = .bool(false)
+        initial.raw["prompt_update_mode"] = .string("disabled")
+        initial.raw["replacement_policy_initialized"] = .bool(true)
+        let history = PhraseHistory(fileURL: paths.phraseHistoryFile)
+        let dictionary = DictionaryCoordinator(config: initial, paths: paths, phraseHistory: history)
+        let session = RuntimeSessionDouble()
+        let runtime = AppRuntimeCoordinator(initialConfig: dictionary.snapshot,
+            transcriberRouter: TranscriberRouter(), editorRouter: AiEditorRouter(),
+            factory: RuntimeFactoryDouble(), session: session, configURL: paths.configFile)
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let resources = AppResources(localesDirectory: root.appendingPathComponent("locales"),
+            iconsDirectory: root.appendingPathComponent("assets/icons"))
+        let menu = MenuBarController(config: initial,
+            i18n: I18n.load("en", localesDirectory: resources.localesDirectory), resources: resources,
+            paths: paths, phraseHistory: history, dictionaryCoordinator: dictionary, installStatusItem: false)
+        let app = AppDelegate(paths: paths)
+        app.connectConfiguration(dictionary: dictionary, runtime: runtime, menu: menu)
+        return (app, runtime, session, dictionary, menu, paths)
+    }
+
     @Test("Startup must preserve malformed original configuration")
-    func startupPreservesCorruptConfig() throws {
+    func startupPreservesCorruptConfig() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
@@ -26,7 +126,13 @@ struct AppDelegateStartupTests {
         app.applicationDidFinishLaunching(Notification(name: Notification.Name("test-launch")))
         #expect(recoveryPresented)
         #expect(try Data(contentsOf: paths.configFile) == original)
-        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        var names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        while names.contains(where: { $0.hasPrefix("Click-n-speak.log.sb-") })
+                && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+            names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        }
         #expect(Set(names).isSubset(of: ["config.json", ".instance.lock", "Click-n-speak.log"]))
         #expect(!FileManager.default.fileExists(atPath: paths.phraseHistoryFile.path))
         #expect(!FileManager.default.fileExists(atPath: paths.correctionsFile.path))
