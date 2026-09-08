@@ -265,6 +265,26 @@ final class CorrectionAnalyzerTests: XCTestCase {
         XCTAssertEqual(index.insertedTerms["latin"]?["cognee"]?.count, 1)
     }
 
+    func testAppendedDraftDoesNotLearnTheOriginalPhraseAsAnInsertion() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cns-corrections-append-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dataset = directory.appendingPathComponent("dataset.jsonl")
+        let indexURL = directory.appendingPathComponent("corrections.json")
+        let row = #"{"timestamp":"2026-09-02T12:00:00+00:00","raw_whisper":"first phrase second phrase","ai_edited":null,"user_final":"corrected first phrase second phrase","segments":[{"raw_whisper":"first phrase"},{"raw_whisper":"second phrase"}]}"# + "\n"
+        try Data(row.utf8).write(to: dataset)
+
+        let index = try CorrectionAnalyzer.updateCorrectionsIndexThrowing(
+            datasetPath: dataset,
+            indexPath: indexURL
+        )
+
+        XCTAssertEqual(index.insertedTerms["latin"]?["corrected"]?.count, 1)
+        XCTAssertNil(index.insertedTerms["latin"]?["first"])
+        XCTAssertNil(index.insertedTerms["latin"]?["phrase"])
+    }
+
     func testCorrectionIndexHandlesUserFinalWithoutLetterTokens() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("cns-corrections-symbols-\(UUID().uuidString)")

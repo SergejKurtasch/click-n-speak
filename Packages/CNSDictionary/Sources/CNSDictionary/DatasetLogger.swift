@@ -1,6 +1,29 @@
 import CNSCore
 import Foundation
 
+/// Provenance for one recording segment contributing to a popup draft.
+public struct DatasetSegment: Sendable {
+    public var rawWhisper: String
+    public var aiEdited: String?
+    public var aiStatus: String?
+    public var runtime: RuntimeDescriptor
+    public var promptHash: String
+
+    public init(
+        rawWhisper: String,
+        aiEdited: String? = nil,
+        aiStatus: String? = nil,
+        runtime: RuntimeDescriptor,
+        promptHash: String
+    ) {
+        self.rawWhisper = rawWhisper
+        self.aiEdited = aiEdited
+        self.aiStatus = aiStatus
+        self.runtime = runtime
+        self.promptHash = promptHash
+    }
+}
+
 /// One dictation, as stored in the fine-tuning dataset.
 public struct DatasetRecord: Sendable {
     public var rawWhisper: String
@@ -14,6 +37,8 @@ public struct DatasetRecord: Sendable {
     public var promptHash: String?
     /// Active dictionary terms for `lang`, used to compute term hit rates.
     public var userTerms: [String]
+    /// Present only for drafts assembled from multiple recording segments.
+    public var segments: [DatasetSegment]?
 
     public init(
         rawWhisper: String,
@@ -25,7 +50,8 @@ public struct DatasetRecord: Sendable {
         userFinal: String,
         lang: String? = nil,
         promptHash: String? = nil,
-        userTerms: [String] = []
+        userTerms: [String] = [],
+        segments: [DatasetSegment]? = nil
     ) {
         self.rawWhisper = rawWhisper
         self.aiEdited = aiEdited
@@ -37,6 +63,7 @@ public struct DatasetRecord: Sendable {
         self.lang = lang
         self.promptHash = promptHash
         self.userTerms = userTerms
+        self.segments = segments
     }
 }
 
@@ -95,6 +122,20 @@ public struct DatasetLogger: Sendable {
         object["vocab_terms_in_final"] = .array(
             findTerms(in: record.userFinal, terms: record.userTerms).map { .string($0) }
         )
+        if let segments = record.segments {
+            object["segments"] = .array(segments.map { segment in
+                var value = JSONObject()
+                value["raw_whisper"] = .string(segment.rawWhisper)
+                value["ai_edited"] = segment.aiEdited.map(JSONValue.string) ?? .null
+                value["ai_status"] = segment.aiStatus.map(JSONValue.string) ?? .null
+                value["stt_backend"] = .string(segment.runtime.transcriber.backend)
+                value["stt_model"] = .string(segment.runtime.transcriber.modelID)
+                value["ai_backend"] = .string(segment.runtime.aiEditor.backend)
+                value["ai_model"] = segment.runtime.aiEditor.modelID.map(JSONValue.string) ?? .null
+                value["prompt_hash"] = .string(segment.promptHash)
+                return .object(value)
+            })
+        }
         return JSONValue.object(object).serializedJSONLine()
     }
 

@@ -40,6 +40,8 @@ public protocol PopupPresenting: AnyObject {
     func updateStatus(_ title: String)
     func updateText(_ text: String)
     func appendText(_ text: String)
+    /// Enables or disables confirm/cancel without destroying editor state.
+    func setDecisionEnabled(_ enabled: Bool)
     func hide(delay: TimeInterval)
     func showInteractive(
         text: String,

@@ -14,12 +14,14 @@ final class FakePanel: PopupPresenting {
         case text(String)
         case interactive(String)
         case append(String)
+        case decisionEnabled(Bool)
         case hide
     }
 
     private(set) var events: [Event] = []
     private(set) var isShowingInteractive = false
     private(set) var shownText = ""
+    private(set) var decisionEnabled = true
 
     private var onConfirm: ((String) -> Void)?
     private var onCancel: (() -> Void)?
@@ -32,6 +34,11 @@ final class FakePanel: PopupPresenting {
     func appendText(_ text: String) {
         shownText += " " + text
         events.append(.append(text))
+    }
+
+    func setDecisionEnabled(_ enabled: Bool) {
+        decisionEnabled = enabled
+        events.append(.decisionEnabled(enabled))
     }
 
     func hide(delay: TimeInterval) {
@@ -49,6 +56,7 @@ final class FakePanel: PopupPresenting {
     ) {
         shownText = text
         isShowingInteractive = true
+        decisionEnabled = true
         self.onConfirm = onConfirm
         self.onCancel = onCancel
         self.onAddToDictionary = onAddToDictionary
@@ -58,14 +66,20 @@ final class FakePanel: PopupPresenting {
     // MARK: - Acting as the user
 
     func userConfirms(_ text: String? = nil) {
+        guard decisionEnabled else { return }
         let value = text ?? shownText
         isShowingInteractive = false
         onConfirm?(value)
     }
 
     func userCancels() {
+        guard decisionEnabled else { return }
         isShowingInteractive = false
         onCancel?()
+    }
+
+    func userEdits(_ text: String) {
+        shownText = text
     }
 
     func userAddsTerm(_ term: String) -> AddTermResult? {

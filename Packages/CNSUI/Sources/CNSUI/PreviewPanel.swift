@@ -31,6 +31,7 @@ public final class PreviewPanel: PopupPresenting {
     /// True between `showInteractive` and the confirm/cancel that ends it. Guards
     /// against confirm and cancel both firing for one keypress.
     private var awaitingDecision = false
+    private var decisionEnabled = false
     /// AppKit monitor tokens are opaque/non-Sendable. All mutations occur on
     /// the main actor; `nonisolated(unsafe)` only lets deinit unregister it.
     nonisolated(unsafe) private var keyMonitor: Any?
@@ -139,6 +140,7 @@ public final class PreviewPanel: PopupPresenting {
         self.onAddToDictionary = onAddToDictionary
         self.toasts = toasts
         self.awaitingDecision = true
+        self.decisionEnabled = true
 
         canonicalTitle = title
         titleField?.stringValue = title
@@ -171,6 +173,11 @@ public final class PreviewPanel: PopupPresenting {
             : (current + " " + text).trimmingCharacters(in: .whitespacesAndNewlines)
         setEditorText(combined)
         textView.setSelectedRange(NSRange(location: (combined as NSString).length, length: 0))
+    }
+
+    public func setDecisionEnabled(_ enabled: Bool) {
+        guard awaitingDecision else { return }
+        decisionEnabled = enabled
     }
 
     /// Add the selection (or the word under the caret) to the dictionary, showing
@@ -249,6 +256,7 @@ public final class PreviewPanel: PopupPresenting {
         textView = nil
         scrollView = nil
         awaitingDecision = false
+        decisionEnabled = false
         isInteractive = false
     }
 
@@ -257,7 +265,7 @@ public final class PreviewPanel: PopupPresenting {
     /// Internal so the key monitor and the text view can both route here; the
     /// `awaitingDecision` flag makes the first call win.
     func confirm() {
-        guard awaitingDecision else { return }
+        guard awaitingDecision, decisionEnabled else { return }
         awaitingDecision = false
         let text = (textView?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let handler = onConfirm
@@ -267,7 +275,7 @@ public final class PreviewPanel: PopupPresenting {
     }
 
     func cancel() {
-        guard awaitingDecision else { return }
+        guard awaitingDecision, decisionEnabled else { return }
         awaitingDecision = false
         let handler = onCancel
         teardownInteractive()
@@ -288,6 +296,7 @@ public final class PreviewPanel: PopupPresenting {
         scrollView = nil
         isInteractive = false
         awaitingDecision = false
+        decisionEnabled = false
         onConfirm = nil
         onCancel = nil
         onAddToDictionary = nil
@@ -315,10 +324,10 @@ public final class PreviewPanel: PopupPresenting {
         guard awaitingDecision else { return false }
         switch keyCode {
         case Self.keyReturn, Self.keyEnter:
-            confirm()
+            if decisionEnabled { confirm() }
             return true
         case Self.keyEscape:
-            cancel()
+            if decisionEnabled { cancel() }
             return true
         default:
             break

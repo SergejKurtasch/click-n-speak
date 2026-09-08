@@ -90,6 +90,32 @@ struct PreviewPanelTests {
         panel.close()
     }
 
+    @Test("Disabled decisions preserve the editor and swallow Enter and Escape")
+    func disabledDecisionsPreservePopup() {
+        let panel = makePanel()
+        var confirmCount = 0
+        var cancelCount = 0
+        panel.showInteractive(
+            text: "editable draft",
+            title: "Edit",
+            onConfirm: { _ in confirmCount += 1 },
+            onCancel: { cancelCount += 1 }
+        )
+
+        panel.setDecisionEnabled(false)
+        #expect(panel.handleKey(keyCode: keyReturn, hasCommand: false, characters: "\r"))
+        #expect(panel.handleKey(keyCode: keyEscape, hasCommand: false, characters: nil))
+        #expect(panel.currentText == "editable draft")
+        #expect(panel.isShowingInteractive)
+        #expect(confirmCount == 0)
+        #expect(cancelCount == 0)
+
+        panel.setDecisionEnabled(true)
+        _ = panel.handleKey(keyCode: keyReturn, hasCommand: false, characters: "\r")
+        #expect(confirmCount == 1)
+        panel.close()
+    }
+
     @Test("Enter and Escape are swallowed; other keys pass through")
     func consumesOnlyItsOwnKeys() {
         let panel = makePanel()

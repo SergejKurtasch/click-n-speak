@@ -230,6 +230,166 @@ struct SessionControllerTests {
         #expect(rig.controller.appendToPopup == false)
     }
 
+    @Test("Appending silence preserves the editable first phrase")
+    func silentAppendPreservesPopup() async {
+        let rig = makeRig(texts: ["first", ""])
+        let base = Date()
+        await runSession(rig)
+
+        rig.controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(3))
+        await settle()
+
+        #expect(rig.panel.isShowingInteractive)
+        #expect(rig.panel.decisionEnabled)
+        #expect(rig.panel.shownText == "first")
+        await rig.controller.shutdown()
+    }
+
+    @Test("Append confirmation keeps raw text from every recording")
+    func appendPreservesDatasetSource() async {
+        let coordinator = FakeDictionaryCoordinator(config: Self.makeConfig())
+        let rig = makeRig(
+            texts: ["first", "second"],
+            dictionaryCoordinator: coordinator
+        )
+        let base = Date()
+        await runSession(rig)
+        rig.controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(3))
+        await settle()
+
+        rig.panel.userConfirms()
+        await settle()
+
+        #expect(coordinator.confirmations.count == 1)
+        #expect(coordinator.confirmations.first?.datasetRecord.rawWhisper == "first second")
+        #expect(coordinator.confirmations.first?.datasetRecord.userFinal == "first second")
+        await rig.controller.shutdown()
+    }
+
+    @Test("Append keeps a user-edited first segment separate from raw provenance")
+    func appendAfterUserEditPreservesProvenance() async {
+        let coordinator = FakeDictionaryCoordinator(config: Self.makeConfig())
+        let rig = makeRig(
+            texts: ["first", "second"],
+            dictionaryCoordinator: coordinator
+        )
+        let base = Date()
+        await runSession(rig)
+        rig.panel.userEdits("corrected first")
+
+        rig.controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(3))
+        await settle()
+        rig.panel.userConfirms()
+        await settle()
+
+        #expect(coordinator.confirmations.first?.datasetRecord.rawWhisper == "first second")
+        #expect(coordinator.confirmations.first?.datasetRecord.userFinal == "corrected first second")
+        await rig.controller.shutdown()
+    }
+
+    @Test("A recorder start failure while appending restores the existing draft")
+    func failedAppendStartPreservesDraft() async {
+        let rig = makeRig(texts: ["first"])
+        await runSession(rig)
+        rig.recorder.startError = RecorderErrorStub.failed
+
+        rig.controller.toggle(now: Date().addingTimeInterval(2))
+        await settle()
+
+        #expect(rig.panel.isShowingInteractive)
+        #expect(rig.panel.decisionEnabled)
+        #expect(rig.panel.shownText == "first")
+        await rig.controller.shutdown()
+    }
+
+    @Test("Enter and Escape cannot destroy a draft while append is active")
+    func appendDisablesPopupDecisions() async {
+        let rig = makeRig(texts: ["first", "second"])
+        let base = Date()
+        await runSession(rig)
+
+        rig.controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        rig.panel.userConfirms()
+        rig.panel.userCancels()
+
+        #expect(rig.panel.isShowingInteractive)
+        #expect(!rig.panel.decisionEnabled)
+        #expect(rig.panel.shownText == "first")
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(3))
+        await settle()
+        #expect(rig.panel.isShowingInteractive)
+        #expect(rig.panel.decisionEnabled)
+        #expect(rig.panel.shownText == "first second")
+        await rig.controller.shutdown()
+    }
+
+    @Test("Two appended recordings produce one confirmation with three raw segments")
+    func twoAppendsProduceOneConfirmation() async {
+        let coordinator = FakeDictionaryCoordinator(config: Self.makeConfig())
+        let rig = makeRig(
+            texts: ["first", "second", "third"],
+            dictionaryCoordinator: coordinator
+        )
+        let base = Date()
+        await runSession(rig)
+        for index in 0..<2 {
+            let offset = Double(index * 2 + 2)
+            rig.controller.toggle(now: base.addingTimeInterval(offset))
+            await settle()
+            rig.recorder.finalChunk = audio
+            rig.controller.toggle(now: base.addingTimeInterval(offset + 1))
+            await settle()
+        }
+
+        rig.panel.userConfirms()
+        rig.panel.userConfirms("duplicate")
+        await settle()
+
+        #expect(coordinator.confirmations.count == 1)
+        #expect(coordinator.confirmations.first?.datasetRecord.rawWhisper == "first second third")
+        #expect(coordinator.confirmations.first?.datasetRecord.segments?.count == 3)
+        await rig.controller.shutdown()
+    }
+
+    @Test("A multi-segment draft never claims one aggregate AI edit")
+    func appendedDraftHasNoAggregateAiEdit() async {
+        var config = Self.makeConfig()
+        config.raw["ai_editor_enabled"] = .bool(true)
+        let editor = FakeAiEditor()
+        let coordinator = FakeDictionaryCoordinator(config: config)
+        let rig = makeRig(
+            texts: ["first", "second"],
+            config: config,
+            aiEditor: editor,
+            dictionaryCoordinator: coordinator
+        )
+        let base = Date()
+        await runSession(rig)
+        rig.controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(3))
+        await settle()
+
+        rig.panel.userConfirms()
+        await settle()
+
+        #expect(coordinator.confirmations.first?.datasetRecord.aiEdited == nil)
+        #expect(coordinator.confirmations.first?.datasetRecord.segments?.count == 2)
+        await rig.controller.shutdown()
+    }
+
     // MARK: - Guards
 
     @Test("The hotkey is ignored while the previous session is still processing")
@@ -507,6 +667,7 @@ struct SessionControllerTests {
         #expect(rig.controller.isProcessing == false)
         #expect(rig.controller.state == .idle)
         #expect(rig.panel.interactiveTexts.isEmpty)
+        #expect(rig.controller.popupDraft == nil)
         #expect(rig.controller.completedSessions == 1)
     }
 

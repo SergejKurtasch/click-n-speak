@@ -85,6 +85,7 @@ public final class SessionController {
     public private(set) var sessionId = 0
     public private(set) var completedSessions = 0
     public private(set) var appendToPopup = false
+    public private(set) var popupDraft: PopupDraft?
     public var workerOverdue: Bool {
         if case .processing(_, overdue: true) = state { return true }
         return false
@@ -111,6 +112,7 @@ public final class SessionController {
     private var sawFinalChunk = false
     private var completedOutcomeSessionId: Int?
     private var activeSessionRuntimeDescriptor: RuntimeDescriptor = .unavailable
+    private var activeSessionPromptHash = ""
     private var lastTranscriptionError: String?
     private var fileJobActive = false
     private var stopRequestedUptime: TimeInterval?
@@ -298,13 +300,17 @@ public final class SessionController {
         lastTranscriptionError = nil
         completedOutcomeSessionId = nil
         activeSessionRuntimeDescriptor = runtimeDescriptorProvider()
+        activeSessionPromptHash = Self.promptHash(config.initialPrompt)
         // A popup still open means this recording extends it: keep the popup and
         // the app it belongs to, and append the new text (§6 nr. 12).
-        appendToPopup = panel.isShowingInteractive
+        appendToPopup = panel.isShowingInteractive && popupDraft != nil
         if appendToPopup {
+            previousAppPid = popupDraft?.targetPID
+            panel.setDecisionEnabled(false)
             log("Popup is open — new recording will append to existing text.")
         } else {
             previousAppPid = frontmost.frontmostPid()
+            popupDraft = PopupDraft(targetPID: previousAppPid)
             panel.show(title: strings.recording)
         }
         stopRequestedUptime = nil
@@ -364,6 +370,9 @@ public final class SessionController {
         guard state.sessionID == id else { return }
         chunkContinuation?.finish()
         chunkContinuation = nil
+        if !restoreDraftAfterEmptyAppendIfNeeded() {
+            popupDraft = nil
+        }
         completeSession(id: id, reason: "start_cancelled", showReady: false)
     }
 
@@ -387,8 +396,12 @@ public final class SessionController {
         guard state.sessionID == id else { return }
         chunkContinuation?.finish()
         chunkContinuation = nil
-        panel.updateStatus(strings.recordError)
-        panel.hide(delay: 2.0)
+        let preservedAppend = restoreDraftAfterEmptyAppendIfNeeded()
+        if !preservedAppend {
+            popupDraft = nil
+            panel.updateStatus(strings.recordError)
+            panel.hide(delay: 2.0)
+        }
         if case RecorderError.previousStreamStuck = error {
             restartPending = true
         }
@@ -575,11 +588,16 @@ public final class SessionController {
     private func finalize(sessionId id: Int) async {
         var fullText = ChunkJoiner.join(transcribedParts)
         guard !fullText.isEmpty else {
+            if restoreDraftAfterEmptyAppendIfNeeded() {
+                log("Nothing recognised while appending to draft in session \(id).")
+                return
+            }
             let status = lastTranscriptionError ?? strings.noSpeech
             log(lastTranscriptionError == nil
                 ? "Nothing recognised in session \(id)."
                 : "Transcription failed in session \(id).")
             appendToPopup = false
+            popupDraft = nil
             panel.updateStatus(status)
             panel.hide(delay: 2.0)
             return
@@ -628,9 +646,30 @@ public final class SessionController {
             fullText = VocabProvider.applyReplacements(fullText, pairs: pairs)
         }
 
+        let raw = rawChunks.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        let segment = PopupDraft.Segment(
+            sessionID: id,
+            rawWhisper: raw,
+            aiEdited: lastRefineResult?.status == .ok ? lastRefineResult?.text : nil,
+            aiStatus: lastRefineResult?.status.rawValue,
+            presentedText: fullText,
+            runtime: activeSessionRuntimeDescriptor,
+            promptHash: activeSessionPromptHash,
+            detectedLanguage: detectedLanguage.isEmpty ? nil : detectedLanguage
+        )
+        if var draft = popupDraft {
+            draft.append(segment)
+            popupDraft = draft
+        } else {
+            var draft = PopupDraft(targetPID: previousAppPid)
+            draft.append(segment)
+            popupDraft = draft
+        }
+
         if appendToPopup, panel.isShowingInteractive {
             panel.appendText(fullText)
             appendToPopup = false
+            panel.setDecisionEnabled(true)
             emitPopupPresentedTelemetry(sessionID: id, appendMode: true)
             log("Appended \(fullText.count) chars to the open popup.")
             return
@@ -693,26 +732,41 @@ public final class SessionController {
 
     private func handleConfirm(_ userText: String) {
         guard claimPopupOutcome(reason: "confirm") else { return }
-        let raw = rawChunks.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        let lang = detectedLanguage.isEmpty ? config.primaryLanguage : detectedLanguage
-        let pid = previousAppPid
+        let draft = popupDraft
+        let raw = draft?.rawWhisper
+            ?? rawChunks.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        let lang = draft?.lastDetectedLanguage
+            ?? (detectedLanguage.isEmpty ? config.primaryLanguage : detectedLanguage)
+        let pid = draft?.targetPID ?? previousAppPid
         transition(to: .injecting(sessionID: sessionId, targetPID: pid), reason: "popup_confirm")
 
-        let aiEdited = lastRefineResult?.status == .ok ? lastRefineResult?.text : nil
-        let runtime = activeSessionRuntimeDescriptor
+        let aiEdited: String?
+        let aiStatus: String?
+        let promptHash: String?
+        if let draft {
+            aiEdited = draft.aggregateAiEdited
+            aiStatus = draft.aggregateAiStatus
+            promptHash = draft.aggregatePromptHash
+        } else {
+            aiEdited = lastRefineResult?.status == .ok ? lastRefineResult?.text : nil
+            aiStatus = lastRefineResult?.status.rawValue
+            promptHash = activeSessionPromptHash
+        }
+        let runtime = draft?.aggregateRuntime ?? activeSessionRuntimeDescriptor
 
         let date = Date()
         let record = DatasetRecord(
             rawWhisper: raw,
             aiEdited: aiEdited,
-            aiStatus: lastRefineResult?.status.rawValue,
+            aiStatus: aiStatus,
             sttBackend: runtime.transcriber.backend,
             sttModel: runtime.transcriber.modelID,
             aiModel: runtime.aiEditor.modelID,
             userFinal: userText,
             lang: lang,
-            promptHash: Self.promptHash(config.initialPrompt),
-            userTerms: UserTerms.activeTerms(config, lang: lang)
+            promptHash: promptHash,
+            userTerms: UserTerms.activeTerms(config, lang: lang),
+            segments: draft?.datasetSegments
         )
 
         if let dictionaryCoordinator {
@@ -741,6 +795,7 @@ public final class SessionController {
         }
 
         guard !userText.isEmpty else {
+            popupDraft = nil
             log("Confirmed with empty text; nothing to inject.")
             transition(to: .idle, reason: "empty_confirm")
             runDeferredReloadIfIdle()
@@ -754,6 +809,7 @@ public final class SessionController {
             let delivered = await self.delivery.deliver(userText + Self.injectionSuffix, to: pid)
             self.log("Injection finished: delivered=\(delivered) chars=\(userText.count)")
             if case let .injecting(activeID, _) = self.state, activeID == self.sessionId {
+                if delivered { self.popupDraft = nil }
                 self.transition(to: .idle, reason: delivered ? "injection_complete" : "injection_failed")
                 self.runDeferredReloadIfIdle()
             }
@@ -762,6 +818,7 @@ public final class SessionController {
 
     private func handleCancel() {
         guard claimPopupOutcome(reason: "cancel") else { return }
+        popupDraft = nil
         log("User cancelled from popup.")
         transition(to: .idle, reason: "popup_cancel")
         runDeferredReloadIfIdle()
@@ -781,6 +838,14 @@ public final class SessionController {
             "session_end",
             fields: ["session_id": sessionId, "reason": reason]
         )
+        return true
+    }
+
+    @discardableResult
+    private func restoreDraftAfterEmptyAppendIfNeeded() -> Bool {
+        guard appendToPopup, popupDraft != nil, panel.isShowingInteractive else { return false }
+        appendToPopup = false
+        panel.setDecisionEnabled(true)
         return true
     }
 

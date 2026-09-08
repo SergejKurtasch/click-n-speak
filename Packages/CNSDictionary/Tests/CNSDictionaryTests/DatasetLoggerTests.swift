@@ -1,3 +1,4 @@
+import CNSCore
 import Foundation
 import Testing
 @testable import CNSDictionary
@@ -62,5 +63,58 @@ struct DatasetLoggerTests {
         for line in lines {
             #expect(try JSONSerialization.jsonObject(with: Data(line.utf8)) is [String: Any])
         }
+    }
+
+    @Test("Append provenance serializes every runtime segment without changing legacy records")
+    func serializesSegments() throws {
+        let record = DatasetRecord(
+            rawWhisper: "first second",
+            aiEdited: nil,
+            userFinal: "corrected first second",
+            segments: [
+                DatasetSegment(
+                    rawWhisper: "first",
+                    aiEdited: nil,
+                    aiStatus: "disabled",
+                    runtime: RuntimeDescriptor(
+                        transcriber: .init(backend: "local", modelID: "whisper-a", kind: .local),
+                        aiEditor: .disabled
+                    ),
+                    promptHash: "prompt-a"
+                ),
+                DatasetSegment(
+                    rawWhisper: "second",
+                    aiEdited: "second edited",
+                    aiStatus: "ok",
+                    runtime: RuntimeDescriptor(
+                        transcriber: .init(backend: "openai", modelID: "gpt-4o-transcribe", kind: .cloud),
+                        aiEditor: .init(backend: "gemini", modelID: "flash", kind: .cloud)
+                    ),
+                    promptHash: "prompt-b"
+                ),
+            ]
+        )
+
+        let line = DatasetLogger.jsonLine(record, at: date("2026-07-23T10:00:00Z"))
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        )
+        let segments = try #require(object["segments"] as? [[String: Any]])
+
+        #expect(segments.count == 2)
+        #expect(segments[0]["raw_whisper"] as? String == "first")
+        #expect(segments[0]["stt_model"] as? String == "whisper-a")
+        #expect(segments[1]["ai_edited"] as? String == "second edited")
+        #expect(segments[1]["ai_backend"] as? String == "gemini")
+        #expect(segments[1]["prompt_hash"] as? String == "prompt-b")
+
+        let legacy = DatasetLogger.jsonLine(
+            DatasetRecord(rawWhisper: "one", userFinal: "one"),
+            at: date("2026-07-23T10:00:00Z")
+        )
+        let legacyObject = try #require(
+            JSONSerialization.jsonObject(with: Data(legacy.utf8)) as? [String: Any]
+        )
+        #expect(legacyObject["segments"] == nil)
     }
 }
