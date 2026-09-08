@@ -63,7 +63,14 @@ public struct DictionaryNotification: Sendable, Equatable {
     public let bodyKey: String
 }
 
-private actor DictionaryPersistenceWorker {
+public protocol PromptCandidateAnalyzing: Sendable {
+    func analyzePromptCandidates(
+        existing: [String: Set<String>], skipped: [String: [String: Int]],
+        minimum: [String: Int], lookback: Int, now: Date
+    ) async throws -> PromptAnalysisOutput
+}
+
+private actor DictionaryPersistenceWorker: PromptCandidateAnalyzing {
     private let paths: Paths
     private let phraseHistory: any PhraseHistoryProviding
     private let datasetLogger: DatasetLogger
@@ -146,6 +153,11 @@ private actor DictionaryPersistenceWorker {
         )
     }
 
+    func appendMetrics(_ metrics: JSONObject, now: Date) throws -> [JSONObject] {
+        try Metrics.appendHistory(metrics, to: paths.metricsHistoryFile, now: now)
+        return Metrics.loadHistory(at: paths.metricsHistoryFile)
+    }
+
     func pruneReplacementObservations(now: Date) throws -> Int {
         var index = try CorrectionAnalyzer.readIndexThrowing(at: paths.correctionsFile)
         let removed = CorrectionAnalyzer.pruneStaleReplacementPairs(in: &index, now: now)
@@ -156,10 +168,16 @@ private actor DictionaryPersistenceWorker {
     }
 }
 
-private struct PromptAnalysisOutput: Sendable {
-    let currentPhraseCount: Int
-    let corrections: [String: [TermCandidate]]
-    let frequency: [String: [TermCandidate]]
+public struct PromptAnalysisOutput: Sendable {
+    public let currentPhraseCount: Int
+    public let corrections: [String: [TermCandidate]]
+    public let frequency: [String: [TermCandidate]]
+
+    public init(currentPhraseCount: Int, corrections: [String: [TermCandidate]], frequency: [String: [TermCandidate]]) {
+        self.currentPhraseCount = currentPhraseCount
+        self.corrections = corrections
+        self.frequency = frequency
+    }
 }
 
 @MainActor
@@ -197,7 +215,21 @@ public enum DictionaryCoordinatorError: LocalizedError {
 /// writes raw config or corrections JSON independently.
 @MainActor
 public final class DictionaryCoordinator: DictionaryCoordinating {
-    public private(set) var snapshot: Config
+    public private(set) var snapshot: Config {
+        didSet {
+            if Self.analysisFields.contains(where: { oldValue.raw[$0] != snapshot.raw[$0] }) {
+                analysisRevision &+= 1
+            }
+        }
+    }
+    private static let analysisFields = [
+        "user_terms", "primary_language", "additional_languages", "skipped_terms",
+        "pending_suggestions", "prompt_update_mode", "auto_prompt_check_interval",
+        "auto_prompt_check_min_count_primary", "auto_prompt_check_min_count_additional",
+        "auto_prompt_lookback",
+    ]
+    private var analysisRevision: UInt64 = 0
+    private var metricsPersistenceTail: Task<Void, Never>?
     public var correctionsURL: URL { paths.correctionsFile }
     public var onSnapshotChanged: ((Config, DictionaryInvalidations) -> Void)?
     public var onNotification: ((DictionaryNotification) -> Void)?
@@ -206,6 +238,8 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     private let paths: Paths
     private let phraseHistory: any PhraseHistoryProviding
     private let persistenceWorker: DictionaryPersistenceWorker
+    private let promptAnalyzer: any PromptCandidateAnalyzing
+    private let metricsComputer: @Sendable (URL, URL, JSONObject, Date) async -> JSONObject
     private let promptBuilder: InitialPromptBuilder
     private let clock: @Sendable () -> Date
     private let correctionIndexWriter: @Sendable (CorrectionIndex, URL) throws -> Void
@@ -236,6 +270,10 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         phraseHistory: any PhraseHistoryProviding,
         datasetLogger: DatasetLogger? = nil,
         promptBuilder: InitialPromptBuilder = InitialPromptBuilder(),
+        promptAnalyzer: (any PromptCandidateAnalyzing)? = nil,
+        metricsComputer: @escaping @Sendable (URL, URL, JSONObject, Date) async -> JSONObject = { dataset, corrections, config, now in
+            Metrics.computeMetrics(datasetUrl: dataset, correctionsUrl: corrections, config: config, now: now)
+        },
         clock: @escaping @Sendable () -> Date = Date.init,
         correctionIndexWriter: @escaping @Sendable (CorrectionIndex, URL) throws -> Void = {
             try CorrectionAnalyzer.writeIndex($0, to: $1)
@@ -252,6 +290,8 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             datasetLogger: resolvedDatasetLogger,
             log: log
         )
+        self.promptAnalyzer = promptAnalyzer ?? self.persistenceWorker
+        self.metricsComputer = metricsComputer
         self.promptBuilder = promptBuilder
         self.clock = clock
         self.correctionIndexWriter = correctionIndexWriter
@@ -842,8 +882,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         if !force, let last = UserTerms.parseTimestamp(snapshot.raw["last_metrics_snapshot_ts"]?.stringValue),
            now.timeIntervalSince(last) < 24 * 3_600 { return latestMetricsSnapshot }
         let metrics = await computeMetricsOffMain(now: now, priority: .utility)
-        try await persistMetricsSnapshot(metrics, now: now)
-        return metrics
+        return try await persistMetricsSnapshot(metrics, now: now, force: force)
     }
 
     /// Computes the Statistics window snapshot away from AppKit's main actor,
@@ -852,36 +891,45 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         let now = clock()
         let metrics = await computeMetricsOffMain(now: now, priority: .userInitiated)
         try Task.checkCancellation()
-        try await persistMetricsSnapshot(metrics, now: now)
-        return metrics
+        return try await persistMetricsSnapshot(metrics, now: now, force: true)
     }
 
     private func computeMetricsOffMain(now: Date, priority: TaskPriority) async -> JSONObject {
         let datasetURL = paths.datasetFile
         let correctionsURL = paths.correctionsFile
         let rawConfig = snapshot.raw
+        let compute = metricsComputer
         return await Task.detached(priority: priority) {
-            Metrics.computeMetrics(
-                datasetUrl: datasetURL,
-                correctionsUrl: correctionsURL,
-                config: rawConfig,
-                now: now
-            )
+            await compute(datasetURL, correctionsURL, rawConfig, now)
         }.value
     }
 
-    private func persistMetricsSnapshot(_ metrics: JSONObject, now: Date) async throws {
-        let historyURL = paths.metricsHistoryFile
-        let history = try await Task.detached(priority: .utility) {
-            try Metrics.appendHistory(metrics, to: historyURL, now: now)
-            return Metrics.loadHistory(at: historyURL)
-        }.value
+    private func persistMetricsSnapshot(_ metrics: JSONObject, now: Date, force: Bool) async throws -> JSONObject {
         try Task.checkCancellation()
-        var candidate = snapshot
-        maybeScheduleMetricsNotification(metrics, history: history, config: &candidate, now: now)
-        candidate.raw["last_metrics_snapshot_ts"] = .string(ISOTimestamp.now(now))
-        try commit(candidate, promptLanguages: [], invalidations: [.metrics])
-        latestMetricsSnapshot = metrics
+        let previous = metricsPersistenceTail
+        // Keep the daily-policy check, worker append, and config acknowledgement in
+        // one ordered transaction, including across the worker's actor hop.
+        let transaction = Task { @MainActor in
+            await previous?.value
+            if !force, let last = UserTerms.parseTimestamp(snapshot.raw["last_metrics_snapshot_ts"]?.stringValue),
+               now.timeIntervalSince(last) < 24 * 3_600 {
+                return latestMetricsSnapshot ?? metrics
+            }
+            let history = try await persistenceWorker.appendMetrics(metrics, now: now)
+            // Once the append succeeds, finish acknowledgement even if the caller
+            // has cancelled its presentation. Older forced snapshots stay in history.
+            let last = UserTerms.parseTimestamp(snapshot.raw["last_metrics_snapshot_ts"]?.stringValue)
+            if last.map({ now >= $0 }) ?? true {
+                var candidate = snapshot
+                maybeScheduleMetricsNotification(metrics, history: history, config: &candidate, now: now)
+                candidate.raw["last_metrics_snapshot_ts"] = .string(ISOTimestamp.now(now))
+                try commit(candidate, promptLanguages: [], invalidations: [.metrics])
+                latestMetricsSnapshot = metrics
+            }
+            return metrics
+        }
+        metricsPersistenceTail = Task { _ = try? await transaction.value }
+        return try await transaction.value
     }
 
     public func runDailyMaintenanceIfDue() {
@@ -910,7 +958,8 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         analysisRunning = true
         defer { analysisRunning = false }
         let mode = snapshot.raw["prompt_update_mode"]?.stringValue ?? "suggest"
-        if mode == "disabled", !onDemand { return }
+        guard mode != "disabled" else { return }
+        let revision = analysisRevision
 
         let primary = snapshot.primaryLanguage
         let additional = snapshot.additionalLanguages
@@ -932,7 +981,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         let existing = existingTermsByLanguage()
         let skipped = skippedTermsByLanguage()
         let analysisNow = clock()
-        let output = try await persistenceWorker.analyzePromptCandidates(
+        let output = try await promptAnalyzer.analyzePromptCandidates(
             existing: existing,
             skipped: skipped,
             minimum: minimum,
@@ -940,8 +989,25 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             now: analysisNow
         )
         try Task.checkCancellation()
+        guard revision == analysisRevision,
+              snapshot.raw["prompt_update_mode"]?.stringValue != "disabled" else { return }
+        let currentExisting = existingTermsByLanguage()
+        let currentSkipped = skippedTermsByLanguage()
+        let filtered = Dictionary(uniqueKeysWithValues:
+            mergeCandidates(corrections: output.corrections, frequency: output.frequency).map { bucket, items in
+                let script = ["latin", "cyrillic"].contains(bucket) ? bucket : VocabProvider.getLanguageScript(bucket)
+                let existing = VocabProvider.existingTermsUnionForScript(currentExisting, script: script)
+                let skipped = VocabProvider.skippedPhrasesMergeForScript(currentSkipped, script: script)
+                return (bucket, items.filter { item in
+                    let key = TermCanonicalizer.canonicalKey(item.term)
+                    guard !existing.contains(key) else { return false }
+                    if let rejectedAt = skipped[key], output.currentPhraseCount - rejectedAt < 150 { return false }
+                    return true
+                })
+            }
+        )
         let merged = remapCandidates(
-            mergeCandidates(corrections: output.corrections, frequency: output.frequency),
+            filtered,
             primary: primary,
             additional: additional
         )

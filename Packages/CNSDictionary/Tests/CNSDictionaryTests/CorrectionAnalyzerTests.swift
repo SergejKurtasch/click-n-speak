@@ -3,6 +3,52 @@ import CNSCore
 @testable import CNSDictionary
 
 final class CorrectionAnalyzerTests: XCTestCase {
+    func testTenThousandTokensWithMiddleEditUsesFourCellsAndOriginalIndices() {
+        var source = Array(repeating: "context", count: 10_000)
+        source[5_000] = "Cogni"
+        var target = source
+        target[5_000] = "Cognee"
+        var cells = -1
+        let ops = getOpcodes(source, target) { cells = $0.allocatedCells }
+        XCTAssertEqual(cells, 4)
+        let replacements = ops.filter { $0.type == .replace }
+        XCTAssertEqual(replacements.count, 1)
+        XCTAssertEqual(replacements.first?.i1, 5_000)
+        XCTAssertEqual(replacements.first?.i2, 5_001)
+        XCTAssertEqual(replacements.first?.j1, 5_000)
+        XCTAssertEqual(replacements.first?.j2, 5_001)
+    }
+
+    func testTrimmedInsertionAndDeletionKeepOriginalOffsets() {
+        for (source, target, type, expectedI2, expectedJ2) in [
+            (["left", "right"], ["left", "new", "right"], Opcode.insert, 1, 2),
+            (["left", "old", "right"], ["left", "right"], Opcode.delete, 2, 1),
+        ] {
+            var cells = -1
+            let ops = getOpcodes(source, target) { cells = $0.allocatedCells }
+            let edit = ops.first { $0.type != .equal }
+            XCTAssertEqual(edit?.type, type)
+            XCTAssertEqual(edit?.i1, 1)
+            XCTAssertEqual(edit?.j1, 1)
+            XCTAssertEqual(edit?.i2, expectedI2)
+            XCTAssertEqual(edit?.j2, expectedJ2)
+            XCTAssertEqual(cells, 0)
+        }
+    }
+
+    func testIdenticalTokensAllocateNoMatrix() {
+        var cells = -1
+        let tokens = Array(repeating: "Alpha", count: 10_000)
+        let ops = getOpcodes(tokens, tokens) { cells = $0.allocatedCells }
+        XCTAssertEqual(cells, 0)
+        XCTAssertTrue(ops.allSatisfy { $0.type == .equal })
+    }
+
+    func testUnrelatedWindowOverLimitSkipsLearningOpcodes() {
+        XCTAssertTrue(getOpcodes(Array(repeating: "Alpha", count: 1_000),
+                                 Array(repeating: "Beta", count: 1_000)).isEmpty)
+    }
+
     func testOpcodesHandlesEitherEmptySide() {
         let insertion = getOpcodes([String](), ["term"])
         XCTAssertEqual(insertion.count, 1)

@@ -78,6 +78,126 @@ final class DictionaryCoordinatorTests: XCTestCase {
         )
     }
 
+    func testSuspendedAnalysisCannotRestoreCandidatesAfterReviewOrConfigurationChanges() async throws {
+        for mutation in ["reject", "accept", "primary", "additional", "disabled", "terms", "threshold", "lookback"] {
+            let paths = makePaths()
+            defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+            var config = makeConfig(mode: "suggest")
+            if mutation == "reject" || mutation == "accept" {
+                config.raw["pending_suggestions"] = .object(JSONObject([
+                    ("en", .array([.object(JSONObject([("term", .string("SwiftUI")), ("count", .int(5))]))]))
+                ]))
+            }
+            config.raw["future_extension"] = .string("preserve")
+            let gate = AnalysisSuspension()
+            let coordinator = DictionaryCoordinator(
+                config: config, paths: paths, phraseHistory: PhraseHistory(fileURL: paths.phraseHistoryFile),
+                promptAnalyzer: SuspendedCandidateAnalyzer(gate: gate)
+            )
+            let analysis = Task { try await coordinator.runPromptAnalysis(onDemand: mutation == "disabled") }
+            await gate.waitForArrival(1)
+            switch mutation {
+            case "reject": try coordinator.rejectSuggestion(language: "en", term: "SwiftUI")
+            case "accept": try coordinator.acceptSuggestion(language: "en", term: "SwiftUI")
+            case "disabled": try coordinator.setPromptUpdateMode("disabled")
+            case "terms": XCTAssertTrue(coordinator.addManualTerm("SwiftUI", language: "en"))
+            default:
+                var changed = coordinator.snapshot
+                if mutation == "primary" { changed.raw["primary_language"] = .string("de") }
+                if mutation == "additional" { changed.raw["additional_languages"] = .array([.string("fr")]) }
+                if mutation == "threshold" { changed.raw["auto_prompt_check_min_count_primary"] = .int(50) }
+                if mutation == "lookback" { changed.raw["auto_prompt_lookback"] = .int(10) }
+                coordinator.adoptConfiguration(changed)
+            }
+            let current = coordinator.snapshot
+            var publications = 0
+            coordinator.onSnapshotChanged = { _, _ in publications += 1 }
+            await gate.release(1)
+            try await analysis.value
+            XCTAssertEqual(coordinator.snapshot, current, mutation)
+            XCTAssertTrue(coordinator.pendingSuggestions().isEmpty, mutation)
+            XCTAssertEqual(publications, 0, mutation)
+        }
+    }
+
+    func testCompetingMetricsRecheckDailyPolicyAndNeverRegressTimestamp() async throws {
+        for forced in [false, true] {
+            let paths = makePaths()
+            defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+            let gate = AnalysisSuspension()
+            let clock = MetricsTestClock()
+            let older = Date(timeIntervalSince1970: 2_000_000_000)
+            let newer = older.addingTimeInterval(60)
+            clock.date = older
+            let coordinator = DictionaryCoordinator(
+                config: makeConfig(), paths: paths, phraseHistory: PhraseHistory(fileURL: paths.phraseHistoryFile),
+                metricsComputer: { dataset, corrections, config, now in
+                    await gate.pause(now == older ? 1 : 2)
+                    return Metrics.computeMetrics(datasetUrl: dataset, correctionsUrl: corrections, config: config, now: now)
+                }, clock: { clock.date }
+            )
+            let first = Task { try await coordinator.runMetricsIfDue(force: forced) }
+            await gate.waitForArrival(1)
+            clock.date = newer
+            let second = Task { try await coordinator.computeMetricsForPresentation() }
+            await gate.waitForArrival(2)
+            await gate.release(2)
+            let latest = try await second.value
+            await gate.release(1)
+            _ = try await first.value
+            let rows = Metrics.loadHistory(at: paths.metricsHistoryFile)
+            XCTAssertEqual(rows.count, forced ? 2 : 1)
+            XCTAssertEqual(coordinator.snapshot.raw["last_metrics_snapshot_ts"]?.stringValue, ISOTimestamp.now(newer))
+            XCTAssertEqual(coordinator.latestMetricsSnapshot, latest)
+            XCTAssertEqual(try Config.loadValidated(from: paths.configFile), coordinator.snapshot)
+        }
+    }
+
+    func testAnalysisLimitPreservesConfirmationAndLearnsTheOtherComparison() async throws {
+        let rawLong = Array(repeating: "RawToken", count: 1_000).joined(separator: " ")
+        let editedLong = Array(repeating: "EditedToken", count: 1_000).joined(separator: " ")
+        let finalLong = Array(repeating: "FinalToken", count: 1_000).joined(separator: " ")
+        let cases: [(String, String, String, String?)] = [
+            (rawLong, editedLong, finalLong, nil),
+            (rawLong, "FinalTypo " + Array(repeating: "FinalToken", count: 999).joined(separator: " "), finalLong, "FinalTypo"),
+            ("FinalTypo " + Array(repeating: "FinalToken", count: 999).joined(separator: " "), editedLong, finalLong, "FinalTypo"),
+        ]
+        for (raw, edited, final, learnedSource) in cases {
+            let paths = makePaths()
+            defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+            let coordinator = makeCoordinator(config: makeConfig(), paths: paths)
+            let record = DatasetRecord(rawWhisper: raw, aiEdited: edited, aiStatus: "ok", sttBackend: "local",
+                                       sttModel: "fixture", aiModel: "fixture", userFinal: final, lang: "en",
+                                       promptHash: "fixture", userTerms: [])
+            let result = await coordinator.recordConfirmation(.init(sessionID: 1, datasetRecord: record, finalText: final))
+            XCTAssertTrue(result.datasetSaved)
+            XCTAssertTrue(result.historySaved)
+            XCTAssertTrue(result.correctionsUpdated)
+            XCTAssertEqual(PhraseHistory(fileURL: paths.phraseHistoryFile).lastPhrases(1).first?.text, final)
+            let data = try String(contentsOf: paths.datasetFile, encoding: .utf8)
+            XCTAssertEqual(data.split(separator: "\n").count, 1)
+            let index = CorrectionAnalyzer.readIndex(at: paths.correctionsFile)
+            XCTAssertEqual(index.processedRows, 1)
+            let pairs = index.replacementPairs["latin"] ?? []
+            XCTAssertEqual(pairs.map(\.from), learnedSource.map { [$0] } ?? [])
+            XCTAssertEqual(pairs.map(\.to), learnedSource == nil ? [] : ["FinalToken"])
+            if learnedSource == nil { XCTAssertTrue(index.insertedTerms.values.allSatisfy(\.isEmpty)) }
+        }
+    }
+
+    func testOverlappingForcedMetricsRetainEveryHistoryRow() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths, clock: { now })
+        async let first = coordinator.computeMetricsForPresentation()
+        async let second = coordinator.computeMetricsForPresentation()
+        async let third = coordinator.runMetricsIfDue(force: true)
+        _ = try await (first, second, third)
+        XCTAssertEqual(Metrics.loadHistory(at: paths.metricsHistoryFile).count, 3)
+        XCTAssertEqual(coordinator.snapshot.raw["last_metrics_snapshot_ts"]?.stringValue, ISOTimestamp.now(now))
+    }
+
     func testFailedFlushRetainsLatestDirtyConfirmation() async throws {
         let paths = makePaths()
         defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
@@ -564,5 +684,48 @@ final class DictionaryCoordinatorTests: XCTestCase {
 
         XCTAssertNotNil(coordinator.snapshot.raw["last_decay_run_ts"]?.stringValue)
         XCTAssertNotNil(coordinator.snapshot.raw["last_metrics_snapshot_ts"]?.stringValue)
+    }
+}
+
+private actor AnalysisSuspension {
+    private var arrived = Set<Int>()
+    private var suspended: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var observers: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    func pause(_ id: Int) async {
+        await withCheckedContinuation { continuation in
+            suspended[id] = continuation
+            arrived.insert(id)
+            observers.removeValue(forKey: id)?.resume()
+        }
+    }
+
+    func waitForArrival(_ id: Int) async {
+        if arrived.contains(id) { return }
+        await withCheckedContinuation { observers[id] = $0 }
+    }
+
+    func release(_ id: Int) { suspended.removeValue(forKey: id)?.resume() }
+}
+
+private struct SuspendedCandidateAnalyzer: PromptCandidateAnalyzing {
+    let gate: AnalysisSuspension
+    func analyzePromptCandidates(
+        existing: [String: Set<String>], skipped: [String: [String: Int]],
+        minimum: [String: Int], lookback: Int, now: Date
+    ) async throws -> PromptAnalysisOutput {
+        await gate.pause(1)
+        return PromptAnalysisOutput(currentPhraseCount: 5, corrections: [:], frequency: [
+            "latin": [TermCandidate(term: "SwiftUI", count: 5, correctionCount: 0, frequencyCount: 5, source: "frequency")]
+        ])
+    }
+}
+
+private final class MetricsTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = Date()
+    var date: Date {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }

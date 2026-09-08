@@ -131,17 +131,50 @@ struct OpcodeChunk {
     let j2: Int
 }
 
-func getOpcodes<T: Equatable>(_ a: [T], _ b: [T]) -> [OpcodeChunk] {
+struct DiffWorkspace {
+    let allocatedCells: Int
+    let limited: Bool
+}
+
+func getOpcodes<T: Equatable>(
+    _ source: [T], _ target: [T], reportWorkspace: (DiffWorkspace) -> Void = { _ in }
+) -> [OpcodeChunk] {
+    var prefix = 0
+    while prefix < min(source.count, target.count), source[prefix] == target[prefix] { prefix += 1 }
+    var sourceEnd = source.count
+    var targetEnd = target.count
+    while sourceEnd > prefix, targetEnd > prefix, source[sourceEnd - 1] == target[targetEnd - 1] {
+        sourceEnd -= 1
+        targetEnd -= 1
+    }
+    let a = Array(source[prefix..<sourceEnd])
+    let b = Array(target[prefix..<targetEnd])
     let m = a.count
     let n = b.count
+    func restoreIndices(_ window: [OpcodeChunk]) -> [OpcodeChunk] {
+        var result: [OpcodeChunk] = []
+        if prefix > 0 { result.append(OpcodeChunk(type: .equal, i1: 0, i2: prefix, j1: 0, j2: prefix)) }
+        result += window.map { OpcodeChunk(type: $0.type, i1: $0.i1 + prefix, i2: $0.i2 + prefix, j1: $0.j1 + prefix, j2: $0.j2 + prefix) }
+        if sourceEnd < source.count {
+            result.append(OpcodeChunk(type: .equal, i1: sourceEnd, i2: source.count, j1: targetEnd, j2: target.count))
+        }
+        return result
+    }
     if m == 0 {
-        guard n > 0 else { return [] }
-        return [OpcodeChunk(type: .insert, i1: 0, i2: 0, j1: 0, j2: n)]
+        reportWorkspace(DiffWorkspace(allocatedCells: 0, limited: false))
+        return restoreIndices(n == 0 ? [] : [OpcodeChunk(type: .insert, i1: 0, i2: 0, j1: 0, j2: n)])
     }
     if n == 0 {
-        return [OpcodeChunk(type: .delete, i1: 0, i2: m, j1: 0, j2: 0)]
+        reportWorkspace(DiffWorkspace(allocatedCells: 0, limited: false))
+        return restoreIndices([OpcodeChunk(type: .delete, i1: 0, i2: m, j1: 0, j2: 0)])
     }
 
+    let cellCount = (m + 1).multipliedReportingOverflow(by: n + 1)
+    guard !cellCount.overflow, cellCount.partialValue <= 1_000_000 else {
+        reportWorkspace(DiffWorkspace(allocatedCells: 0, limited: true))
+        return []
+    }
+    reportWorkspace(DiffWorkspace(allocatedCells: cellCount.partialValue, limited: false))
     var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
 
     for i in 0...m { dp[i][0] = i }
@@ -188,7 +221,7 @@ func getOpcodes<T: Equatable>(_ a: [T], _ b: [T]) -> [OpcodeChunk] {
             merged.append(op)
         }
     }
-    return merged
+    return restoreIndices(merged)
 }
 
 // MARK: - Analyzer
@@ -471,7 +504,15 @@ public enum CorrectionAnalyzer {
         let usrTokens = tokenize(userText)
         let srcLower = Set(srcTokens.map(normCmp))
 
-        let ops = getOpcodes(srcTokens.map(normCmp), usrTokens.map(normCmp))
+        let ops = getOpcodes(srcTokens.map(normCmp), usrTokens.map(normCmp)) { workspace in
+            guard workspace.limited else { return }
+            RuntimeTelemetry.emitRuntimeEvent("dictionary_analysis", fields: [
+                "outcome": "analysis_limit",
+                "source_count": srcTokens.count,
+                "target_count": usrTokens.count,
+                "allocated_cells": workspace.allocatedCells,
+            ])
+        }
 
         for op in ops {
             if op.type == .equal || op.type == .delete { continue }
