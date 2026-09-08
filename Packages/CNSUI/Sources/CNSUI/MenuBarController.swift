@@ -261,7 +261,7 @@ public final class MenuBarController: NSObject {
             iconState = "idle"
         case .recording:
             iconState = "recording"
-        case .processing:
+        case .processing, .fileProcessing:
             iconState = "processing"
         }
         statusIconState = iconState

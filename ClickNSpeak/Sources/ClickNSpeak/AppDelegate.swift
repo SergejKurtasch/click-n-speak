@@ -499,6 +499,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             phase = .recording
         case .stopping, .processing, .injecting:
             phase = .processing
+        case .fileProcessing:
+            phase = .fileProcessing
         case .failed:
             phase = .failed
         }

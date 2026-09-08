@@ -173,10 +173,12 @@ actor FakeTranscriber: Transcribing {
     private let delay: TimeInterval
     private(set) var requests: [TranscriptionRequest] = []
     private(set) var reloadCount = 0
-    private(set) var abortCount = 0
     private(set) var warmupCount = 0
     private(set) var preWarmCount = 0
     private let aborted = AbortBox()
+    private let aborts = LockedCounter()
+    private var suspendReload = false
+    private var reloadContinuation: CheckedContinuation<Void, Never>?
 
     init(
         texts: [String],
@@ -216,6 +218,22 @@ actor FakeTranscriber: Transcribing {
 
     func reload() async {
         reloadCount += 1
+        if suspendReload {
+            await withCheckedContinuation { reloadContinuation = $0 }
+        }
+    }
+
+    func setSuspendReload(_ suspended: Bool) {
+        suspendReload = suspended
+    }
+
+    func waitUntilReloadStarted() async {
+        while reloadCount == 0 { await Task.yield() }
+    }
+
+    func finishReload() {
+        reloadContinuation?.resume()
+        reloadContinuation = nil
     }
 
     func warmup(language: String?) async {
@@ -228,9 +246,40 @@ actor FakeTranscriber: Transcribing {
 
     nonisolated func abortInFlight() {
         aborted.value = true
+        aborts.increment()
     }
 
     var requestCount: Int { requests.count }
+    var abortCount: Int { aborts.value }
+}
+
+/// Holds a file transcription open so activity-exclusion tests can exercise
+/// the real SessionController guard while the request is in flight.
+actor SuspendingFileTranscriber: Transcribing {
+    private(set) var fileRequestCount = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
+        .empty
+    }
+
+    func transcribeFile(
+        _ request: FileTranscriptionRequest,
+        progress: @escaping @Sendable (FileTranscriptionProgress) -> Void
+    ) async -> FileTranscriptionResult {
+        fileRequestCount += 1
+        await withCheckedContinuation { continuation = $0 }
+        return FileTranscriptionResult(text: "file text", status: .success)
+    }
+
+    func waitUntilStarted() async {
+        while fileRequestCount == 0 { await Task.yield() }
+    }
+
+    func finish() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
 
 /// Shared abort flag for `FakeTranscriber` (its abort must be callable from
@@ -241,6 +290,22 @@ final class AbortBox: @unchecked Sendable {
     var value: Bool {
         get { lock.lock(); defer { lock.unlock() }; return flag }
         set { lock.lock(); flag = newValue; lock.unlock() }
+    }
+}
+
+final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock(); defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
     }
 }
 

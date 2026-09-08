@@ -248,6 +248,206 @@ struct SessionControllerTests {
         await settle(40)
     }
 
+    @Test("File transcription blocks the recording hotkey")
+    func fileJobBlocksHotkey() async {
+        let transcriber = SuspendingFileTranscriber()
+        let recorder = FakeRecorder()
+        let controller = SessionController(
+            config: Self.makeConfig(),
+            transcriber: transcriber,
+            recorder: recorder,
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+        let job = Task {
+            await controller.transcribeFile(url: URL(fileURLWithPath: "activity.wav"))
+        }
+        await transcriber.waitUntilStarted()
+
+        controller.toggle(now: Date())
+        await settle()
+
+        #expect(recorder.startCount == 0)
+        #expect(controller.sessionId == 0)
+        await transcriber.finish()
+        _ = await job.value
+        await controller.shutdown()
+    }
+
+    @Test("Injection blocks a new recording")
+    func injectingBlocksHotkey() async {
+        let rig = makeRig(texts: ["first"])
+        await runSession(rig)
+
+        rig.panel.userConfirms()
+        rig.controller.toggle(now: Date().addingTimeInterval(2))
+        await settle()
+
+        #expect(rig.recorder.startCount == 1)
+        #expect(rig.controller.sessionId == 1)
+        await rig.controller.shutdown()
+    }
+
+    @Test("Only one file transcription owns the session activity")
+    func secondFileRequestIsRejected() async {
+        let transcriber = SuspendingFileTranscriber()
+        let controller = SessionController(
+            config: Self.makeConfig(),
+            transcriber: transcriber,
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+        let first = Task {
+            await controller.transcribeFile(url: URL(fileURLWithPath: "first.wav"))
+        }
+        await transcriber.waitUntilStarted()
+
+        let second = await controller.transcribeFile(url: URL(fileURLWithPath: "second.wav"))
+
+        guard case let .failed(failure) = second.status else {
+            Issue.record("Expected the overlapping file request to be rejected")
+            await transcriber.finish()
+            _ = await first.value
+            return
+        }
+        #expect(failure.kind == .unavailable)
+        #expect(await transcriber.fileRequestCount == 1)
+        await transcriber.finish()
+        _ = await first.value
+        await controller.shutdown()
+    }
+
+    @Test("An open popup rejects file transcription without losing its draft")
+    func popupBlocksFileRequest() async {
+        let rig = makeRig(texts: ["draft"])
+        await runSession(rig)
+
+        let result = await rig.controller.transcribeFile(
+            url: URL(fileURLWithPath: "blocked.wav")
+        )
+
+        guard case let .failed(failure) = result.status else {
+            Issue.record("Expected file transcription to be rejected while the popup is open")
+            return
+        }
+        #expect(failure.kind == .unavailable)
+        #expect(rig.panel.isShowingInteractive)
+        #expect(rig.panel.shownText == "draft")
+        await rig.controller.shutdown()
+    }
+
+    @Test("Runtime mutation reservation excludes recording and file work")
+    func runtimeMutationExcludesSessionActivities() async {
+        let rig = makeRig()
+
+        #expect(rig.controller.beginRuntimeMutation())
+        #expect(!rig.controller.beginRuntimeMutation())
+        #expect(!rig.controller.isRuntimeIdle)
+        rig.controller.toggle(now: Date())
+        let fileResult = await rig.controller.transcribeFile(
+            url: URL(fileURLWithPath: "blocked.wav")
+        )
+
+        #expect(rig.recorder.startCount == 0)
+        #expect(rig.controller.sessionId == 0)
+        guard case let .failed(failure) = fileResult.status else {
+            Issue.record("Expected the runtime reservation to reject file work")
+            return
+        }
+        #expect(failure.kind == .unavailable)
+
+        rig.controller.endRuntimeMutation()
+        rig.controller.endRuntimeMutation()
+        #expect(rig.controller.isRuntimeIdle)
+        rig.controller.toggle(now: Date().addingTimeInterval(1))
+        await settle()
+        #expect(rig.recorder.startCount == 1)
+        await rig.controller.shutdown()
+    }
+
+    @Test("File transcription publishes a processing state until completion")
+    func fileJobPublishesProcessingState() async {
+        let transcriber = SuspendingFileTranscriber()
+        var states: [SessionState] = []
+        let controller = SessionController(
+            config: Self.makeConfig(),
+            transcriber: transcriber,
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            onStateChanged: { states.append($0) }
+        )
+        let job = Task {
+            await controller.transcribeFile(url: URL(fileURLWithPath: "state.wav"))
+        }
+        await transcriber.waitUntilStarted()
+
+        #expect(states.contains(.fileProcessing))
+        #expect(!controller.isRuntimeIdle)
+        await transcriber.finish()
+        _ = await job.value
+        #expect(states.last == .idle)
+        await controller.shutdown()
+    }
+
+    @Test("Shutdown is terminal for new hotkey and file work")
+    func shutdownBlocksNewActivities() async {
+        let rig = makeRig()
+
+        await rig.controller.shutdown()
+        rig.controller.toggle(now: Date())
+        let fileResult = await rig.controller.transcribeFile(
+            url: URL(fileURLWithPath: "after-shutdown.wav")
+        )
+
+        #expect(rig.controller.isShuttingDown)
+        #expect(rig.recorder.startCount == 0)
+        guard case let .failed(failure) = fileResult.status else {
+            Issue.record("Expected file transcription to be rejected after shutdown")
+            return
+        }
+        #expect(failure.kind == .unavailable)
+    }
+
+    @Test("File cancellation does not abort an unrelated transcription runtime")
+    func idleFileCancellationDoesNotAbortRuntime() async {
+        let rig = makeRig()
+
+        rig.controller.cancelFileTranscription()
+
+        #expect(await rig.transcriber.abortCount == 0)
+    }
+
+    @Test("A transcriber reload blocks a new recording")
+    func reloadBlocksHotkey() async {
+        let rig = makeRig(texts: Array(repeating: "text", count: 20))
+        await rig.transcriber.setSuspendReload(true)
+        let base = Date()
+        for index in 0..<20 {
+            rig.controller.toggle(now: base.addingTimeInterval(Double(index) * 3))
+            await settle(4)
+            rig.recorder.finalChunk = audio
+            rig.controller.toggle(now: base.addingTimeInterval(Double(index) * 3 + 1))
+            await settle(4)
+            rig.panel.userCancels()
+        }
+        await rig.transcriber.waitUntilReloadStarted()
+        let startsBeforeHotkey = rig.recorder.startCount
+
+        rig.controller.toggle(now: base.addingTimeInterval(61))
+        await settle()
+
+        #expect(rig.recorder.startCount == startsBeforeHotkey)
+        #expect(rig.controller.sessionId == 20)
+        await rig.transcriber.finishReload()
+        await settle()
+        await rig.controller.shutdown()
+    }
+
     @Test("Presses inside the debounce window are dropped")
     func debounces() async {
         let rig = makeRig()
@@ -458,7 +658,7 @@ struct SessionControllerTests {
         let rig = makeRig(texts: ["из первой сессии", "из второй сессии"])
         await runSession(rig)
         rig.panel.userConfirms()
-        await settle()
+        await settle(200)
 
         rig.controller.toggle(now: Date().addingTimeInterval(2))
         await settle()
@@ -472,7 +672,9 @@ struct SessionControllerTests {
 
         #expect(rig.controller.sessionId == 2)
         #expect(rig.panel.interactiveTexts.count == 2)
-        #expect(rig.panel.interactiveTexts[1] == "из второй сессии")
+        if rig.panel.interactiveTexts.count == 2 {
+            #expect(rig.panel.interactiveTexts[1] == "из второй сессии")
+        }
     }
 
     // MARK: - Language selection

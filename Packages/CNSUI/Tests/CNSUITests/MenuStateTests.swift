@@ -72,6 +72,7 @@ struct MenuStateTests {
             (MenuSessionPhase.idle, "idle"),
             (.recording, "recording"),
             (.processing, "processing"),
+            (.fileProcessing, "processing"),
             (.failed, "idle")
         ] {
             var state = controller.state

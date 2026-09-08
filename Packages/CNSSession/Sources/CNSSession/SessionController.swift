@@ -78,7 +78,7 @@ public final class SessionController {
     }
     public var isProcessing: Bool {
         switch state {
-        case .stopping, .processing: true
+        case .stopping, .processing, .fileProcessing: true
         default: false
         }
     }
@@ -93,7 +93,16 @@ public final class SessionController {
     /// Set when the audio stack died and the app must restart before recording again.
     public private(set) var restartPending = false
     public private(set) var runtimeAvailable = true
-    public var isRuntimeIdle: Bool { state == .idle && !fileJobActive }
+    public private(set) var isShuttingDown = false
+    public private(set) var runtimeMutationInProgress = false
+    public var isRuntimeIdle: Bool {
+        state == .idle
+            && !fileJobActive
+            && !isShuttingDown
+            && !reloadInProgress
+            && !runtimeMutationInProgress
+            && warmupTask == nil
+    }
 
     private var transcribedParts: [String] = []
     private var rawChunks: [String] = []
@@ -203,7 +212,22 @@ public final class SessionController {
         runtimeAvailable = available
     }
 
+    /// Atomically reserves the idle session boundary for a runtime commit.
+    public func beginRuntimeMutation() -> Bool {
+        guard isRuntimeIdle else { return false }
+        runtimeMutationInProgress = true
+        return true
+    }
+
+    /// Releases a runtime reservation. Repeated release is intentionally safe.
+    public func endRuntimeMutation() {
+        guard runtimeMutationInProgress else { return }
+        runtimeMutationInProgress = false
+        runDeferredReloadIfIdle()
+    }
+
     public func shutdown() async {
+        isShuttingDown = true
         runtimeAvailable = false
         recorderStartTask?.cancel()
         warmupTask?.cancel()
@@ -227,23 +251,29 @@ public final class SessionController {
         }
         lastToggleAt = now
 
-        if isProcessing {
-            log("Still processing previous recording. Please wait.")
-            return
-        }
-        if restartPending {
-            log("Ignoring hotkey: app restart in progress.")
-            return
-        }
-        if !runtimeAvailable {
-            log("Ignoring hotkey: no active transcription runtime.")
+        guard !isShuttingDown, !fileJobActive, !runtimeMutationInProgress else {
+            log("Ignoring hotkey: another session activity owns the runtime.")
             return
         }
 
-        if isRecording {
+        switch state {
+        case .starting, .recording:
             beginStop()
-        } else {
+        case .idle, .popup:
+            guard runtimeAvailable, !restartPending, !reloadInProgress else {
+                log("Ignoring hotkey: transcription runtime is unavailable or changing.")
+                return
+            }
             beginStart()
+        case let .failed(recoverable, _):
+            guard recoverable, runtimeAvailable, !restartPending, !reloadInProgress else {
+                log("Ignoring hotkey: the failed session is not recoverable yet.")
+                return
+            }
+            beginStart()
+        case .stopping, .processing, .fileProcessing, .injecting:
+            log("Still processing previous activity. Please wait.")
+            return
         }
     }
 
@@ -792,7 +822,7 @@ public final class SessionController {
     /// only in true idle; the hotkey path never calls this method.
     @discardableResult
     public func warmupIfIdle(full: Bool, language: String? = nil) async -> Bool {
-        guard state == .idle, warmupTask == nil else { return false }
+        guard isRuntimeIdle, runtimeAvailable, !restartPending else { return false }
         let transcriber = self.transcriber
         let startedAt = ProcessInfo.processInfo.systemUptime
         let task = Task {
@@ -858,7 +888,7 @@ public final class SessionController {
     }
 
     private func runDeferredReloadIfIdle() {
-        guard state == .idle, !reloadInProgress else { return }
+        guard isRuntimeIdle else { return }
         let reason: String
         if let healthReason = restartTranscriberReason {
             reason = healthReason
@@ -877,7 +907,7 @@ public final class SessionController {
 
     private func reloadTranscriber(reason: String, sessionID id: Int, force: Bool) async {
         guard !reloadInProgress else { return }
-        guard force || state == .idle else {
+        guard force || isRuntimeIdle else {
             restartTranscriberReason = reason
             return
         }
@@ -902,11 +932,18 @@ public final class SessionController {
         refine: Bool = false,
         progress: @escaping @Sendable (FileTranscriptionProgress) -> Void = { _ in }
     ) async -> FileTranscriptionResult {
-        guard !fileJobActive, state == .idle else {
+        guard isRuntimeIdle, runtimeAvailable, !restartPending else {
             return .failed(.init(kind: .unavailable, message: "Another transcription is already running"))
         }
         fileJobActive = true
-        defer { fileJobActive = false }
+        transition(to: .fileProcessing, reason: "file_transcription_start")
+        defer {
+            fileJobActive = false
+            if state == .fileProcessing {
+                transition(to: .idle, reason: "file_transcription_finished")
+                runDeferredReloadIfIdle()
+            }
+        }
         let fileRuntime = runtimeDescriptorProvider()
 
         let request = FileTranscriptionRequest(
@@ -971,6 +1008,7 @@ public final class SessionController {
     }
 
     public func cancelFileTranscription() {
+        guard fileJobActive else { return }
         transcriber.abortInFlight()
     }
 }

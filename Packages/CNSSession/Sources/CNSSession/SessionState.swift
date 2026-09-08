@@ -9,13 +9,14 @@ public enum SessionState: Sendable, Equatable {
     case recording(sessionID: Int, targetPID: pid_t?, appendMode: Bool)
     case stopping(sessionID: Int)
     case processing(sessionID: Int, overdue: Bool)
+    case fileProcessing
     case popup(sessionID: Int, targetPID: pid_t?)
     case injecting(sessionID: Int, targetPID: pid_t?)
     case failed(recoverable: Bool, message: String)
 
     public var sessionID: Int? {
         switch self {
-        case .idle, .failed:
+        case .idle, .fileProcessing, .failed:
             return nil
         case let .starting(id, _, _), let .recording(id, _, _),
              let .stopping(id), let .processing(id, _),

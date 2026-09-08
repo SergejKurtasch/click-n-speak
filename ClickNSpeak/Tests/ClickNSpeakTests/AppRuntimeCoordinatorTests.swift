@@ -9,8 +9,19 @@ import Testing
 @MainActor
 final class RuntimeSessionDouble: RuntimeSessionCoordinating {
     var isRuntimeIdle = true
+    private(set) var runtimeMutationInProgress = false
     private(set) var runtimeAvailable = false
     private(set) var configs: [Config] = []
+
+    func beginRuntimeMutation() -> Bool {
+        guard isRuntimeIdle, !runtimeMutationInProgress else { return false }
+        runtimeMutationInProgress = true
+        return true
+    }
+
+    func endRuntimeMutation() {
+        runtimeMutationInProgress = false
+    }
 
     func updateConfig(_ config: Config) { configs.append(config) }
     func setRuntimeAvailable(_ available: Bool) { runtimeAvailable = available }

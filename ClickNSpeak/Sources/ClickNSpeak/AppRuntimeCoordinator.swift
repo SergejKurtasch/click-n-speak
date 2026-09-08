@@ -50,6 +50,8 @@ enum RuntimeCoordinatorState: Sendable, Equatable {
 @MainActor
 protocol RuntimeSessionCoordinating: AnyObject {
     var isRuntimeIdle: Bool { get }
+    func beginRuntimeMutation() -> Bool
+    func endRuntimeMutation()
     func updateConfig(_ config: Config)
     func setRuntimeAvailable(_ available: Bool)
 }

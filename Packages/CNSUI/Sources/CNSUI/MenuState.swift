@@ -6,6 +6,7 @@ public enum MenuSessionPhase: String, Sendable, Equatable {
     case idle
     case recording
     case processing
+    case fileProcessing
     case failed
 }
 
