@@ -228,8 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         dictionaryCoordinator.onSnapshotChanged = { [weak self] updated, invalidations in
             guard let self else { return }
-            self.runtimeCoordinator?.adoptPersistedConfiguration(updated)
-            self.updateDesiredMenuConfig(updated)
+            if invalidations.contains(.config) {
+                self.runtimeCoordinator?.updateDictionarySnapshot(updated)
+                self.updateDesiredMenuConfig(self.runtimeCoordinator?.desiredConfiguration ?? updated)
+            }
             if invalidations.contains(.history) {
                 self.menuController?.refreshHistory(reset: true)
             }
@@ -243,8 +245,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dictionaryCoordinator.startPromptWatching()
 
         menuCtrl.onConfigChanged = { [weak self, weak runtimeCoordinator] updated in
-            self?.updateDesiredMenuConfig(updated)
             runtimeCoordinator?.requestConfiguration(updated)
+            self?.updateDesiredMenuConfig(runtimeCoordinator?.desiredConfiguration ?? updated)
+        }
+        menuCtrl.onConfigurationReloaded = { [weak runtimeCoordinator] updated in
+            runtimeCoordinator?.adoptPersistedConfiguration(updated)
         }
         menuCtrl.onCredentialsChanged = { [weak runtimeCoordinator] in
             runtimeCoordinator?.revalidateDesiredConfiguration()

@@ -276,9 +276,10 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         catch { log("Final dictionary flush failed: \(error.localizedDescription)") }
     }
 
-    /// Keep this owner aligned after the runtime coordinator persists a menu or
-    /// launch-time setting. No callbacks or writes are emitted, preventing an
-    /// ownership loop between the two coordinators.
+    /// Adopt a full configuration only after its corresponding write succeeds,
+    /// or after an explicit persisted external reload. Call synchronously at the
+    /// write boundary, never after an await that may publish newer dirty usage.
+    /// Snapshot publications alone must not call this acknowledgement path.
     public func adoptConfiguration(_ config: Config) {
         snapshot = config
         dirty = false

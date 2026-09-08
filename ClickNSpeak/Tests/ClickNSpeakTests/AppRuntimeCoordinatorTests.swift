@@ -1,4 +1,5 @@
 import CNSCore
+import CNSDictionary
 import CNSEditors
 import CNSTranscription
 import Foundation
@@ -30,6 +31,8 @@ private actor RuntimeTranscriberDouble: Transcribing {
 
 private final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
     private let lock = NSLock()
+    var beforePreparation: (@Sendable (String) async -> Void)?
+    var failEditor = false
     var failingBackends = Set<String>()
     var delays: [String: Duration] = [:]
     private(set) var preparedBackends: [String] = []
@@ -37,6 +40,7 @@ private final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sen
 
     func prepareTranscriber(config: Config) async throws -> PreparedTranscriber {
         let backend = config.sttBackend
+        if let before = lock.withLock({ beforePreparation }) { await before(backend) }
         if let delay = lock.withLock({ delays[backend] }) { try await Task.sleep(for: delay) }
         if lock.withLock({ failingBackends.contains(backend) }) {
             throw RuntimePreparationError.credentialMissing(backend: backend)
@@ -60,8 +64,22 @@ private final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sen
     }
 
     func prepareEditor(config: Config) async throws -> PreparedEditor {
-        PreparedEditor(service: nil, descriptor: .disabled)
+        if lock.withLock({ failEditor }) { throw RuntimePreparationError.credentialMissing(backend: "gemini") }
+        return PreparedEditor(service: nil, descriptor: .disabled)
     }
+}
+
+private actor RuntimePreparationGate {
+    private var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    func pause() async {
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func waitForEntry() async {
+        while !entered { await Task.yield() }
+    }
+    func release() { continuation?.resume(); continuation = nil }
 }
 
 private struct CredentialDouble: CredentialProviding {
@@ -108,6 +126,227 @@ struct AppRuntimeCoordinatorTests {
 
     private func settle(_ milliseconds: Int = 100) async {
         try? await Task.sleep(for: .milliseconds(milliseconds))
+    }
+
+    private func dictionary(initial: Config, directory: URL, runtime: AppRuntimeCoordinator) -> DictionaryCoordinator {
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        let dictionary = DictionaryCoordinator(config: initial, paths: paths,
+            phraseHistory: PhraseHistory(fileURL: paths.phraseHistoryFile))
+        runtime.onConfigActivated = { dictionary.adoptConfiguration($0) }
+        dictionary.onSnapshotChanged = { updated, invalidations in
+            if invalidations.contains(.config) { runtime.updateDictionarySnapshot(updated) }
+        }
+        return dictionary
+    }
+
+    private func usageConfig() -> Config {
+        var initial = Config.migrated(config(backend: "local").raw)
+        initial.raw["replacement_policy_initialized"] = .bool(true)
+        initial.raw["prompt_update_mode"] = .string("disabled")
+        initial.raw["future_extension"] = .string("preserve")
+        var term = JSONObject()
+        term["term"] = .string("словарь")
+        term["source"] = .string("auto")
+        term["use_count"] = .int(0)
+        term["added_at"] = .string("2000-01-01T00:00:00Z")
+        term["last_seen"] = .string("2000-01-01T00:00:00Z")
+        term["inactive"] = .bool(true)
+        initial.raw["user_terms"] = .object(JSONObject([("ru", .array([.object(term)]))]))
+        return initial
+    }
+
+    private func confirm(_ dictionary: DictionaryCoordinator, id: Int = 1) async {
+        let record = DatasetRecord(rawWhisper: "словарь", userFinal: "словарь", lang: "ru")
+        _ = await dictionary.recordConfirmation(.init(sessionID: id, datasetRecord: record,
+            finalText: "словарь", date: Date(timeIntervalSince1970: 2_000_000_000)))
+    }
+
+    @Test("App callback wiring retains dirty usage until an explicit confirmation then flush")
+    func dirtyUsageSurvivesCoordinatorRoundTrip() async throws {
+        let initial = usageConfig()
+        let (runtime, _, _, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        await confirm(dictionary)
+        let term = dictionary.snapshot.raw["user_terms"]?.objectValue?["ru"]?.arrayValue?.first?.objectValue
+        #expect(term?["use_count"]?.intValue == 1)
+        #expect(term?["last_seen"]?.stringValue == "2033-05-18T03:33:20.000000+00:00")
+        #expect(term?["inactive"]?.boolValue != true)
+        #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json")) != dictionary.snapshot)
+        try dictionary.flushIfNeeded()
+        #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json")) == dictionary.snapshot)
+        await runtime.shutdown()
+    }
+
+    @Test("History and usage publication preserve a backend waiting for idle")
+    func dictionaryPublicationPreservesPendingBackend() async throws {
+        let initial = usageConfig()
+        let (runtime, router, session, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        session.isRuntimeIdle = false
+        var desired = initial
+        desired.raw["stt_backend"] = .string("gemini")
+        runtime.requestConfiguration(desired)
+        await confirm(dictionary)
+        if case let .reconfiguring(_, selection) = runtime.state {
+            #expect(selection.sttBackend == "gemini")
+        } else { Issue.record("Dictionary publication cancelled pending selection") }
+        session.isRuntimeIdle = true
+        await settle(150)
+        #expect(router.currentDescriptorSnapshot.backend == "gemini")
+        #expect(dictionary.snapshot.sttBackend == "gemini")
+        #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json")) == dictionary.snapshot)
+        await runtime.shutdown()
+    }
+
+    @Test("A stale menu setting merges the latest dictionary term")
+    func staleMenuSettingPreservesLatestTerm() async throws {
+        let initial = usageConfig()
+        let (runtime, _, _, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        #expect(dictionary.addManualTerm("SwiftUI", language: "en"))
+        var menuConfig = initial
+        menuConfig.raw["silence_duration"] = .double(2)
+        runtime.requestConfiguration(menuConfig)
+        #expect(UserTerms.activeTerms(dictionary.snapshot, lang: "en") == ["SwiftUI"])
+        #expect(dictionary.snapshot.raw["silence_duration"]?.doubleValue == 2)
+        #expect(dictionary.snapshot.raw["future_extension"]?.stringValue == "preserve")
+        #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json")) == dictionary.snapshot)
+        await runtime.shutdown()
+    }
+
+    @Test("Dictionary changes during preparation are included in the runtime write")
+    func dictionaryChangeDuringPreparation() async throws {
+        let initial = usageConfig()
+        let (runtime, _, _, factory, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        let gate = RuntimePreparationGate()
+        factory.beforePreparation = { backend in if backend == "gemini" { await gate.pause() } }
+        var desired = initial
+        desired.raw["stt_backend"] = .string("gemini")
+        runtime.requestConfiguration(desired)
+        await gate.waitForEntry()
+        await confirm(dictionary)
+        await gate.release()
+        await settle()
+        let disk = try Config.loadValidated(from: directory.appendingPathComponent("config.json"))
+        #expect(disk.sttBackend == "gemini")
+        #expect(disk.raw["user_terms"]?.objectValue?["ru"]?.arrayValue?.first?.objectValue?["use_count"]?.intValue == 1)
+        #expect(dictionary.snapshot == disk)
+        await runtime.shutdown()
+    }
+
+    @Test("A persistence acknowledgement precedes router awaits and cannot overwrite a newer term")
+    func dictionaryEditAtPersistenceBoundarySurvivesActivation() async throws {
+        let initial = usageConfig()
+        let (runtime, router, session, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        var acknowledgements = 0
+        runtime.onConfigActivated = { saved in
+            dictionary.adoptConfiguration(saved)
+            acknowledgements += 1
+            #expect(router.currentDescriptorSnapshot.backend == "local")
+            if acknowledgements == 1 { #expect(dictionary.addManualTerm("DuringInstall", language: "en")) }
+        }
+        var desired = initial
+        desired.raw["stt_backend"] = .string("gemini")
+        runtime.requestConfiguration(desired)
+        await settle()
+        #expect(acknowledgements == 1)
+        #expect(router.currentDescriptorSnapshot.backend == "gemini")
+        #expect(UserTerms.activeTerms(try #require(session.configs.last), lang: "en") == ["DuringInstall"])
+        #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json")) == dictionary.snapshot)
+        await runtime.shutdown()
+    }
+
+    @Test("Rejected router installation still acknowledges the bytes successfully written")
+    func persistedAcknowledgementSurvivesRejectedInstallation() async throws {
+        let initial = usageConfig()
+        let (runtime, router, _, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        _ = await router.install(RuntimeTranscriberDouble(name: "local"),
+            descriptor: router.currentDescriptorSnapshot, activationGeneration: 100)
+        var desired = initial
+        desired.raw["stt_backend"] = .string("gemini")
+        runtime.requestConfiguration(desired)
+        await settle()
+        #expect(router.currentDescriptorSnapshot.backend == "local")
+        #expect(dictionary.snapshot.sttBackend == "gemini")
+        #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json")) == dictionary.snapshot)
+        await runtime.shutdown()
+    }
+
+    @Test("Partial initial activation does not acknowledge an unwritten configuration")
+    func partialInitialActivationDoesNotAcknowledgeDirtyUsage() async throws {
+        var initial = usageConfig()
+        initial.raw["ai_editor_enabled"] = .bool(true)
+        let (runtime, _, _, factory, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        try initial.saveAtomically(to: directory.appendingPathComponent("config.json"))
+        await confirm(dictionary)
+        factory.failEditor = true
+        var acknowledgements = 0
+        runtime.onConfigActivated = { dictionary.adoptConfiguration($0); acknowledgements += 1 }
+        await runtime.activateInitial(initial)
+        #expect(acknowledgements == 0)
+        try dictionary.flushIfNeeded()
+        #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json"))
+            .raw["user_terms"]?.objectValue?["ru"]?.arrayValue?.first?.objectValue?["use_count"]?.intValue == 1)
+        await runtime.shutdown()
+    }
+
+    @Test("Failed dirty flush retains ownership and retry writes the latest confirmation")
+    func failedDictionaryFlushRetriesLatestSnapshot() async throws {
+        let initial = usageConfig()
+        let (runtime, _, _, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        await confirm(dictionary)
+        let url = directory.appendingPathComponent("config.json")
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        #expect(throws: (any Error).self) { try dictionary.flushIfNeeded() }
+        await confirm(dictionary, id: 2)
+        try FileManager.default.removeItem(at: url)
+        try dictionary.flushIfNeeded()
+        let disk = try Config.loadValidated(from: url)
+        #expect(disk == dictionary.snapshot)
+        #expect(disk.raw["user_terms"]?.objectValue?["ru"]?.arrayValue?.first?.objectValue?["use_count"]?.intValue == 2)
+        await runtime.shutdown()
+    }
+
+    @Test("Explicit persisted reload replaces dictionary ownership even with a changed backend")
+    func externallyPersistedReloadAdoptsFullConfiguration() async throws {
+        let initial = usageConfig()
+        let (runtime, _, _, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        await confirm(dictionary)
+        var external = initial
+        external.raw["stt_backend"] = .string("gemini")
+        external.raw["user_terms"] = .object(JSONObject())
+        external.raw["future_extension"] = .string("external")
+        try external.saveAtomically(to: directory.appendingPathComponent("config.json"))
+        runtime.adoptPersistedConfiguration(external)
+        try dictionary.flushIfNeeded()
+        #expect(dictionary.snapshot == external)
+        await settle()
+        #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json")) == external)
+        await runtime.shutdown()
     }
 
     @Test("Local to Gemini to OpenAI to local activation updates the router")

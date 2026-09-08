@@ -70,6 +70,7 @@ final class AppRuntimeCoordinator {
 
     private var activeConfig: Config?
     private var activeRuntime: RuntimeDescriptor?
+    private var dictionarySnapshot: Config
     private var desiredConfig: Config
     private var desiredGeneration = 0
     private var pendingTask: Task<Void, Never>?
@@ -79,7 +80,43 @@ final class AppRuntimeCoordinator {
     }
 
     var onStateChanged: ((RuntimeCoordinatorState) -> Void)?
+    /// Acknowledges a successful corresponding config write (including an
+    /// externally persisted reload). Runs before router awaits, so a later
+    /// dictionary publication can never be acknowledged as already persisted.
     var onConfigActivated: ((Config) -> Void)?
+
+    var desiredConfiguration: Config { desiredConfig }
+
+    /// The dictionary owner publishes data, not a runtime selection or a write
+    /// acknowledgement. Preserve both the active and pending runtime choices.
+    func updateDictionarySnapshot(_ config: Config) {
+        dictionarySnapshot = config
+        desiredConfig = mergingDictionaryFields(into: desiredConfig)
+        if let activeConfig {
+            let updated = mergingDictionaryFields(into: activeConfig)
+            self.activeConfig = updated
+            session?.updateConfig(updated)
+        }
+    }
+
+    private func mergingDictionaryFields(into config: Config) -> Config {
+        var merged = config
+        for key in Self.dictionaryOwnedKeys {
+            merged.raw[key] = dictionarySnapshot.raw[key]
+        }
+        return merged
+    }
+
+    // Extend this ownership contract when adding mutable dictionary settings.
+    private static let dictionaryOwnedKeys = [
+        "user_terms", "initial_prompt", "prompt_snapshots", "pending_suggestions",
+        "skipped_terms", "prompt_update_mode", "last_analysis_phrase_count",
+        "last_decay_run_ts", "last_metrics_snapshot_ts", "last_metrics_notification_ts",
+        "manual_replacements", "approved_auto_replacements", "rejected_replacements",
+        "replacement_policy_initialized", "auto_prompt_check_interval",
+        "auto_prompt_check_min_count_primary", "auto_prompt_check_min_count_additional",
+        "auto_prompt_lookback", "max_dictionary_age_days", "notify_on_metrics"
+    ]
 
     init(
         initialConfig: Config,
@@ -90,6 +127,7 @@ final class AppRuntimeCoordinator {
         configURL: URL,
         log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
+        self.dictionarySnapshot = initialConfig
         self.desiredConfig = initialConfig
         self.transcriberRouter = transcriberRouter
         self.editorRouter = editorRouter
@@ -105,11 +143,12 @@ final class AppRuntimeCoordinator {
     func activateInitial(_ config: Config) async {
         pendingTask?.cancel()
         desiredGeneration += 1
-        desiredConfig = config
-        await apply(config: config, generation: desiredGeneration)
+        desiredConfig = mergingDictionaryFields(into: config)
+        await apply(config: desiredConfig, generation: desiredGeneration)
     }
 
     func requestConfiguration(_ config: Config) {
+        let config = mergingDictionaryFields(into: config)
         desiredConfig = config
         desiredGeneration += 1
         let generation = desiredGeneration
@@ -155,14 +194,14 @@ final class AppRuntimeCoordinator {
         }
     }
 
-    /// Accept a configuration that another serialized owner has already
-    /// persisted. Dictionary-only changes must reach the active session without
-    /// causing a second write or rebuilding unchanged inference services.
+    /// Full external adoption is reserved for a configuration already written
+    /// to disk, such as explicit Reload Config. This may replace dictionary
+    /// ownership and intentionally supersede a pending runtime selection.
     func adoptPersistedConfiguration(_ config: Config) {
+        dictionarySnapshot = config
+        onConfigActivated?(config)
         guard let activeRuntime, let activeConfig else {
-            desiredConfig = config
-            session?.updateConfig(config)
-            onConfigActivated?(config)
+            requestConfiguration(config)
             return
         }
         guard RuntimeSelection(config: activeConfig) == RuntimeSelection(config: config) else {
@@ -176,7 +215,6 @@ final class AppRuntimeCoordinator {
         desiredConfig = config
         session?.updateConfig(config)
         state = .ready(active: activeRuntime)
-        onConfigActivated?(config)
     }
 
     func shutdown() async {
@@ -247,12 +285,13 @@ final class AppRuntimeCoordinator {
                 preparedTranscriber: preparedTranscriber,
                 preparedEditor: preparedEditor
             )
-            activeConfig = config
+            // Dictionary state may have changed during router installation.
+            let activatedConfig = mergingDictionaryFields(into: config)
+            activeConfig = activatedConfig
             activeRuntime = runtime
-            session?.updateConfig(config)
+            session?.updateConfig(activatedConfig)
             session?.setRuntimeAvailable(true)
             state = .ready(active: runtime)
-            onConfigActivated?(config)
             RuntimeTelemetry.emitRuntimeEvent("runtime_activated", fields: [
                 "generation": generation,
                 "stt_backend": runtime.transcriber.backend,
@@ -293,7 +332,10 @@ final class AppRuntimeCoordinator {
         var editorInstalled = false
         do {
             try ensureCurrent(generation)
-            try config.saveAtomically(to: configURL)
+            let persistedConfig = mergingDictionaryFields(into: config)
+            try persistedConfig.saveAtomically(to: configURL)
+            onConfigActivated?(persistedConfig)
+            try ensureCurrent(generation)
 
             if let preparedTranscriber {
                 transcriberInstalled = await transcriberRouter.install(
@@ -375,7 +417,7 @@ final class AppRuntimeCoordinator {
             transcriber: prepared.descriptor,
             aiEditor: .disabled
         )
-        var effectiveConfig = desiredConfig
+        var effectiveConfig = mergingDictionaryFields(into: desiredConfig)
         effectiveConfig.raw["ai_editor_enabled"] = .bool(false)
         activeConfig = effectiveConfig
         activeRuntime = runtime
@@ -389,7 +431,6 @@ final class AppRuntimeCoordinator {
             message: editorError.localizedDescription,
             recovery: recoveryActions(for: editorError)
         )
-        onConfigActivated?(desiredConfig)
         RuntimeTelemetry.emitRuntimeEvent("runtime_partially_activated", fields: [
             "generation": generation,
             "stt_backend": runtime.transcriber.backend,

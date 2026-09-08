@@ -24,17 +24,21 @@ struct MenuStructureTests {
             config: config, i18n: I18n.load("en", localesDirectory: resources.localesDirectory),
             resources: resources, paths: paths, installStatusItem: false
         )
+        var reloaded: Config?
+        controller.onConfigurationReloaded = { reloaded = $0 }
         var forwarded: Config?
         controller.onConfigChanged = { forwarded = $0 }
         let corrupt = Data("{broken".utf8)
         try corrupt.write(to: paths.configFile)
         #expect(throws: Config.LoadError.self) { try controller.reloadConfiguration() }
         #expect(forwarded == nil)
+        #expect(reloaded == nil)
         #expect(controller.config == config)
         #expect(try Data(contentsOf: paths.configFile) == corrupt)
         try config.saveAtomically(to: paths.configFile)
         try controller.reloadConfiguration()
-        #expect(forwarded == config)
+        #expect(forwarded == nil, "Reload is external adoption, not a menu mutation")
+        #expect(reloaded == config)
     }
 
     /// Locate the repo root (which holds `locales/`) by walking up from this

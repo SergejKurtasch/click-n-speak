@@ -26,6 +26,7 @@ public final class MenuBarController: NSObject {
     private let paths: Paths
     private let permissionService: any PermissionServicing
     public var onConfigChanged: ((Config) -> Void)?
+    public var onConfigurationReloaded: ((Config) -> Void)?
     public var onTranscribeFileAction: ((
         URL,
         Bool,
@@ -1436,7 +1437,7 @@ public final class MenuBarController: NSObject {
 
     func reloadConfiguration() throws {
         let newConfig = try Config.loadValidated(from: paths.configFile)
-        onConfigChanged?(newConfig)
+        onConfigurationReloaded?(newConfig)
         log("Config reloaded from disk")
     }
     @objc private func onRestart() {
