@@ -39,6 +39,8 @@ public struct DatasetRecord: Sendable {
     public var userTerms: [String]
     /// Present only for drafts assembled from multiple recording segments.
     public var segments: [DatasetSegment]?
+    /// True when one or more captured chunks could not be transcribed.
+    public var incomplete: Bool
 
     public init(
         rawWhisper: String,
@@ -51,7 +53,8 @@ public struct DatasetRecord: Sendable {
         lang: String? = nil,
         promptHash: String? = nil,
         userTerms: [String] = [],
-        segments: [DatasetSegment]? = nil
+        segments: [DatasetSegment]? = nil,
+        incomplete: Bool = false
     ) {
         self.rawWhisper = rawWhisper
         self.aiEdited = aiEdited
@@ -64,6 +67,7 @@ public struct DatasetRecord: Sendable {
         self.promptHash = promptHash
         self.userTerms = userTerms
         self.segments = segments
+        self.incomplete = incomplete
     }
 }
 
@@ -135,6 +139,9 @@ public struct DatasetLogger: Sendable {
                 value["prompt_hash"] = .string(segment.promptHash)
                 return .object(value)
             })
+        }
+        if record.incomplete {
+            object["incomplete"] = .bool(true)
         }
         return JSONValue.object(object).serializedJSONLine()
     }

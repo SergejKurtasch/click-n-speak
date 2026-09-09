@@ -117,4 +117,25 @@ struct DatasetLoggerTests {
         )
         #expect(legacyObject["segments"] == nil)
     }
+
+    @Test("Only incomplete confirmations add the compatibility-safe marker")
+    func serializesIncompleteMarker() throws {
+        let incomplete = DatasetLogger.jsonLine(
+            DatasetRecord(rawWhisper: "first third", userFinal: "first third", incomplete: true),
+            at: date("2026-07-23T10:00:00Z")
+        )
+        let incompleteObject = try #require(
+            JSONSerialization.jsonObject(with: Data(incomplete.utf8)) as? [String: Any]
+        )
+        #expect(incompleteObject["incomplete"] as? Bool == true)
+
+        let complete = DatasetLogger.jsonLine(
+            DatasetRecord(rawWhisper: "whole", userFinal: "whole"),
+            at: date("2026-07-23T10:00:00Z")
+        )
+        let completeObject = try #require(
+            JSONSerialization.jsonObject(with: Data(complete.utf8)) as? [String: Any]
+        )
+        #expect(completeObject["incomplete"] == nil)
+    }
 }

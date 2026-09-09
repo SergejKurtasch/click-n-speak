@@ -32,6 +32,7 @@ public final class PreviewPanel: PopupPresenting {
     /// against confirm and cancel both firing for one keypress.
     private var awaitingDecision = false
     private var decisionEnabled = false
+    private var incompleteWarning: String?
     /// AppKit monitor tokens are opaque/non-Sendable. All mutations occur on
     /// the main actor; `nonisolated(unsafe)` only lets deinit unregister it.
     nonisolated(unsafe) private var keyMonitor: Any?
@@ -70,10 +71,12 @@ public final class PreviewPanel: PopupPresenting {
     var editorAccessibilityIdentifierForTesting: String? {
         textView?.accessibilityIdentifier()
     }
+    var incompleteWarningForTesting: String? { incompleteWarning }
 
     func setSelectionForTesting(_ range: NSRange) {
         textView?.setSelectedRange(range)
     }
+    var selectionForTesting: NSRange? { textView?.selectedRange() }
 
     // MARK: - Non-interactive HUD
 
@@ -141,6 +144,7 @@ public final class PreviewPanel: PopupPresenting {
         self.toasts = toasts
         self.awaitingDecision = true
         self.decisionEnabled = true
+        self.incompleteWarning = nil
 
         canonicalTitle = title
         titleField?.stringValue = title
@@ -178,6 +182,14 @@ public final class PreviewPanel: PopupPresenting {
     public func setDecisionEnabled(_ enabled: Bool) {
         guard awaitingDecision else { return }
         decisionEnabled = enabled
+    }
+
+    public func showIncompleteWarning(_ message: String) {
+        guard awaitingDecision, isInteractive, let titleField else { return }
+        incompleteWarning = message
+        titleField.stringValue = message
+        titleField.textColor = .systemOrange
+        panel?.setAccessibilityLabel(message)
     }
 
     /// Add the selection (or the word under the caret) to the dictionary, showing
@@ -257,6 +269,7 @@ public final class PreviewPanel: PopupPresenting {
         scrollView = nil
         awaitingDecision = false
         decisionEnabled = false
+        incompleteWarning = nil
         isInteractive = false
     }
 
@@ -297,6 +310,7 @@ public final class PreviewPanel: PopupPresenting {
         isInteractive = false
         awaitingDecision = false
         decisionEnabled = false
+        incompleteWarning = nil
         onConfirm = nil
         onCancel = nil
         onAddToDictionary = nil
@@ -354,7 +368,8 @@ public final class PreviewPanel: PopupPresenting {
 
     private func flashToast(_ message: String, duration: TimeInterval = 1.5) {
         guard let titleField else { return }
-        let restoreTo = canonicalTitle
+        let restoreTo = incompleteWarning ?? canonicalTitle
+        let restoreColor: NSColor = incompleteWarning == nil ? .white : .systemOrange
         titleField.stringValue = message
         titleField.textColor = .systemGreen
 
@@ -363,7 +378,7 @@ public final class PreviewPanel: PopupPresenting {
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             guard !Task.isCancelled, let field = self?.titleField else { return }
             field.stringValue = restoreTo
-            field.textColor = .white
+            field.textColor = restoreColor
         }
     }
 

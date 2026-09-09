@@ -595,7 +595,7 @@ public enum CorrectionAnalyzer {
             lastDate = parseTimestamp(lastTs)
         }
 
-        var records: [(Date, String, String, String, String)] = []
+        var records: [(Date, String, String, String, String, Bool)] = []
         for line in content.split(separator: "\n") {
             let s = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
             if s.isEmpty { continue }
@@ -609,15 +609,20 @@ public enum CorrectionAnalyzer {
             let raw = obj["raw_whisper"]?.stringValue ?? ""
             let base = obj["ai_edited"]?.stringValue ?? raw
             let userFinal = obj["user_final"]?.stringValue ?? ""
+            let incomplete = obj["incomplete"]?.boolValue == true
             if userFinal.isEmpty { continue }
 
-            records.append((d, tsStr, raw, base, userFinal))
+            records.append((d, tsStr, raw, base, userFinal, incomplete))
         }
 
         records.sort { $0.0 < $1.0 }
 
-        for (_, tsStr, raw, base, userFinal) in records {
+        for (_, tsStr, raw, base, userFinal, incomplete) in records {
             index.processedRows += 1
+            if incomplete {
+                index.lastProcessedTs = tsStr
+                continue
+            }
             var countedInserted = Set<String>()
             var countedReplacements = Set<String>()
             processDiff(

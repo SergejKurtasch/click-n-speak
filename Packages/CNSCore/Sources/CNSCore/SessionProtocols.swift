@@ -42,6 +42,8 @@ public protocol PopupPresenting: AnyObject {
     func appendText(_ text: String)
     /// Enables or disables confirm/cancel without destroying editor state.
     func setDecisionEnabled(_ enabled: Bool)
+    /// Shows a persistent warning without replacing the editable transcript.
+    func showIncompleteWarning(_ message: String)
     func hide(delay: TimeInterval)
     func showInteractive(
         text: String,

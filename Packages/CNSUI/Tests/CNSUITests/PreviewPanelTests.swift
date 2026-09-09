@@ -116,6 +116,27 @@ struct PreviewPanelTests {
         panel.close()
     }
 
+    @Test("Incomplete warning survives status updates without changing the draft")
+    func incompleteWarningPreservesEditor() {
+        let panel = makePanel()
+        panel.showInteractive(
+            text: "first third",
+            title: "Edit",
+            onConfirm: { _ in }
+        )
+        panel.setSelectionForTesting(NSRange(location: 5, length: 0))
+
+        panel.showIncompleteWarning("Incomplete transcription")
+        panel.updateStatus("Ready")
+
+        #expect(panel.currentText == "first third")
+        #expect(panel.selectionForTesting == NSRange(location: 5, length: 0))
+        #expect(panel.incompleteWarningForTesting == "Incomplete transcription")
+        #expect(panel.titleForTesting == "Incomplete transcription")
+        #expect(panel.isShowingInteractive)
+        panel.close()
+    }
+
     @Test("Enter and Escape are swallowed; other keys pass through")
     func consumesOnlyItsOwnKeys() {
         let panel = makePanel()

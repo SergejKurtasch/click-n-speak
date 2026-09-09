@@ -285,6 +285,26 @@ final class CorrectionAnalyzerTests: XCTestCase {
         XCTAssertNil(index.insertedTerms["latin"]?["phrase"])
     }
 
+    func testIncompleteDatasetRowsAreNotUsedForCorrectionLearning() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cns-corrections-incomplete-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dataset = directory.appendingPathComponent("dataset.jsonl")
+        let indexURL = directory.appendingPathComponent("corrections.json")
+        let row = #"{"timestamp":"2026-09-02T12:00:00+00:00","raw_whisper":"wrong","user_final":"corrected","incomplete":true}"# + "\n"
+        try Data(row.utf8).write(to: dataset)
+
+        let index = try CorrectionAnalyzer.updateCorrectionsIndexThrowing(
+            datasetPath: dataset,
+            indexPath: indexURL
+        )
+
+        XCTAssertEqual(index.processedRows, 1)
+        XCTAssertTrue(index.insertedTerms["latin"]?.isEmpty == true)
+        XCTAssertTrue(index.replacementPairs["latin"]?.isEmpty == true)
+    }
+
     func testCorrectionIndexHandlesUserFinalWithoutLetterTokens() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("cns-corrections-symbols-\(UUID().uuidString)")

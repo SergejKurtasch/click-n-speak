@@ -14,6 +14,7 @@ final class FakePanel: PopupPresenting {
         case text(String)
         case interactive(String)
         case append(String)
+        case incompleteWarning(String)
         case decisionEnabled(Bool)
         case hide
     }
@@ -39,6 +40,10 @@ final class FakePanel: PopupPresenting {
     func setDecisionEnabled(_ enabled: Bool) {
         decisionEnabled = enabled
         events.append(.decisionEnabled(enabled))
+    }
+
+    func showIncompleteWarning(_ message: String) {
+        events.append(.incompleteWarning(message))
     }
 
     func hide(delay: TimeInterval) {
@@ -92,6 +97,13 @@ final class FakePanel: PopupPresenting {
 
     var interactiveTexts: [String] {
         events.compactMap { if case let .interactive(s) = $0 { return s } else { return nil } }
+    }
+
+    var incompleteWarnings: [String] {
+        events.compactMap {
+            if case let .incompleteWarning(message) = $0 { return message }
+            return nil
+        }
     }
 }
 
@@ -191,6 +203,8 @@ actor FakeTranscriber: Transcribing {
     private(set) var preWarmCount = 0
     private let aborted = AbortBox()
     private let aborts = LockedCounter()
+    private var suspendNextDecode = false
+    private var decodeContinuation: CheckedContinuation<Void, Never>?
     private var suspendReload = false
     private var reloadContinuation: CheckedContinuation<Void, Never>?
 
@@ -209,6 +223,10 @@ actor FakeTranscriber: Transcribing {
         // The real engine clears its abort flag when a decode starts, not when
         // the model reloads — a reload can land between two decode steps.
         aborted.value = false
+        if suspendNextDecode {
+            suspendNextDecode = false
+            await withCheckedContinuation { decodeContinuation = $0 }
+        }
         if delay > 0 {
             // Stop early when the watchdog aborts, the way whisper.cpp's abort
             // callback ends a real decode.
@@ -228,6 +246,19 @@ actor FakeTranscriber: Transcribing {
         guard !texts.isEmpty else { return .empty }
         let text = texts.removeFirst()
         return TranscriptionResult(text: text, detectedLanguage: "ru")
+    }
+
+    func suspendOneDecode() {
+        suspendNextDecode = true
+    }
+
+    func waitUntilRequestCount(_ count: Int) async {
+        while requests.count < count { await Task.yield() }
+    }
+
+    func resumeDecode() {
+        decodeContinuation?.resume()
+        decodeContinuation = nil
     }
 
     func reload() async {

@@ -298,6 +298,9 @@ def update_corrections_index(
         if not user_final:
             continue
         index["processed_rows"] = int(index.get("processed_rows", 0)) + 1
+        if record.get("incomplete") is True:
+            index["last_processed_ts"] = ts
+            continue
         _process_diff(index, base, user_final, ts)
         if _norm_cmp(raw) != _norm_cmp(base):
             _process_diff(index, raw, user_final, ts)

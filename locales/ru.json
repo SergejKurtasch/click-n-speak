@@ -427,6 +427,7 @@
   "preview.add_dictionary": "Добавить в словарь",
   "preview.editor_accessibility": "Редактор транскрипции",
   "preview.editor_help": "Исправьте текст. Enter — подтвердить, Escape — отменить, Command-D — добавить выделенный термин.",
+  "preview.incomplete_warning": "Транскрипция неполная — проверьте текст или надиктуйте пропуск",
   "download.progress_title": "Загрузка {label}…",
   "download.starting": "Начало загрузки…",
   "download.complete": "Загрузка завершена",

@@ -425,6 +425,7 @@
   "preview.add_dictionary": "Añadir al diccionario",
   "preview.editor_accessibility": "Editor de transcripción",
   "preview.editor_help": "Edita la transcripción. Intro confirma, Escape cancela y Command-D añade el término seleccionado.",
+  "preview.incomplete_warning": "Transcripción incompleta: revisa el texto o dicta la parte que falta",
   "download.progress_title": "Descargando {label}…",
   "download.starting": "Iniciando…",
   "download.complete": "Descarga completada",

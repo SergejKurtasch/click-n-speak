@@ -49,18 +49,22 @@ public struct PopupDraft: Sendable, Equatable {
     public let id: UUID
     public let targetPID: pid_t?
     public private(set) var segments: [Segment]
-    public var recognitionIssues: Set<String>
+    public private(set) var failedChunkIndices: Set<Int>
 
     public init(id: UUID = UUID(), targetPID: pid_t?) {
         self.id = id
         self.targetPID = targetPID
         self.segments = []
-        self.recognitionIssues = []
+        self.failedChunkIndices = []
     }
 
     public mutating func append(_ segment: Segment) {
         guard !segments.contains(where: { $0.sessionID == segment.sessionID }) else { return }
         segments.append(segment)
+    }
+
+    public mutating func markFailedChunk(_ index: Int) {
+        failedChunkIndices.insert(index)
     }
 
     public var rawWhisper: String {

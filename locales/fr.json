@@ -425,6 +425,7 @@
   "preview.add_dictionary": "Ajouter au dictionnaire",
   "preview.editor_accessibility": "Éditeur de transcription",
   "preview.editor_help": "Modifiez la transcription. Entrée confirme, Échap annule et Command-D ajoute le terme sélectionné.",
+  "preview.incomplete_warning": "Transcription incomplète — vérifiez le texte ou dictez la partie manquante",
   "download.progress_title": "Téléchargement de {label}…",
   "download.starting": "Démarrage…",
   "download.complete": "Téléchargement terminé",

@@ -648,6 +648,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recordError: i18n.t("notify.record_error_title"),
             transcriptionError: i18n.t("notify.transcription_error_title"),
             transcriptionTimeout: i18n.t("notify.transcription_timeout_title"),
+            incompleteWarning: i18n.t("preview.incomplete_warning"),
             toasts: DictionaryToasts(
                 addedTemplate: i18n.t("toast.added"),
                 invalidTerm: i18n.t("toast.invalid_term"),

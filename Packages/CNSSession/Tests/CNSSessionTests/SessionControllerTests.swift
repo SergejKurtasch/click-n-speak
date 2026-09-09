@@ -390,6 +390,118 @@ struct SessionControllerTests {
         await rig.controller.shutdown()
     }
 
+    @Test("A failed middle chunk keeps useful text and shows an incomplete warning")
+    func partialFailureIsVisible() async {
+        let failure = TranscriptionFailure(kind: .decode, message: "Decode failed")
+        let coordinator = FakeDictionaryCoordinator(config: Self.makeConfig())
+        let rig = makeRig(
+            results: [
+                TranscriptionResult(text: "first"),
+                .failed(failure),
+                TranscriptionResult(text: "third"),
+            ],
+            dictionaryCoordinator: coordinator
+        )
+
+        await runSession(rig, chunks: [audio, audio], final: audio)
+
+        #expect(rig.panel.shownText == "first third")
+        #expect(rig.panel.incompleteWarnings == ["Incomplete transcription"])
+        #expect(rig.controller.popupDraft?.failedChunkIndices == [1])
+        rig.panel.userConfirms()
+        await settle()
+        #expect(coordinator.confirmations.first?.datasetRecord.incomplete == true)
+        await rig.controller.shutdown()
+    }
+
+    @Test("Timeout and abort outcomes label a useful draft incomplete")
+    func exceptionalEmptyOutcomesWarn() async {
+        for outcome in [TranscriptionOutcome.timedOut, .aborted] {
+            let rig = makeRig(results: [
+                TranscriptionResult(text: "first"),
+                TranscriptionResult(text: "", outcome: outcome),
+                TranscriptionResult(text: "third"),
+            ])
+
+            await runSession(rig, chunks: [audio, audio], final: audio)
+
+            #expect(rig.panel.shownText == "first third")
+            #expect(rig.panel.incompleteWarnings == ["Incomplete transcription"])
+            #expect(rig.controller.popupDraft?.failedChunkIndices == [1])
+            await rig.controller.shutdown()
+        }
+    }
+
+    @Test("A failed empty append restores the draft with a monotonic failed index")
+    func failedEmptyAppendWarns() async {
+        let rig = makeRig(results: [
+            TranscriptionResult(text: "first"),
+            TranscriptionResult(text: "", outcome: .timedOut),
+        ])
+        let base = Date()
+        await runSession(rig)
+
+        rig.controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(3))
+        await settle()
+
+        #expect(rig.panel.shownText == "first")
+        #expect(rig.panel.isShowingInteractive)
+        #expect(rig.panel.incompleteWarnings == ["Incomplete transcription"])
+        #expect(rig.controller.popupDraft?.failedChunkIndices == [1])
+        await rig.controller.shutdown()
+    }
+
+    @Test("Routine speech guards do not label a useful draft incomplete")
+    func routineGuardsDoNotWarn() async {
+        for outcome in [
+            TranscriptionOutcome.noSpeech,
+            .guarded(.silentShortChunk),
+            .guarded(.hallucination),
+        ] {
+            let rig = makeRig(results: [
+                TranscriptionResult(text: "first"),
+                TranscriptionResult(text: "", outcome: outcome),
+                TranscriptionResult(text: "third"),
+            ])
+
+            await runSession(rig, chunks: [audio, audio], final: audio)
+
+            #expect(rig.panel.shownText == "first third")
+            #expect(rig.panel.incompleteWarnings.isEmpty)
+            #expect(rig.controller.popupDraft?.failedChunkIndices.isEmpty == true)
+            await rig.controller.shutdown()
+        }
+    }
+
+    @Test("Audio backlog overflow stops capture once and drains accepted chunks")
+    func backlogOverflowStopsAndDrains() async {
+        let rig = makeRig(texts: ["first", "second"])
+        let base = Date()
+        rig.controller.toggle(now: base)
+        await settle()
+        await rig.transcriber.suspendOneDecode()
+
+        let sixtySeconds = [Float](repeating: 0.2, count: 60 * 16_000)
+        rig.recorder.emitChunk(sixtySeconds)
+        await rig.transcriber.waitUntilRequestCount(1)
+        rig.recorder.emitChunk(sixtySeconds)
+        rig.recorder.emitChunk([0.2])
+        await settle()
+
+        #expect(rig.recorder.stopCount == 1)
+        await rig.transcriber.resumeDecode()
+        await settle(80)
+
+        let requests = await rig.transcriber.requests
+        #expect(requests.map(\.audio.count) == [sixtySeconds.count, sixtySeconds.count])
+        #expect(rig.panel.shownText == "first second")
+        #expect(rig.panel.incompleteWarnings == ["Incomplete transcription"])
+        await rig.controller.shutdown()
+    }
+
     // MARK: - Guards
 
     @Test("The hotkey is ignored while the previous session is still processing")

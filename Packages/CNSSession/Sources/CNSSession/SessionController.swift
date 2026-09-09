@@ -17,6 +17,7 @@ public struct SessionStrings: Sendable {
     public var recordError: String
     public var transcriptionError: String
     public var transcriptionTimeout: String
+    public var incompleteWarning: String
     public var toasts: DictionaryToasts
 
     public init(
@@ -30,6 +31,7 @@ public struct SessionStrings: Sendable {
         recordError: String = "Recording error",
         transcriptionError: String = "Speech recognition failed",
         transcriptionTimeout: String = "Speech recognition timed out",
+        incompleteWarning: String = "Incomplete transcription",
         toasts: DictionaryToasts = DictionaryToasts()
     ) {
         self.recording = recording
@@ -42,6 +44,7 @@ public struct SessionStrings: Sendable {
         self.recordError = recordError
         self.transcriptionError = transcriptionError
         self.transcriptionTimeout = transcriptionTimeout
+        self.incompleteWarning = incompleteWarning
         self.toasts = toasts
     }
 }
@@ -64,6 +67,9 @@ public final class SessionController {
     public static let debounceInterval: TimeInterval = 0.3
     /// Soft join timeout on the worker; it never clears `isProcessing` (§6 nr. 6).
     public static let workerSoftTimeout: TimeInterval = 30
+    /// Maximum accepted, not-yet-processed 16 kHz Float32 microphone audio.
+    static let maximumPendingAudioSamples = 120 * 16_000
+    private static let nominalChunkSamples = 8 * 16_000
     /// Trailing space appended to injected text, as in `_run_injection`.
     static let injectionSuffix = " "
 
@@ -127,6 +133,7 @@ public final class SessionController {
     private var reloadInProgress = false
     private var pendingPeriodicReload = false
     private var warmupTask: Task<Void, Never>?
+    private var audioBacklog: SessionAudioBacklog?
 
     // MARK: - Collaborators
 
@@ -314,6 +321,14 @@ public final class SessionController {
             panel.show(title: strings.recording)
         }
         stopRequestedUptime = nil
+        let startingChunkIndex = appendToPopup
+            ? (audioBacklog?.snapshot.nextIndex ?? 0)
+            : 0
+        let audioBacklog = SessionAudioBacklog(
+            maxSamples: Self.maximumPendingAudioSamples,
+            startingIndex: startingChunkIndex
+        )
+        self.audioBacklog = audioBacklog
         transition(
             to: .starting(sessionID: id, targetPID: previousAppPid, appendMode: appendToPopup),
             reason: "hotkey_start"
@@ -334,14 +349,17 @@ public final class SessionController {
         )
         chunkContinuation = continuation
         workerTask = Task { [weak self] in
-            await self?.runWorker(stream, sessionId: id)
+            await self?.runWorker(stream, sessionId: id, audioBacklog: audioBacklog)
         }
 
         recorderStartTask?.cancel()
         recorderStartTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.recorder.start(callbacks: self.makeRecorderCallbacks(sessionId: id))
+                try await self.recorder.start(callbacks: self.makeRecorderCallbacks(
+                    sessionId: id,
+                    audioBacklog: audioBacklog
+                ))
                 await self.recorderDidStart(sessionId: id)
             } catch is CancellationError {
                 await self.recorderStartWasCancelled(sessionId: id)
@@ -376,19 +394,78 @@ public final class SessionController {
         completeSession(id: id, reason: "start_cancelled", showReady: false)
     }
 
-    private func makeRecorderCallbacks(sessionId id: Int) -> AudioCallbacks {
+    private func makeRecorderCallbacks(
+        sessionId id: Int,
+        audioBacklog: SessionAudioBacklog
+    ) -> AudioCallbacks {
         let continuation = chunkContinuation
         return AudioCallbacks(
             onChunk: { samples in
-                continuation?.yield(SessionChunk(audio: samples, isFinal: false, sessionId: id))
+                let capturedUptime = ProcessInfo.processInfo.systemUptime
+                switch audioBacklog.admit(
+                    audio: samples,
+                    isFinal: false,
+                    sessionID: id,
+                    capturedUptime: capturedUptime,
+                    enqueuedUptime: ProcessInfo.processInfo.systemUptime
+                ) {
+                case let .accepted(chunk, stopBoundary):
+                    continuation?.yield(chunk)
+                    if let stopBoundary {
+                        Task { @MainActor [weak self] in
+                            self?.handleAudioBacklogLimit(stopBoundary, sessionID: id)
+                        }
+                    }
+                case let .overflow(limit):
+                    Task { @MainActor [weak self] in
+                        self?.handleAudioBacklogLimit(limit, sessionID: id)
+                    }
+                case .closed:
+                    break
+                }
             },
             onFinal: { samples in
                 if let samples {
-                    continuation?.yield(SessionChunk(audio: samples, isFinal: true, sessionId: id))
+                    let capturedUptime = ProcessInfo.processInfo.systemUptime
+                    switch audioBacklog.admit(
+                        audio: samples,
+                        isFinal: true,
+                        sessionID: id,
+                        capturedUptime: capturedUptime,
+                        enqueuedUptime: ProcessInfo.processInfo.systemUptime
+                    ) {
+                    case let .accepted(chunk, _):
+                        continuation?.yield(chunk)
+                    case let .overflow(limit):
+                        Task { @MainActor [weak self] in
+                            self?.handleAudioBacklogLimit(limit, sessionID: id)
+                        }
+                    case .closed:
+                        break
+                    }
                 }
+                audioBacklog.close()
                 continuation?.finish()
             }
         )
+    }
+
+    private func handleAudioBacklogLimit(
+        _ limit: SessionAudioLimit,
+        sessionID id: Int
+    ) {
+        guard sessionId == id else { return }
+        let reason = limit.rejectedSamples == 0
+            ? "audio_backlog_limit"
+            : "audio_backlog_overflow"
+        markIncompleteChunk(index: limit.index, reason: reason)
+        RuntimeTelemetry.emitRuntimeEvent("audio_backlog_limit", fields: [
+            "session_id": id,
+            "chunk_index": limit.index,
+            "pending_samples": limit.pendingSamples,
+            "rejected_samples": limit.rejectedSamples,
+        ])
+        beginStop()
     }
 
     private func abortStart(error: Error, sessionId id: Int) async {
@@ -465,9 +542,12 @@ public final class SessionController {
     private func startOverdueWatchdog(sessionId id: Int) {
         // Same shape as `_start_overdue_worker_watchdog`: scale with the backlog,
         // but never wait less than 105 s or more than 5 min.
-        let pending = max(1, transcribedParts.count + 1)
+        let snapshot = audioBacklog?.snapshot
         let hardTimeout = hardTimeoutOverride
-            ?? min(300.0, max(105.0, Double(pending) * 35.0 + 20.0))
+            ?? Self.hardWorkerTimeout(
+                pendingSamples: snapshot?.pendingSamples ?? 0,
+                pendingChunks: snapshot?.pendingChunks ?? 0
+            )
 
         overdueWatchdog?.cancel()
         overdueWatchdog = Task { [weak self] in
@@ -492,16 +572,37 @@ public final class SessionController {
         let deadline = Date().addingTimeInterval(timeout)
         while workerCompletedSessionId != id {
             if Date() >= deadline { return false }
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            } catch {
+                return true
+            }
         }
         return true
     }
 
+    static func hardWorkerTimeout(
+        pendingSamples: Int,
+        pendingChunks: Int
+    ) -> TimeInterval {
+        let sampleUnits = max(
+            0,
+            (pendingSamples + nominalChunkSamples - 1) / nominalChunkSamples
+        )
+        let pendingWorkUnits = max(1, max(pendingChunks, sampleUnits))
+        return min(300.0, max(105.0, Double(pendingWorkUnits) * 35.0 + 20.0))
+    }
+
     // MARK: - Worker
 
-    private func runWorker(_ stream: AsyncStream<SessionChunk>, sessionId id: Int) async {
+    private func runWorker(
+        _ stream: AsyncStream<SessionChunk>,
+        sessionId id: Int,
+        audioBacklog: SessionAudioBacklog
+    ) async {
         for await chunk in stream {
             await processChunk(chunk, sessionId: id)
+            audioBacklog.didProcess(chunk)
         }
         guard sessionId == id else {
             log("Chunk worker for stale session \(id) exiting.")
@@ -558,12 +659,15 @@ public final class SessionController {
             break
         case .timedOut:
             lastTranscriptionError = strings.transcriptionTimeout
+            markIncompleteChunk(index: chunk.index, reason: result.outcome.telemetryValue)
         case .aborted:
             lastTranscriptionError = strings.transcriptionError
+            markIncompleteChunk(index: chunk.index, reason: result.outcome.telemetryValue)
         case let .failed(failure):
             lastTranscriptionError = failure.message.isEmpty
                 ? strings.transcriptionError
                 : failure.message
+            markIncompleteChunk(index: chunk.index, reason: result.outcome.telemetryValue)
         }
 
         if !result.text.isEmpty {
@@ -574,13 +678,31 @@ public final class SessionController {
 
         if chunk.isFinal {
             sawFinalChunk = true
-            emitChunkTelemetry(result: result, sessionID: id, isFinal: true, measuredDuration: duration)
+            emitChunkTelemetry(
+                result: result,
+                sessionID: id,
+                chunk: chunk,
+                processingStartedUptime: t0,
+                measuredDuration: duration
+            )
             await finalize(sessionId: id)
         } else if !result.text.isEmpty {
-            emitChunkTelemetry(result: result, sessionID: id, isFinal: false, measuredDuration: duration)
+            emitChunkTelemetry(
+                result: result,
+                sessionID: id,
+                chunk: chunk,
+                processingStartedUptime: t0,
+                measuredDuration: duration
+            )
             panel.updateText(ChunkJoiner.join(transcribedParts))
         } else {
-            emitChunkTelemetry(result: result, sessionID: id, isFinal: false, measuredDuration: duration)
+            emitChunkTelemetry(
+                result: result,
+                sessionID: id,
+                chunk: chunk,
+                processingStartedUptime: t0,
+                measuredDuration: duration
+            )
         }
     }
 
@@ -670,6 +792,7 @@ public final class SessionController {
             panel.appendText(fullText)
             appendToPopup = false
             panel.setDecisionEnabled(true)
+            showIncompleteWarningIfNeeded()
             emitPopupPresentedTelemetry(sessionID: id, appendMode: true)
             log("Appended \(fullText.count) chars to the open popup.")
             return
@@ -686,6 +809,7 @@ public final class SessionController {
                 self?.handleAddToDictionary(term) ?? .alreadyExists
             }
         )
+        showIncompleteWarningIfNeeded()
         emitPopupPresentedTelemetry(sessionID: id, appendMode: false)
         log("Interactive popup shown for session \(id) (\(fullText.count) chars).")
     }
@@ -766,7 +890,8 @@ public final class SessionController {
             lang: lang,
             promptHash: promptHash,
             userTerms: UserTerms.activeTerms(config, lang: lang),
-            segments: draft?.datasetSegments
+            segments: draft?.datasetSegments,
+            incomplete: draft?.failedChunkIndices.isEmpty == false
         )
 
         if let dictionaryCoordinator {
@@ -846,7 +971,27 @@ public final class SessionController {
         guard appendToPopup, popupDraft != nil, panel.isShowingInteractive else { return false }
         appendToPopup = false
         panel.setDecisionEnabled(true)
+        showIncompleteWarningIfNeeded()
         return true
+    }
+
+    private func markIncompleteChunk(index: Int, reason: String) {
+        guard var draft = popupDraft else { return }
+        let previousCount = draft.failedChunkIndices.count
+        draft.markFailedChunk(index)
+        popupDraft = draft
+        guard draft.failedChunkIndices.count != previousCount else { return }
+        RuntimeTelemetry.emitRuntimeEvent("session_incomplete", fields: [
+            "session_id": sessionId,
+            "chunk_index": index,
+            "reason": reason,
+            "failed_chunk_count": draft.failedChunkIndices.count,
+        ])
+    }
+
+    private func showIncompleteWarningIfNeeded() {
+        guard popupDraft?.failedChunkIndices.isEmpty == false else { return }
+        panel.showIncompleteWarning(strings.incompleteWarning)
     }
 
     /// ⌘D in the popup: route the term to the language matching its script, then
@@ -924,12 +1069,16 @@ public final class SessionController {
     private func emitChunkTelemetry(
         result: TranscriptionResult,
         sessionID: Int,
-        isFinal: Bool,
+        chunk: SessionChunk,
+        processingStartedUptime: TimeInterval,
         measuredDuration: TimeInterval
     ) {
         RuntimeTelemetry.emitRuntimeEvent("chunk_processed", fields: [
             "session_id": sessionID,
-            "is_final": isFinal,
+            "chunk_index": chunk.index,
+            "is_final": chunk.isFinal,
+            "capture_to_enqueue_ms": max(0, chunk.enqueuedUptime - chunk.capturedUptime) * 1000,
+            "queue_wait_ms": max(0, processingStartedUptime - chunk.enqueuedUptime) * 1000,
             "duration_ms": (result.durationSeconds > 0 ? result.durationSeconds : measuredDuration) * 1000,
             "outcome": result.outcome.telemetryValue,
             "stt_backend": result.backend ?? activeSessionRuntimeDescriptor.transcriber.backend,
@@ -1083,4 +1232,112 @@ struct SessionChunk: Sendable {
     let audio: [Float]
     let isFinal: Bool
     let sessionId: Int
+    let index: Int
+    let capturedUptime: TimeInterval
+    let enqueuedUptime: TimeInterval
+}
+
+struct SessionAudioLimit: Sendable, Equatable {
+    let index: Int
+    let pendingSamples: Int
+    let rejectedSamples: Int
+}
+
+enum SessionAudioAdmission: Sendable {
+    case accepted(SessionChunk, stopBoundary: SessionAudioLimit?)
+    case overflow(SessionAudioLimit)
+    case closed
+}
+
+struct SessionAudioBacklogSnapshot: Sendable, Equatable {
+    let pendingSamples: Int
+    let pendingChunks: Int
+    let nextIndex: Int
+}
+
+/// Thread-safe accounting in front of AsyncStream. Reaching the exact limit
+/// accepts that chunk and requests a controlled stop; crossing it rejects one
+/// whole chunk and closes admission so speech is never dropped silently.
+final class SessionAudioBacklog: @unchecked Sendable {
+    private struct State {
+        var nextIndex = 0
+        var pendingSamples = 0
+        var pendingChunks = 0
+        var closed = false
+    }
+
+    private let maxSamples: Int
+    private let lock = NSLock()
+    private var state = State()
+
+    init(maxSamples: Int, startingIndex: Int = 0) {
+        precondition(maxSamples > 0)
+        precondition(startingIndex >= 0)
+        self.maxSamples = maxSamples
+        self.state.nextIndex = startingIndex
+    }
+
+    func admit(
+        audio: [Float],
+        isFinal: Bool,
+        sessionID: Int,
+        capturedUptime: TimeInterval,
+        enqueuedUptime: TimeInterval
+    ) -> SessionAudioAdmission {
+        lock.withLock {
+            guard !state.closed else { return .closed }
+            let index = state.nextIndex
+            state.nextIndex += 1
+            guard audio.count <= maxSamples - state.pendingSamples else {
+                state.closed = true
+                return .overflow(SessionAudioLimit(
+                    index: index,
+                    pendingSamples: state.pendingSamples,
+                    rejectedSamples: audio.count
+                ))
+            }
+            state.pendingSamples += audio.count
+            state.pendingChunks += 1
+            let chunk = SessionChunk(
+                audio: audio,
+                isFinal: isFinal,
+                sessionId: sessionID,
+                index: index,
+                capturedUptime: capturedUptime,
+                enqueuedUptime: enqueuedUptime
+            )
+            guard !isFinal, state.pendingSamples == maxSamples else {
+                return .accepted(chunk, stopBoundary: nil)
+            }
+            state.closed = true
+            let boundary = SessionAudioLimit(
+                index: state.nextIndex,
+                pendingSamples: state.pendingSamples,
+                rejectedSamples: 0
+            )
+            state.nextIndex += 1
+            return .accepted(chunk, stopBoundary: boundary)
+        }
+    }
+
+    func didProcess(_ chunk: SessionChunk) {
+        lock.withLock {
+            state.pendingSamples = max(0, state.pendingSamples - chunk.audio.count)
+            state.pendingChunks = max(0, state.pendingChunks - 1)
+        }
+    }
+
+    func close() {
+        lock.withLock { state.closed = true }
+    }
+
+    var snapshot: SessionAudioBacklogSnapshot {
+        lock.withLock {
+            SessionAudioBacklogSnapshot(
+                pendingSamples: state.pendingSamples,
+                pendingChunks: state.pendingChunks,
+                nextIndex: state.nextIndex
+            )
+        }
+    }
 }

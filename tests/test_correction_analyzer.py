@@ -89,6 +89,24 @@ def test_incremental_update(tmp_path):
     assert second["inserted_terms"]["latin"]["pca"]["count"] == 2
 
 
+def test_incomplete_record_is_counted_but_not_used_for_learning(tmp_path):
+    dataset = tmp_path / "dataset.jsonl"
+    index = tmp_path / "corrections.json"
+    record = _base_record(
+        "2026-05-07T12:00:00+00:00",
+        raw="wrong",
+        user="corrected",
+    )
+    record["incomplete"] = True
+    _write_jsonl(dataset, [record])
+
+    out = update_corrections_index(dataset_path=dataset, index_path=index)
+
+    assert out["processed_rows"] == 1
+    assert out["inserted_terms"]["latin"] == {}
+    assert out["replacement_pairs"]["latin"] == []
+
+
 def test_count_aggregates(tmp_path):
     dataset = tmp_path / "dataset.jsonl"
     index = tmp_path / "corrections.json"

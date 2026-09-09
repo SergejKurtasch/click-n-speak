@@ -425,6 +425,7 @@
   "preview.add_dictionary": "Zum Wörterbuch hinzufügen",
   "preview.editor_accessibility": "Transkriptionseditor",
   "preview.editor_help": "Transkription bearbeiten. Eingabe bestätigt, Escape bricht ab, Command-D fügt den ausgewählten Begriff hinzu.",
+  "preview.incomplete_warning": "Unvollständige Transkription — Text prüfen oder fehlenden Teil erneut diktieren",
   "download.progress_title": "{label} wird geladen…",
   "download.starting": "Startet…",
   "download.complete": "Download abgeschlossen",

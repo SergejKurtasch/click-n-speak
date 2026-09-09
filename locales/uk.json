@@ -427,6 +427,7 @@
   "preview.add_dictionary": "Додати до словника",
   "preview.editor_accessibility": "Редактор транскрипції",
   "preview.editor_help": "Виправте текст. Enter — підтвердити, Escape — скасувати, Command-D — додати вибраний термін.",
+  "preview.incomplete_warning": "Транскрипція неповна — перевірте текст або надиктуйте пропуск",
   "download.progress_title": "Завантаження {label}…",
   "download.starting": "Початок…",
   "download.complete": "Завантаження завершено",

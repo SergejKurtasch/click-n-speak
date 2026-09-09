@@ -425,6 +425,7 @@
   "preview.add_dictionary": "Add to Dictionary",
   "preview.editor_accessibility": "Transcription editor",
   "preview.editor_help": "Edit the transcription. Press Return to confirm, Escape to cancel, or Command-D to add a selected term.",
+  "preview.incomplete_warning": "Incomplete transcription — review or dictate the missing part",
   "download.progress_title": "Downloading {label}…",
   "download.starting": "Starting…",
   "download.complete": "Download complete",

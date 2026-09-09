@@ -40,6 +40,22 @@ struct OverdueWatchdogTests {
         }
     }
 
+    @Test("Hard timeout scales with pending samples and chunks")
+    func hardTimeoutUsesActualBacklog() {
+        #expect(SessionController.hardWorkerTimeout(
+            pendingSamples: 0,
+            pendingChunks: 0
+        ) == 105)
+        #expect(SessionController.hardWorkerTimeout(
+            pendingSamples: 5 * 8 * 16_000,
+            pendingChunks: 1
+        ) == 195)
+        #expect(SessionController.hardWorkerTimeout(
+            pendingSamples: 120 * 16_000,
+            pendingChunks: 15
+        ) == 300)
+    }
+
     @Test("A slow decode keeps the session blocked and switches the HUD message")
     func softTimeoutKeepsSessionBlocked() async {
         let panel = FakePanel()
@@ -83,5 +99,27 @@ struct OverdueWatchdogTests {
         #expect(await transcriber.reloadCount == 1)
         #expect(controller.isProcessing == false)  // the session is released again
         #expect(panel.interactiveTexts.isEmpty)    // aborted decode yields no text
+    }
+
+    @Test("Cancelling the watchdog ends its wait without forcing a reload")
+    func cancelledWatchdogStopsWaiting() async {
+        let panel = FakePanel()
+        let recorder = FakeRecorder()
+        let transcriber = FakeTranscriber(texts: ["late"], delay: 30)
+        let controller = makeController(
+            transcriber: transcriber, panel: panel, recorder: recorder, soft: 0.02, hard: 5
+        )
+
+        controller.toggle(now: Date())
+        await settle(4)
+        recorder.finalChunk = audio
+        controller.toggle(now: Date().addingTimeInterval(1))
+        await settle(12)
+        #expect(controller.workerOverdue)
+
+        await controller.shutdown()
+        await settle(8)
+
+        #expect(await transcriber.reloadCount == 0)
     }
 }
