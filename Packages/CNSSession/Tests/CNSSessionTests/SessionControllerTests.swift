@@ -31,6 +31,7 @@ struct SessionControllerTests {
         datasetLogger: DatasetLogger? = nil,
         dictionaryCoordinator: (any DictionaryCoordinating)? = nil,
         runtimeDescriptorProvider: (@Sendable () -> RuntimeDescriptor)? = nil,
+        shutdownTimeout: TimeInterval = 10,
         onConfigChanged: @escaping (Config) -> Void = { _ in },
         onPhraseHistoryChanged: @escaping () -> Void = {}
     ) -> Rig {
@@ -50,6 +51,7 @@ struct SessionControllerTests {
             phraseHistory: phraseHistory,
             datasetLogger: datasetLogger,
             dictionaryCoordinator: dictionaryCoordinator,
+            shutdownTimeout: shutdownTimeout,
             onConfigChanged: onConfigChanged,
             runtimeDescriptorProvider: runtimeDescriptorProvider,
             onPhraseHistoryChanged: onPhraseHistoryChanged
@@ -203,6 +205,29 @@ struct SessionControllerTests {
         await settle()
 
         #expect(rig.delivery.delivered.isEmpty)
+    }
+
+    @Test("A failed delivery restores the confirmed draft and can be retried")
+    func failedDeliveryRestoresDraft() async {
+        let rig = makeRig()
+        rig.delivery.outcome = .failed(.targetUnavailable)
+        await runSession(rig)
+
+        rig.panel.userConfirms("keep this text")
+        await settle(200)
+
+        #expect(rig.controller.state == .popup(sessionID: 1, targetPID: 4242))
+        #expect(rig.controller.popupDraft != nil)
+        #expect(rig.panel.isShowingInteractive)
+        #expect(rig.panel.interactiveTexts.last == "keep this text")
+
+        rig.delivery.outcome = .delivered
+        rig.panel.userConfirms()
+        await settle(200)
+
+        #expect(rig.delivery.delivered.count == 2)
+        #expect(rig.controller.state == .idle)
+        #expect(rig.controller.popupDraft == nil)
     }
 
     // MARK: - Append mode
@@ -683,6 +708,162 @@ struct SessionControllerTests {
             return
         }
         #expect(failure.kind == .unavailable)
+    }
+
+    @Test("Shutdown suppresses a late editor completion")
+    func shutdownCannotReopenPopup() async {
+        let editor = FakeAiEditor()
+        editor.refineDelay = 0.5
+        var config = Self.makeConfig()
+        config.raw["ai_editor_enabled"] = .bool(true)
+        let rig = makeRig(texts: ["first"], config: config, aiEditor: editor)
+        let base = Date()
+
+        rig.controller.toggle(now: base)
+        await settle()
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(1))
+        while !editor.didCallRefine { await Task.yield() }
+
+        await rig.controller.shutdown()
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        #expect(!rig.panel.isShowingInteractive)
+        #expect(rig.controller.state == .idle)
+    }
+
+    @Test("Shutdown reports an injection that ignores cancellation and can be retried")
+    func shutdownTimesOutForStuckDelivery() async {
+        let rig = makeRig(shutdownTimeout: 0.05)
+        rig.delivery.suspend = true
+        await runSession(rig)
+        rig.panel.userConfirms("preserve me")
+        while rig.delivery.delivered.isEmpty { await Task.yield() }
+
+        let first = await rig.controller.shutdown()
+
+        #expect(!first.succeeded)
+        #expect(first.pendingActivities.contains(.injection))
+        #expect(rig.controller.popupDraft != nil)
+        #expect(!rig.panel.isShowingInteractive)
+        #expect(rig.controller.state == .idle)
+
+        rig.delivery.resume()
+        await settle()
+        let second = await rig.controller.shutdown()
+        #expect(second.succeeded)
+    }
+
+    @Test("Concurrent shutdown calls share one terminal drain")
+    func duplicateShutdownIsIdempotent() async {
+        let rig = makeRig(shutdownTimeout: 1)
+        rig.delivery.suspend = true
+        await runSession(rig)
+        rig.panel.userConfirms("preserve me")
+        while rig.delivery.delivered.isEmpty { await Task.yield() }
+
+        let first = Task { await rig.controller.shutdown() }
+        let second = Task { await rig.controller.shutdown() }
+        await settle()
+        rig.delivery.resume()
+
+        #expect(await first.value.succeeded)
+        #expect(await second.value.succeeded)
+        #expect(rig.recorder.stopCount == 2) // session stop plus one shutdown stop
+    }
+
+    @Test("Shutdown waits for an acknowledged confirmation write")
+    func shutdownDrainsConfirmation() async {
+        let coordinator = FakeDictionaryCoordinator(config: Self.makeConfig())
+        coordinator.suspendConfirmation = true
+        let rig = makeRig(
+            dictionaryCoordinator: coordinator,
+            shutdownTimeout: 1
+        )
+        await runSession(rig)
+        rig.panel.userConfirms("saved before exit")
+        while !coordinator.confirmationStarted { await Task.yield() }
+        let result = ShutdownResultRecorder()
+
+        let shutdown = Task {
+            let outcome = await rig.controller.shutdown()
+            result.record(outcome)
+            return outcome
+        }
+        await settle()
+
+        #expect(result.value == nil)
+        coordinator.finishConfirmation()
+        #expect(await shutdown.value.succeeded)
+        #expect(coordinator.confirmations.count == 1)
+        #expect(coordinator.confirmations.first?.finalText == "saved before exit")
+    }
+
+    @Test("A queued final chunk cannot publish after shutdown")
+    func queuedFinalCannotPublishAfterShutdown() async {
+        let rig = makeRig(texts: ["first", "late final"], shutdownTimeout: 1)
+        let base = Date()
+        rig.controller.toggle(now: base)
+        await settle()
+        await rig.transcriber.suspendOneDecode()
+        rig.recorder.scriptedChunks = [audio]
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(1))
+        await rig.transcriber.waitUntilRequestCount(1)
+
+        let shutdown = Task { await rig.controller.shutdown() }
+        await settle()
+        await rig.transcriber.resumeDecode()
+        #expect(await shutdown.value.succeeded)
+        await settle()
+
+        #expect(rig.panel.interactiveTexts.isEmpty)
+        #expect(!rig.panel.isShowingInteractive)
+        #expect(rig.controller.state == .idle)
+    }
+
+    @Test("A recorder that starts after cancellation is stopped before shutdown succeeds")
+    func lateRecorderStartIsDrained() async {
+        let rig = makeRig(shutdownTimeout: 1)
+        rig.recorder.suspendStart = true
+        rig.recorder.ignoreStartCancellation = true
+        rig.controller.toggle(now: Date())
+        await settle()
+
+        let shutdown = Task { await rig.controller.shutdown() }
+        await settle()
+        rig.recorder.resumeStart()
+
+        #expect(await shutdown.value.succeeded)
+        #expect(!rig.recorder.isRecording)
+        #expect(rig.recorder.stopCount == 2)
+        #expect(rig.controller.state == .idle)
+    }
+
+    @Test("A file backend that ignores cancellation is visible in shutdown outcome")
+    func stuckFileJobBlocksShutdownAcknowledgement() async {
+        let transcriber = SuspendingFileTranscriber()
+        let controller = SessionController(
+            config: Self.makeConfig(),
+            transcriber: transcriber,
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            shutdownTimeout: 0.05
+        )
+        let fileJob = Task {
+            await controller.transcribeFile(url: URL(fileURLWithPath: "stuck.wav"))
+        }
+        await transcriber.waitUntilStarted()
+
+        let first = await controller.shutdown()
+
+        #expect(!first.succeeded)
+        #expect(first.pendingActivities.contains(.file))
+        await transcriber.finish()
+        #expect(await fileJob.value.status == .cancelled)
+        #expect(await controller.shutdown().succeeded)
     }
 
     @Test("File cancellation does not abort an unrelated transcription runtime")

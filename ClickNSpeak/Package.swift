@@ -33,6 +33,7 @@ let package = Package(
                 .product(name: "CNSDictionary", package: "CNSDictionary"),
                 .product(name: "CNSTranscription", package: "CNSTranscription"),
                 .product(name: "CNSEditors", package: "CNSEditors"),
+                .product(name: "CNSSession", package: "CNSSession"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

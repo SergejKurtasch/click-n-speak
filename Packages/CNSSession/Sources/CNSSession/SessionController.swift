@@ -18,6 +18,7 @@ public struct SessionStrings: Sendable {
     public var transcriptionError: String
     public var transcriptionTimeout: String
     public var incompleteWarning: String
+    public var deliveryRecovery: String
     public var toasts: DictionaryToasts
 
     public init(
@@ -32,6 +33,7 @@ public struct SessionStrings: Sendable {
         transcriptionError: String = "Speech recognition failed",
         transcriptionTimeout: String = "Speech recognition timed out",
         incompleteWarning: String = "Incomplete transcription",
+        deliveryRecovery: String = "Text was not inserted — copy it or press Enter to retry",
         toasts: DictionaryToasts = DictionaryToasts()
     ) {
         self.recording = recording
@@ -45,8 +47,35 @@ public struct SessionStrings: Sendable {
         self.transcriptionError = transcriptionError
         self.transcriptionTimeout = transcriptionTimeout
         self.incompleteWarning = incompleteWarning
+        self.deliveryRecovery = deliveryRecovery
         self.toasts = toasts
     }
+}
+
+public enum SessionShutdownActivity: String, Sendable, Equatable, Comparable {
+    case recorderStart = "recorder_start"
+    case recorderStop = "recorder_stop"
+    case worker
+    case injection
+    case confirmation
+    case file
+    case warmup
+    case reload
+    case runtimeMutation = "runtime_mutation"
+
+    public static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+public struct SessionShutdownOutcome: Sendable, Equatable {
+    public let pendingActivities: [SessionShutdownActivity]
+
+    public init(pendingActivities: [SessionShutdownActivity] = []) {
+        self.pendingActivities = pendingActivities.sorted()
+    }
+
+    public var succeeded: Bool { pendingActivities.isEmpty }
 }
 
 /// The dictation state machine: hotkey → record → transcribe → edit popup →
@@ -126,6 +155,11 @@ public final class SessionController {
     private var chunkContinuation: AsyncStream<SessionChunk>.Continuation?
     private var workerTask: Task<Void, Never>?
     private var recorderStartTask: Task<Void, Never>?
+    private var recorderStopTask: Task<Void, Never>?
+    private var injectionTask: Task<Void, Never>?
+    private var confirmationTask: Task<Void, Never>?
+    private var fileTask: Task<FileTranscriptionResult, Never>?
+    private var reloadTask: Task<Void, Never>?
     private var overdueWatchdog: Task<Void, Never>?
     private var workerCompletedSessionId: Int?
     private var completedWorkerSessionId: Int?
@@ -152,6 +186,7 @@ public final class SessionController {
     private let softTimeout: TimeInterval
     /// Overrides the backlog-derived hard deadline; tests use it to keep runs short.
     private let hardTimeoutOverride: TimeInterval?
+    private let shutdownTimeout: TimeInterval
     private let log: @Sendable (String) -> Void
     /// Called after the controller mutates config (⌘D), so the owner can persist it.
     private let onConfigChanged: (Config) -> Void
@@ -180,6 +215,7 @@ public final class SessionController {
         contextBuilder: ChunkContextBuilder = ChunkContextBuilder(),
         workerSoftTimeout: TimeInterval = SessionController.workerSoftTimeout,
         workerHardTimeout: TimeInterval? = nil,
+        shutdownTimeout: TimeInterval = 10,
         log: @escaping @Sendable (String) -> Void = { _ in },
         onConfigChanged: @escaping (Config) -> Void = { _ in },
         onBeforeTranscriberReload: @escaping () -> Void = {},
@@ -201,6 +237,7 @@ public final class SessionController {
         self.contextBuilder = contextBuilder
         self.softTimeout = workerSoftTimeout
         self.hardTimeoutOverride = workerHardTimeout
+        self.shutdownTimeout = shutdownTimeout
         self.log = log
         self.onConfigChanged = onConfigChanged
         self.onBeforeTranscriberReload = onBeforeTranscriberReload
@@ -235,18 +272,67 @@ public final class SessionController {
         runDeferredReloadIfIdle()
     }
 
-    public func shutdown() async {
-        isShuttingDown = true
-        runtimeAvailable = false
-        recorderStartTask?.cancel()
-        warmupTask?.cancel()
-        overdueWatchdog?.cancel()
-        await recorder.stop()
-        chunkContinuation?.finish()
-        chunkContinuation = nil
-        workerTask?.cancel()
-        panel.hide(delay: 0)
-        transition(to: .idle, reason: "shutdown")
+    @discardableResult
+    public func shutdown() async -> SessionShutdownOutcome {
+        if !isShuttingDown {
+            isShuttingDown = true
+            runtimeAvailable = false
+            // Invalidate every in-flight callback before the first suspension.
+            // Some native/editor implementations finish after cancellation.
+            sessionId &+= 1
+            audioBacklog?.close()
+            chunkContinuation?.finish()
+            chunkContinuation = nil
+            recorderStartTask?.cancel()
+            warmupTask?.cancel()
+            overdueWatchdog?.cancel()
+            workerTask?.cancel()
+            injectionTask?.cancel()
+            fileTask?.cancel()
+            reloadTask?.cancel()
+            if workerTask != nil || fileJobActive || reloadInProgress || warmupTask != nil {
+                transcriber.abortInFlight()
+            }
+            panel.hide(delay: 0)
+            transition(to: .idle, reason: "shutdown")
+
+            if recorderStopTask == nil {
+                recorderStopTask = Task { [weak self] in
+                    guard let self else { return }
+                    await self.recorder.stop()
+                    self.recorderStopTask = nil
+                }
+            }
+        }
+
+        let deadline = ProcessInfo.processInfo.systemUptime + shutdownTimeout
+        while true {
+            let pending = pendingShutdownActivities()
+            if pending.isEmpty { return SessionShutdownOutcome() }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                log("Session shutdown timed out with pending activities: \(pending.map(\.rawValue).joined(separator: ",")).")
+                return SessionShutdownOutcome(pendingActivities: pending)
+            }
+            do {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            } catch {
+                return SessionShutdownOutcome(pendingActivities: pendingShutdownActivities())
+            }
+        }
+    }
+
+    private func pendingShutdownActivities() -> [SessionShutdownActivity] {
+        var pending: [SessionShutdownActivity] = []
+        if recorderStartTask != nil { pending.append(.recorderStart) }
+        if recorderStopTask != nil { pending.append(.recorderStop) }
+        if workerTask != nil { pending.append(.worker) }
+        if injectionTask != nil { pending.append(.injection) }
+        if confirmationTask != nil { pending.append(.confirmation) }
+        if fileTask != nil || fileJobActive { pending.append(.file) }
+        if warmupTask != nil { pending.append(.warmup) }
+        if reloadTask != nil || reloadInProgress { pending.append(.reload) }
+        if runtimeMutationInProgress { pending.append(.runtimeMutation) }
+        return pending
     }
 
     // MARK: - Hotkey
@@ -355,6 +441,7 @@ public final class SessionController {
         recorderStartTask?.cancel()
         recorderStartTask = Task { [weak self] in
             guard let self else { return }
+            defer { self.recorderStartTask = nil }
             do {
                 try await self.recorder.start(callbacks: self.makeRecorderCallbacks(
                     sessionId: id,
@@ -384,8 +471,9 @@ public final class SessionController {
     }
 
     private func recorderStartWasCancelled(sessionId id: Int) async {
+        guard !isShuttingDown else { return }
         await recorder.stop()
-        guard state.sessionID == id else { return }
+        guard !isShuttingDown, state.sessionID == id else { return }
         chunkContinuation?.finish()
         chunkContinuation = nil
         if !restoreDraftAfterEmptyAppendIfNeeded() {
@@ -454,7 +542,7 @@ public final class SessionController {
         _ limit: SessionAudioLimit,
         sessionID id: Int
     ) {
-        guard sessionId == id else { return }
+        guard !isShuttingDown, sessionId == id else { return }
         let reason = limit.rejectedSamples == 0
             ? "audio_backlog_limit"
             : "audio_backlog_overflow"
@@ -469,8 +557,9 @@ public final class SessionController {
     }
 
     private func abortStart(error: Error, sessionId id: Int) async {
+        guard !isShuttingDown else { return }
         await recorder.stop()
-        guard state.sessionID == id else { return }
+        guard !isShuttingDown, state.sessionID == id else { return }
         chunkContinuation?.finish()
         chunkContinuation = nil
         let preservedAppend = restoreDraftAfterEmptyAppendIfNeeded()
@@ -508,10 +597,15 @@ public final class SessionController {
         transition(to: .stopping(sessionID: id), reason: "hotkey_stop")
         panel.updateStatus(strings.transcribing)
         recorderStartTask?.cancel()
-        Task { [weak self] in
+        recorderStopTask = Task { [weak self] in
             guard let self else { return }
+            defer { self.recorderStopTask = nil }
             await self.recorder.stop()
-            guard self.state.sessionID == id, self.isProcessing else { return }
+            guard !self.isShuttingDown,
+                  self.sessionId == id,
+                  self.state.sessionID == id,
+                  self.isProcessing,
+                  !Task.isCancelled else { return }
             self.chunkContinuation?.finish()
             self.chunkContinuation = nil
             if case .stopping = self.state {
@@ -552,8 +646,12 @@ public final class SessionController {
         overdueWatchdog?.cancel()
         overdueWatchdog = Task { [weak self] in
             guard let self else { return }
+            defer { self.overdueWatchdog = nil }
             if await self.workerFinishes(sessionId: id, within: hardTimeout) { return }
-            guard self.sessionId == id, self.hardAbortedSessionId != id else { return }
+            guard !self.isShuttingDown,
+                  self.sessionId == id,
+                  self.hardAbortedSessionId != id,
+                  !Task.isCancelled else { return }
             self.hardAbortedSessionId = id
 
             self.log("Chunk worker exceeded hard timeout (\(Int(hardTimeout))s); aborting the decode.")
@@ -600,11 +698,12 @@ public final class SessionController {
         sessionId id: Int,
         audioBacklog: SessionAudioBacklog
     ) async {
+        defer { workerTask = nil }
         for await chunk in stream {
             await processChunk(chunk, sessionId: id)
             audioBacklog.didProcess(chunk)
         }
-        guard sessionId == id else {
+        guard !isShuttingDown, sessionId == id, !Task.isCancelled else {
             log("Chunk worker for stale session \(id) exiting.")
             workerCompletedSessionId = id
             return
@@ -625,6 +724,7 @@ public final class SessionController {
             transcribedParts: transcribedParts,
             tokenCount: { [transcriber] text in await transcriber.tokenCount(text) }
         )
+        guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
         let request = TranscriptionRequest(
             audio: chunk.audio,
             initialPrompt: context.isEmpty ? nil : context,
@@ -649,7 +749,7 @@ public final class SessionController {
 
         // The user started a new session while this chunk was decoding; showing
         // its text now would inject stale speech (§6 nr. 11).
-        guard sessionId == id else {
+        guard !isShuttingDown, sessionId == id, !Task.isCancelled else {
             log("Dropping chunk from stale session \(id).")
             return
         }
@@ -708,6 +808,7 @@ public final class SessionController {
 
     /// Hand the accumulated text to the user for editing.
     private func finalize(sessionId id: Int) async {
+        guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
         var fullText = ChunkJoiner.join(transcribedParts)
         guard !fullText.isEmpty else {
             if restoreDraftAfterEmptyAppendIfNeeded() {
@@ -741,6 +842,7 @@ public final class SessionController {
                 knownTerms: known,
                 misrecognitions: mis
             )
+            guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
             lastRefineResult = result
             RuntimeTelemetry.emitRuntimeEvent("editor_refine", fields: [
                 "session_id": id,
@@ -815,6 +917,7 @@ public final class SessionController {
     }
 
     private func completeSession(id: Int, reason: String, showReady: Bool = true) {
+        guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
         guard completedWorkerSessionId != id else {
             log("Ignoring duplicate worker completion for session \(id).")
             return
@@ -901,21 +1004,24 @@ public final class SessionController {
                 finalText: userText,
                 date: date
             )
-            Task { @MainActor [weak self] in
+            confirmationTask = Task { @MainActor [weak self] in
+                defer { self?.confirmationTask = nil }
                 let persisted = await dictionaryCoordinator.recordConfirmation(confirmation)
-                guard let self else { return }
+                guard let self, !self.isShuttingDown else { return }
                 self.config = dictionaryCoordinator.snapshot
                 if persisted.historySaved { self.onPhraseHistoryChanged() }
             }
         } else {
             let datasetLogger = datasetLogger
             let phraseHistory = phraseHistory
-            Task { @MainActor [weak self] in
+            confirmationTask = Task { @MainActor [weak self] in
+                defer { self?.confirmationTask = nil }
                 let historySaved = await Task.detached(priority: .utility) {
                     datasetLogger?.append(record, at: date)
                     return phraseHistory?.append(userText, at: date) == true
                 }.value
-                if historySaved { self?.onPhraseHistoryChanged() }
+                guard let self, !self.isShuttingDown else { return }
+                if historySaved { self.onPhraseHistoryChanged() }
             }
         }
 
@@ -926,19 +1032,86 @@ public final class SessionController {
             runDeferredReloadIfIdle()
             return
         }
-        Task { [weak self] in
+        startDelivery(userText, to: pid, sessionID: sessionId, waitForPopupClose: true)
+    }
+
+    private func startDelivery(
+        _ userText: String,
+        to pid: pid_t?,
+        sessionID id: Int,
+        waitForPopupClose: Bool
+    ) {
+        injectionTask?.cancel()
+        injectionTask = Task { [weak self] in
             guard let self else { return }
-            // Let the popup's close finish on the run loop before another app is
-            // activated, exactly as the Python 0.2 s pause does.
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            let delivered = await self.delivery.deliver(userText + Self.injectionSuffix, to: pid)
-            self.log("Injection finished: delivered=\(delivered) chars=\(userText.count)")
-            if case let .injecting(activeID, _) = self.state, activeID == self.sessionId {
-                if delivered { self.popupDraft = nil }
-                self.transition(to: .idle, reason: delivered ? "injection_complete" : "injection_failed")
-                self.runDeferredReloadIfIdle()
+            defer { self.injectionTask = nil }
+            if waitForPopupClose {
+                // Let the popup's close finish on the run loop before another app
+                // is activated, exactly as the Python 0.2 s pause does.
+                do {
+                    try await Task.sleep(nanoseconds: 200_000_000)
+                } catch {
+                    return
+                }
             }
+            guard !self.isShuttingDown, self.sessionId == id, !Task.isCancelled else { return }
+            let outcome = await self.delivery.deliver(userText + Self.injectionSuffix, to: pid)
+            guard !self.isShuttingDown, self.sessionId == id, !Task.isCancelled else { return }
+            self.log("Injection finished: outcome=\(outcome.telemetryValue) chars=\(userText.count)")
+            self.handleDeliveryOutcome(outcome, text: userText, targetPID: pid, sessionID: id)
         }
+    }
+
+    private func handleDeliveryOutcome(
+        _ outcome: TextDeliveryOutcome,
+        text: String,
+        targetPID: pid_t?,
+        sessionID id: Int
+    ) {
+        guard case let .injecting(activeID, _) = state, activeID == id else { return }
+        switch outcome {
+        case .delivered:
+            popupDraft = nil
+            transition(to: .idle, reason: "injection_complete")
+            runDeferredReloadIfIdle()
+        case .failed, .cancelled:
+            transition(to: .popup(sessionID: id, targetPID: targetPID), reason: "injection_failed")
+            panel.showInteractive(
+                text: text,
+                title: strings.deliveryRecovery,
+                toasts: strings.toasts,
+                onConfirm: { [weak self] retryText in
+                    self?.handleDeliveryRetry(retryText, targetPID: targetPID, sessionID: id)
+                },
+                onCancel: { [weak self] in self?.handleDeliveryRecoveryCancel(sessionID: id) },
+                onAddToDictionary: { [weak self] term in
+                    self?.handleAddToDictionary(term) ?? .alreadyExists
+                }
+            )
+        }
+    }
+
+    private func handleDeliveryRetry(_ text: String, targetPID: pid_t?, sessionID id: Int) {
+        guard !isShuttingDown,
+              case let .popup(activeID, _) = state,
+              activeID == id,
+              sessionId == id else { return }
+        guard !text.isEmpty else {
+            handleDeliveryRecoveryCancel(sessionID: id)
+            return
+        }
+        transition(to: .injecting(sessionID: id, targetPID: targetPID), reason: "injection_retry")
+        startDelivery(text, to: targetPID, sessionID: id, waitForPopupClose: true)
+    }
+
+    private func handleDeliveryRecoveryCancel(sessionID id: Int) {
+        guard !isShuttingDown,
+              case let .popup(activeID, _) = state,
+              activeID == id,
+              sessionId == id else { return }
+        popupDraft = nil
+        transition(to: .idle, reason: "injection_recovery_cancel")
+        runDeferredReloadIfIdle()
     }
 
     private func handleCancel() {
@@ -1045,6 +1218,7 @@ public final class SessionController {
         warmupTask = task
         await task.value
         warmupTask = nil
+        guard !isShuttingDown, !Task.isCancelled else { return false }
         let duration = ProcessInfo.processInfo.systemUptime - startedAt
         let decision = healthMonitor.recordPrewarm(durationSeconds: duration, success: true)
         RuntimeTelemetry.emitRuntimeEvent("transcriber_prewarm", fields: [
@@ -1114,8 +1288,10 @@ public final class SessionController {
             return
         }
         let id = sessionId
-        Task { [weak self] in
-            await self?.reloadTranscriber(reason: reason, sessionID: id, force: false)
+        reloadTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.reloadTask = nil }
+            await self.reloadTranscriber(reason: reason, sessionID: id, force: false)
         }
     }
 
@@ -1126,11 +1302,12 @@ public final class SessionController {
             return
         }
         reloadInProgress = true
+        defer { reloadInProgress = false }
         onBeforeTranscriberReload()
         log("Reloading transcriber (reason: \(reason), session: \(id)).")
         await transcriber.reload()
+        guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
         healthMonitor.markRestarted()
-        reloadInProgress = false
         runDeferredReloadIfIdle()
     }
 
@@ -1152,12 +1329,37 @@ public final class SessionController {
         fileJobActive = true
         transition(to: .fileProcessing, reason: "file_transcription_start")
         defer {
+            fileTask = nil
             fileJobActive = false
             if state == .fileProcessing {
                 transition(to: .idle, reason: "file_transcription_finished")
                 runDeferredReloadIfIdle()
             }
         }
+        let task = Task { [weak self] in
+            guard let self else {
+                return FileTranscriptionResult(text: "", status: .cancelled)
+            }
+            return await self.performFileTranscription(
+                url: url,
+                refine: refine,
+                progress: progress
+            )
+        }
+        fileTask = task
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: { [transcriber] in
+            task.cancel()
+            transcriber.abortInFlight()
+        }
+    }
+
+    private func performFileTranscription(
+        url: URL,
+        refine: Bool,
+        progress: @escaping @Sendable (FileTranscriptionProgress) -> Void
+    ) async -> FileTranscriptionResult {
         let fileRuntime = runtimeDescriptorProvider()
 
         let request = FileTranscriptionRequest(
@@ -1167,6 +1369,9 @@ public final class SessionController {
             refine: refine
         )
         var result = await transcriber.transcribeFile(request, progress: progress)
+        guard !isShuttingDown, !Task.isCancelled else {
+            return FileTranscriptionResult(text: "", status: .cancelled)
+        }
         guard case .success = result.status else { return result }
 
         let languages = allowedLanguages()
@@ -1188,6 +1393,9 @@ public final class SessionController {
                 knownTerms: known,
                 misrecognitions: misrecognitions
             )
+            guard !isShuttingDown, !Task.isCancelled else {
+                return FileTranscriptionResult(text: "", status: .cancelled)
+            }
             refineStatus = refined.status
             if refined.status == .ok { result.text = refined.text }
         }
@@ -1223,6 +1431,7 @@ public final class SessionController {
 
     public func cancelFileTranscription() {
         guard fileJobActive else { return }
+        fileTask?.cancel()
         transcriber.abortInFlight()
     }
 }

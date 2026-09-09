@@ -1,6 +1,7 @@
 import CNSCore
 import CNSDictionary
 import CNSEditors
+import CNSSession
 import CNSTranscription
 import CNSUI
 import Foundation
@@ -10,6 +11,49 @@ import Testing
 @MainActor
 @Suite("App delegate startup configuration")
 struct AppDelegateStartupTests {
+    private enum DrainFailure: Error { case write }
+
+    @Test("Termination drains session, dictionary, and runtime in ownership order")
+    func terminationDrainOrder() async {
+        var events: [String] = []
+
+        let outcome = await AppDelegate.drainForTermination(
+            shutdownSession: {
+                events.append("session")
+                return SessionShutdownOutcome()
+            },
+            drainDictionary: { events.append("dictionary") },
+            shutdownRuntime: { events.append("runtime") }
+        )
+
+        #expect(outcome == .completed)
+        #expect(events == ["session", "dictionary", "runtime"])
+    }
+
+    @Test("A failed termination barrier keeps downstream owners alive")
+    func failedTerminationDrainStopsEarly() async {
+        var sessionEvents: [String] = []
+        let sessionOutcome = await AppDelegate.drainForTermination(
+            shutdownSession: { SessionShutdownOutcome(pendingActivities: [.injection]) },
+            drainDictionary: { sessionEvents.append("dictionary") },
+            shutdownRuntime: { sessionEvents.append("runtime") }
+        )
+        #expect(sessionOutcome == .sessionTimedOut([.injection]))
+        #expect(sessionEvents.isEmpty)
+
+        var dictionaryEvents: [String] = []
+        let dictionaryOutcome = await AppDelegate.drainForTermination(
+            shutdownSession: { SessionShutdownOutcome() },
+            drainDictionary: {
+                dictionaryEvents.append("dictionary")
+                throw DrainFailure.write
+            },
+            shutdownRuntime: { dictionaryEvents.append("runtime") }
+        )
+        #expect(dictionaryOutcome == .dictionaryFailed)
+        #expect(dictionaryEvents == ["dictionary"])
+    }
+
     @Test("Production dictionary publications preserve the pending backend in the menu")
     func dictionaryPublicationPreservesPendingMenuSelection() async throws {
         let (app, runtime, session, dictionary, menu, paths) = makeConfigurationBridge()

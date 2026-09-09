@@ -76,10 +76,36 @@ public protocol AudioCapturing: Sendable {
 
 /// Getting confirmed text into the app the user dictated from: restore focus,
 /// then insert. Implemented by `SystemTextDelivery`.
+public enum TextDeliveryFailure: String, Sendable, Equatable {
+    case targetUnavailable
+    case focusTimedOut
+    case accessibilityDenied
+    case injectionFailed
+}
+
+public enum TextDeliveryOutcome: Sendable, Equatable {
+    case delivered
+    case failed(TextDeliveryFailure)
+    /// Cancellation was observed before any insertion side effect was attempted.
+    case cancelled
+
+    public var succeeded: Bool {
+        self == .delivered
+    }
+
+    public var telemetryValue: String {
+        switch self {
+        case .delivered: "delivered"
+        case let .failed(failure): failure.rawValue
+        case .cancelled: "cancelled"
+        }
+    }
+}
+
 @MainActor
 public protocol TextDelivering {
-    /// - Returns: whether the text actually made it into the target app.
-    func deliver(_ text: String, to pid: pid_t?) async -> Bool
+    /// A notification or clipboard fallback is never reported as delivery.
+    func deliver(_ text: String, to pid: pid_t?) async -> TextDeliveryOutcome
 }
 
 /// Where the frontmost application's pid comes from. Injected so tests can

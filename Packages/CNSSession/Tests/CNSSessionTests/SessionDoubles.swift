@@ -119,6 +119,7 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
     var finalChunk: [Float]?
     var startError: Error?
     var suspendStart = false
+    var ignoreStartCancellation = false
     var duplicateFinalCallback = false
     private var startContinuation: CheckedContinuation<Void, Never>?
     private(set) var startCount = 0
@@ -142,7 +143,7 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
                 lock.unlock()
             }
         }
-        try Task.checkCancellation()
+        if !ignoreStartCancellation { try Task.checkCancellation() }
         store(callbacks)
     }
 
@@ -357,11 +358,22 @@ final class LockedCounter: @unchecked Sendable {
 @MainActor
 final class FakeDelivery: TextDelivering {
     private(set) var delivered: [(text: String, pid: pid_t?)] = []
-    var succeeds = true
+    var outcome: TextDeliveryOutcome = .delivered
+    var suspend = false
+    private var continuation: CheckedContinuation<Void, Never>?
 
-    func deliver(_ text: String, to pid: pid_t?) async -> Bool {
+    func deliver(_ text: String, to pid: pid_t?) async -> TextDeliveryOutcome {
         delivered.append((text, pid))
-        return succeeds
+        if suspend {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return outcome
+    }
+
+    func resume() {
+        suspend = false
+        continuation?.resume()
+        continuation = nil
     }
 }
 
@@ -377,6 +389,9 @@ final class FakeDictionaryCoordinator: DictionaryCoordinating {
     let correctionsURL: URL
     private(set) var confirmations: [DictionaryConfirmation] = []
     private(set) var addedTerms: [(term: String, language: String)] = []
+    var suspendConfirmation = false
+    private(set) var confirmationStarted = false
+    private var confirmationContinuation: CheckedContinuation<Void, Never>?
 
     init(config: Config) {
         snapshot = config
@@ -385,8 +400,18 @@ final class FakeDictionaryCoordinator: DictionaryCoordinating {
     }
 
     func recordConfirmation(_ confirmation: DictionaryConfirmation) async -> ConfirmationPersistenceResult {
+        confirmationStarted = true
+        if suspendConfirmation {
+            await withCheckedContinuation { confirmationContinuation = $0 }
+        }
         confirmations.append(confirmation)
         return ConfirmationPersistenceResult(datasetSaved: true, correctionsUpdated: true, historySaved: true)
+    }
+
+    func finishConfirmation() {
+        suspendConfirmation = false
+        confirmationContinuation?.resume()
+        confirmationContinuation = nil
     }
 
     func addManualTerm(_ term: String, language: String) -> Bool {
@@ -396,6 +421,19 @@ final class FakeDictionaryCoordinator: DictionaryCoordinating {
         snapshot.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: snapshot.raw))
         addedTerms.append((term, language))
         return true
+    }
+}
+
+final class ShutdownResultRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: SessionShutdownOutcome?
+
+    func record(_ outcome: SessionShutdownOutcome) {
+        lock.withLock { storage = outcome }
+    }
+
+    var value: SessionShutdownOutcome? {
+        lock.withLock { storage }
     }
 }
 

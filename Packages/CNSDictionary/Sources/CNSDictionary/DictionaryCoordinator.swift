@@ -166,6 +166,9 @@ private actor DictionaryPersistenceWorker: PromptCandidateAnalyzing {
         }
         return removed
     }
+
+    /// Actor mailbox barrier used after every coordinator-owned task is joined.
+    func drain() {}
 }
 
 public struct PromptAnalysisOutput: Sendable {
@@ -230,6 +233,9 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     ]
     private var analysisRevision: UInt64 = 0
     private var metricsPersistenceTail: Task<Void, Never>?
+    private var maintenanceTask: Task<Void, Never>?
+    private var scheduledAnalysisTask: Task<Void, Never>?
+    private var replacementPruneTask: Task<Void, Never>?
     public var correctionsURL: URL { paths.correctionsFile }
     public var onSnapshotChanged: ((Config, DictionaryInvalidations) -> Void)?
     public var onNotification: ((DictionaryNotification) -> Void)?
@@ -249,6 +255,9 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     private var analysisRunning = false
     private var maintenanceRunning = false
     private var replacementPruneRunning = false
+    private var isStopping = false
+    private var confirmationsInFlight = 0
+    private var metricsOperationsInFlight = 0
     private var lastFastPathProcessedRows = 0
 
     private lazy var promptSynchronizer = PromptFileSynchronizer(
@@ -300,6 +309,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     }
 
     public func startPromptWatching() {
+        guard !isStopping else { return }
         for language in activeLanguages() {
             let url = paths.initialPromptFile(lang: language)
             if !FileManager.default.fileExists(atPath: url.path) {
@@ -311,9 +321,26 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     }
 
     public func stop() {
+        isStopping = true
         promptSynchronizer.stop()
         do { try flushIfNeeded() }
         catch { log("Final dictionary flush failed: \(error.localizedDescription)") }
+    }
+
+    /// Stops new background work, joins every task owned by this coordinator,
+    /// crosses the persistence actor mailbox, and only then acknowledges config.
+    public func drainAndStop() async throws {
+        isStopping = true
+        promptSynchronizer.stop()
+        await maintenanceTask?.value
+        await scheduledAnalysisTask?.value
+        await replacementPruneTask?.value
+        while confirmationsInFlight > 0 || metricsOperationsInFlight > 0 || analysisRunning {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await metricsPersistenceTail?.value
+        await persistenceWorker.drain()
+        try flushIfNeeded()
     }
 
     /// Adopt a full configuration only after its corresponding write succeeds,
@@ -328,9 +355,12 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
 
     @discardableResult
     public func recordConfirmation(_ confirmation: DictionaryConfirmation) async -> ConfirmationPersistenceResult {
+        guard !isStopping else { return ConfirmationPersistenceResult() }
         guard processedSessionIDs.insert(confirmation.sessionID).inserted else {
             return ConfirmationPersistenceResult(duplicate: true)
         }
+        confirmationsInFlight += 1
+        defer { confirmationsInFlight -= 1 }
 
         let persisted = await persistenceWorker.record(confirmation)
 
@@ -878,6 +908,9 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
 
     @discardableResult
     public func runMetricsIfDue(force: Bool = false) async throws -> JSONObject? {
+        guard !isStopping else { return latestMetricsSnapshot }
+        metricsOperationsInFlight += 1
+        defer { metricsOperationsInFlight -= 1 }
         let now = clock()
         if !force, let last = UserTerms.parseTimestamp(snapshot.raw["last_metrics_snapshot_ts"]?.stringValue),
            now.timeIntervalSince(last) < 24 * 3_600 { return latestMetricsSnapshot }
@@ -888,6 +921,9 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     /// Computes the Statistics window snapshot away from AppKit's main actor,
     /// then serializes the history/config mutation back through the coordinator.
     public func computeMetricsForPresentation() async throws -> JSONObject {
+        guard !isStopping else { throw CancellationError() }
+        metricsOperationsInFlight += 1
+        defer { metricsOperationsInFlight -= 1 }
         let now = clock()
         let metrics = await computeMetricsOffMain(now: now, priority: .userInitiated)
         try Task.checkCancellation()
@@ -933,11 +969,14 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     }
 
     public func runDailyMaintenanceIfDue() {
-        guard !maintenanceRunning else { return }
+        guard !isStopping, !maintenanceRunning else { return }
         maintenanceRunning = true
-        Task { @MainActor [weak self] in
+        maintenanceTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.maintenanceRunning = false }
+            defer {
+                self.maintenanceRunning = false
+                self.maintenanceTask = nil
+            }
             do {
                 let removed = try await self.persistenceWorker.pruneReplacementObservations(now: self.clock())
                 if removed > 0 { self.publish(.replacements) }
@@ -954,7 +993,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     }
 
     public func runPromptAnalysis(onDemand: Bool = false) async throws {
-        guard !analysisRunning else { return }
+        guard !isStopping, !analysisRunning else { return }
         analysisRunning = true
         defer { analysisRunning = false }
         let mode = snapshot.raw["prompt_update_mode"]?.stringValue ?? "suggest"
@@ -1035,6 +1074,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     }
 
     private func schedulePromptAnalysisIfDue() {
+        guard !isStopping else { return }
         let mode = snapshot.raw["prompt_update_mode"]?.stringValue ?? "suggest"
         guard mode != "disabled" else { return }
         let current = phraseHistory.count()
@@ -1048,7 +1088,8 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         )
         guard strong || current - last >= interval else { return }
         if strong { lastFastPathProcessedRows = index.processedRows }
-        Task { @MainActor [weak self] in
+        scheduledAnalysisTask = Task { @MainActor [weak self] in
+            defer { self?.scheduledAnalysisTask = nil }
             do { try await self?.runPromptAnalysis() }
             catch { self?.log("Prompt analysis failed: \(error.localizedDescription)") }
         }
@@ -1137,11 +1178,14 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     }
 
     private func scheduleReplacementObservationPruning(now: Date) {
-        guard !replacementPruneRunning else { return }
+        guard !isStopping, !replacementPruneRunning else { return }
         replacementPruneRunning = true
-        Task { @MainActor [weak self] in
+        replacementPruneTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.replacementPruneRunning = false }
+            defer {
+                self.replacementPruneRunning = false
+                self.replacementPruneTask = nil
+            }
             do {
                 let removed = try await self.persistenceWorker.pruneReplacementObservations(now: now)
                 if removed > 0 { self.publish(.replacements) }

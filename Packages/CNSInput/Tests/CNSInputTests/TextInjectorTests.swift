@@ -97,6 +97,23 @@ struct TextInjectorTests {
         #expect(clipboard.writtenText == nil)
     }
 
+    @Test("Cancellation during pre-delay performs no injection side effect")
+    func cancelledBeforeInjection() async {
+        let clipboard = MockClipboard()
+        let keyboard = MockKeyboard()
+        let subject = injector(clipboard: clipboard, keyboard: keyboard)
+        let task = Task { await subject.inject("keep", preDelay: 10) }
+        await Task.yield()
+        task.cancel()
+
+        let result = await task.value
+
+        #expect(result.failure == .cancelled)
+        #expect(clipboard.writtenText == nil)
+        #expect(keyboard.pasteCount == 0)
+        #expect(keyboard.typedText == nil)
+    }
+
     @Test("Without Accessibility nothing is pasted and the user is notified")
     func noAccessibility() async {
         let clipboard = MockClipboard()

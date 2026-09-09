@@ -153,6 +153,71 @@ final class DictionaryCoordinatorTests: XCTestCase {
         }
     }
 
+    func testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let gate = AnalysisSuspension()
+        var config = makeConfig()
+        XCTAssertTrue(UserTerms.add(to: &config, lang: "en", term: "Sergej", source: .manual))
+        let coordinator = DictionaryCoordinator(
+            config: config,
+            paths: paths,
+            phraseHistory: PhraseHistory(fileURL: paths.phraseHistoryFile),
+            metricsComputer: { _, _, _, _ in
+                await gate.pause(1)
+                return JSONObject()
+            }
+        )
+        _ = await coordinator.recordConfirmation(.init(
+            sessionID: 1,
+            datasetRecord: record(),
+            finalText: "Sergej"
+        ))
+        coordinator.runDailyMaintenanceIfDue()
+        await gate.waitForArrival(1)
+        var drainFinished = false
+
+        let drain = Task {
+            try await coordinator.drainAndStop()
+            drainFinished = true
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertFalse(drainFinished)
+
+        await gate.release(1)
+        try await drain.value
+        XCTAssertTrue(drainFinished)
+        let persisted = try Config.loadValidated(from: paths.configFile)
+        let term = persisted.raw["user_terms"]?.objectValue?["en"]?.arrayValue?.first?.objectValue
+        XCTAssertEqual(term?["use_count"]?.intValue, 1)
+    }
+
+    func testDrainAndStopWaitsForAlreadyRunningDirectAnalysis() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let gate = AnalysisSuspension()
+        let coordinator = DictionaryCoordinator(
+            config: makeConfig(mode: "suggest"),
+            paths: paths,
+            phraseHistory: PhraseHistory(fileURL: paths.phraseHistoryFile),
+            promptAnalyzer: SuspendedCandidateAnalyzer(gate: gate)
+        )
+        let analysis = Task { try await coordinator.runPromptAnalysis(onDemand: true) }
+        await gate.waitForArrival(1)
+        var drainFinished = false
+        let drain = Task {
+            try await coordinator.drainAndStop()
+            drainFinished = true
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertFalse(drainFinished)
+
+        await gate.release(1)
+        try await analysis.value
+        try await drain.value
+        XCTAssertTrue(drainFinished)
+    }
+
     func testAnalysisLimitPreservesConfirmationAndLearnsTheOtherComparison() async throws {
         let rawLong = Array(repeating: "RawToken", count: 1_000).joined(separator: " ")
         let editedLong = Array(repeating: "EditedToken", count: 1_000).joined(separator: " ")

@@ -10,6 +10,8 @@ public enum FocusOutcome: Equatable, Sendable {
     /// The target never came back within the deadline; `frontmostPid` is what was
     /// in front when we gave up.
     case timedOut(frontmostPid: pid_t?)
+    /// The owner is terminating; no fallback should mutate the clipboard.
+    case cancelled
 }
 
 /// Waits for the previously focused app to actually be frontmost again before any
@@ -51,6 +53,7 @@ public struct FocusRestorer {
     }
 
     public func restore(to targetPid: pid_t?) async -> FocusOutcome {
+        guard !Task.isCancelled else { return .cancelled }
         guard let targetPid, targetPid > 0 else {
             log("Cannot restore target app focus: no captured pid.")
             return .targetUnavailable
@@ -65,6 +68,7 @@ public struct FocusRestorer {
         var stable = 0
 
         while true {
+            guard !Task.isCancelled else { return .cancelled }
             let current = frontmostPid()
             stable = (current == targetPid) ? stable + 1 : 0
 
@@ -76,7 +80,11 @@ public struct FocusRestorer {
                 log("Focus restore timed out: target_pid=\(targetPid) frontmost_pid=\(current.map(String.init) ?? "nil")")
                 return .timedOut(frontmostPid: current)
             }
-            try? await Task.sleep(nanoseconds: UInt64(poll * 1_000_000_000))
+            do {
+                try await Task.sleep(nanoseconds: UInt64(poll * 1_000_000_000))
+            } catch {
+                return .cancelled
+            }
         }
     }
 

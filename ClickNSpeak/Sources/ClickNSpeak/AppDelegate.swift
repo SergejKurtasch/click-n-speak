@@ -8,6 +8,12 @@ import CNSSession
 import CNSTranscription
 import CNSUI
 
+enum AppTerminationDrainOutcome: Equatable {
+    case completed
+    case sessionTimedOut([SessionShutdownActivity])
+    case dictionaryFailed
+}
+
 /// Composition root: wires paths, config, i18n, logging and the menu bar
 /// together. Mirrors the startup sequence in `main.py` (instance lock →
 /// config load → i18n → coordinators → menu/runtime/session activation).
@@ -34,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateTimer: Timer?
     private var appActivationObserver: NSObjectProtocol?
     private var terminationStarted = false
+    private var shutdownNotification: (title: String, body: String)?
     private var menuState: MenuState?
 
     init(
@@ -94,6 +101,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let dictionaryCoordinator = preparedDictionary.coordinator
         let config = preparedDictionary.config
         let i18n = I18n.load(config.primaryLanguage, localesDirectory: resources.localesDirectory)
+        shutdownNotification = (
+            i18n.t("notify.shutdown_timeout_title"),
+            i18n.t("notify.shutdown_timeout_body")
+        )
         self.dictionaryCoordinator = dictionaryCoordinator
         let initialMenuState = MenuState(
             config: config,
@@ -161,7 +172,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             aiEditor: editorRouter,
             recorder: recorder,
             panel: panel,
-            delivery: SystemTextDelivery(log: log),
+            delivery: SystemTextDelivery(
+                notify: { [weak notificationService] title, _, body in
+                    Task { @MainActor in
+                        notificationService?.deliver(title: title, body: body)
+                    }
+                },
+                log: log,
+                strings: Self.textDeliveryStrings(i18n)
+            ),
             frontmost: WorkspaceFrontmostProvider(),
             phraseHistory: phraseHistory,
             dictionaryCoordinator: dictionaryCoordinator,
@@ -372,9 +391,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sender.reply(toApplicationShouldTerminate: true)
                 return
             }
-            await self.session?.shutdown()
-            self.dictionaryCoordinator?.stop()
-            await self.runtimeCoordinator?.shutdown()
+            let outcome = await Self.drainForTermination(
+                shutdownSession: { [weak self] in
+                    await self?.session?.shutdown() ?? SessionShutdownOutcome()
+                },
+                drainDictionary: { [weak self] in
+                    try await self?.dictionaryCoordinator?.drainAndStop()
+                },
+                shutdownRuntime: { [weak self] in
+                    await self?.runtimeCoordinator?.shutdown()
+                }
+            )
+            guard outcome == .completed else {
+                await self.logger?.info("Click-n-speak shutdown paused because owned work did not drain")
+                if let notification = self.shutdownNotification {
+                    self.notificationService?.deliver(title: notification.title, body: notification.body)
+                }
+                self.terminationStarted = false
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
             await self.logger?.info("Click-n-speak shutdown complete")
             self.instanceGuard?.release()
             sender.reply(toApplicationShouldTerminate: true)
@@ -384,11 +420,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // Normal termination is drained by `applicationShouldTerminate`. Keep a
-        // synchronous fallback for unusual AppKit teardown paths.
+        // synchronous fallback for unusual AppKit teardown paths. The OS releases
+        // the instance lock on process exit; do not acknowledge undrained work.
         guard !terminationStarted else { return }
         stopLifecycleSources()
         dictionaryCoordinator?.stop()
-        instanceGuard?.release()
+    }
+
+    static func drainForTermination(
+        shutdownSession: () async -> SessionShutdownOutcome,
+        drainDictionary: () async throws -> Void,
+        shutdownRuntime: () async -> Void
+    ) async -> AppTerminationDrainOutcome {
+        let sessionOutcome = await shutdownSession()
+        guard sessionOutcome.succeeded else {
+            return .sessionTimedOut(sessionOutcome.pendingActivities)
+        }
+        do {
+            try await drainDictionary()
+        } catch {
+            return .dictionaryFailed
+        }
+        await shutdownRuntime()
+        return .completed
     }
 
     private func stopLifecycleSources() {
@@ -649,10 +703,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             transcriptionError: i18n.t("notify.transcription_error_title"),
             transcriptionTimeout: i18n.t("notify.transcription_timeout_title"),
             incompleteWarning: i18n.t("preview.incomplete_warning"),
+            deliveryRecovery: i18n.t("preview.delivery_recovery"),
             toasts: DictionaryToasts(
                 addedTemplate: i18n.t("toast.added"),
                 invalidTerm: i18n.t("toast.invalid_term"),
                 alreadyExists: i18n.t("toast.exists")
+            )
+        )
+    }
+
+    private static func textDeliveryStrings(_ i18n: I18n) -> TextDeliveryStrings {
+        TextDeliveryStrings(
+            textCopiedTitle: i18n.t("notify.delivery_copied_title"),
+            targetUnavailableBody: i18n.t("notify.delivery_target_unavailable_body"),
+            focusTimedOutBody: i18n.t("notify.delivery_focus_timeout_body"),
+            injection: TextInjectionStrings(
+                accessibilityTitle: i18n.t("notify.delivery_accessibility_title"),
+                accessibilityBody: i18n.t("notify.delivery_accessibility_body"),
+                failureTitle: i18n.t("notify.delivery_failed_title"),
+                failureBody: i18n.t("notify.delivery_failed_body")
             )
         )
     }
