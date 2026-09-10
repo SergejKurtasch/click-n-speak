@@ -12,6 +12,23 @@ import CNSCore
 
 /// Translates the Python `sounddevice` stream loop into a Swift `AVAudioEngine`
 /// tap. Resamples whatever format the default microphone provides to 16kHz mono.
+public enum AudioRecorderError: LocalizedError, Sendable, Equatable {
+    case invalidInputFormat(sampleRate: Double, channels: Int)
+    case converterUnavailable
+    case engineStartFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .invalidInputFormat(rate, channels):
+            "The microphone reported an invalid format (\(rate) Hz, \(channels) channels)"
+        case .converterUnavailable:
+            "The microphone format could not be converted"
+        case let .engineStartFailed(message):
+            "The audio engine could not start: \(message)"
+        }
+    }
+}
+
 public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     public typealias Callbacks = AudioCallbacks
 
@@ -47,6 +64,12 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     private var consumerTask: Task<Void, Never>?
 
     private let frameSamples: Int  // VAD frame size (30 ms)
+
+    public static func validateInputFormat(sampleRate: Double, channels: Int) throws {
+        guard sampleRate > 0, channels > 0 else {
+            throw AudioRecorderError.invalidInputFormat(sampleRate: sampleRate, channels: channels)
+        }
+    }
 
     /// - Parameters:
     ///   - vad: defaults to libfvad (webrtcvad parity with the Python app, which
@@ -130,7 +153,12 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
                 try ensureStartIsActive(generation: generation)
                 let input = engine.inputNode
                 let format = input.outputFormat(forBus: 0)
-                converter = AVAudioConverter(from: format, to: targetFormat)
+                let channels = Int(format.channelCount)
+                try Self.validateInputFormat(sampleRate: format.sampleRate, channels: channels)
+                guard let newConverter = AVAudioConverter(from: format, to: targetFormat) else {
+                    throw AudioRecorderError.converterUnavailable
+                }
+                converter = newConverter
                 input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
                     self?.handleTap(buffer)
                 }
@@ -145,7 +173,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
                     stateLock.withLock { state in
                         if state.generation == generation { state.tapInstalled = false }
                     }
-                    throw error
+                    throw AudioRecorderError.engineStartFailed(error.localizedDescription)
                 }
                 return format
             }
