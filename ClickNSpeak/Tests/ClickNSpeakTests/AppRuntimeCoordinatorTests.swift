@@ -1,6 +1,7 @@
 import CNSCore
 import CNSDictionary
 import CNSEditors
+import CNSSession
 import CNSTranscription
 import Foundation
 import Testing
@@ -30,11 +31,58 @@ final class RuntimeSessionDouble: RuntimeSessionCoordinating {
 actor RuntimeTranscriberDouble: Transcribing {
     let name: String
     private(set) var stopCount = 0
+    private var fileGate: RuntimePreparationGate?
 
     init(name: String) { self.name = name }
 
     func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
         TranscriptionResult(text: name)
+    }
+
+    func transcribeFile(
+        _ request: FileTranscriptionRequest,
+        progress: @escaping @Sendable (FileTranscriptionProgress) -> Void
+    ) async -> FileTranscriptionResult {
+        await fileGate?.pause()
+        return FileTranscriptionResult(text: name, status: .success, segmentCount: 1)
+    }
+
+    fileprivate func suspendFile(using gate: RuntimePreparationGate) {
+        fileGate = gate
+    }
+
+    func stop() async { stopCount += 1 }
+}
+
+actor RuntimeEditorDouble: AiEditing {
+    nonisolated let isReady = true
+    nonisolated let descriptor: AiEditorDescriptor
+    private(set) var stopCount = 0
+
+    init(backend: String, modelID: String) {
+        descriptor = AiEditorDescriptor(
+            backend: backend,
+            modelID: modelID,
+            kind: backend == "local" ? .local : .cloud
+        )
+    }
+
+    func refine(
+        text: String,
+        languages: [String]?,
+        knownTerms: [String]?,
+        misrecognitions: [(String, String)]?
+    ) async -> RefineResult {
+        RefineResult(text: text, status: .unchanged)
+    }
+
+    func refineFileText(
+        text: String,
+        languages: [String]?,
+        knownTerms: [String]?,
+        misrecognitions: [(String, String)]?
+    ) async -> RefineResult {
+        RefineResult(text: text, status: .unchanged)
     }
 
     func stop() async { stopCount += 1 }
@@ -48,6 +96,7 @@ final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
     var delays: [String: Duration] = [:]
     private(set) var preparedBackends: [String] = []
     private(set) var services: [String: RuntimeTranscriberDouble] = [:]
+    private(set) var editorServices: [String: RuntimeEditorDouble] = [:]
 
     func prepareTranscriber(config: Config) async throws -> PreparedTranscriber {
         let backend = config.sttBackend
@@ -76,7 +125,14 @@ final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
 
     func prepareEditor(config: Config) async throws -> PreparedEditor {
         if lock.withLock({ failEditor }) { throw RuntimePreparationError.credentialMissing(backend: "gemini") }
-        return PreparedEditor(service: nil, descriptor: .disabled)
+        guard config.aiEditorEnabled else {
+            return PreparedEditor(service: nil, descriptor: .disabled)
+        }
+        let backend = config.aiEditorBackend
+        let modelID = backend == "gemini" ? config.geminiModel : config.aiEditorModel
+        let service = RuntimeEditorDouble(backend: backend, modelID: modelID)
+        lock.withLock { editorServices[backend] = service }
+        return PreparedEditor(service: service, descriptor: service.descriptor)
     }
 }
 
@@ -93,6 +149,102 @@ private actor RuntimePreparationGate {
     func release() { continuation?.resume(); continuation = nil }
 }
 
+private actor RuntimeCommitGate {
+    private var target: RuntimeCommitStage?
+    private var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func arm(_ stage: RuntimeCommitStage) {
+        target = stage
+        entered = false
+    }
+
+    func reach(_ stage: RuntimeCommitStage) async {
+        guard target == stage else { return }
+        target = nil
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitForEntry() async {
+        while !entered { await Task.yield() }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private final class RuntimeSessionRecorder: AudioCapturing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recording = false
+    private var callbacks: AudioCallbacks?
+    var finalAudio: [Float]?
+
+    var isRecording: Bool { lock.withLock { recording } }
+
+    func start(callbacks: AudioCallbacks) async throws {
+        lock.withLock {
+            self.callbacks = callbacks
+            recording = true
+        }
+    }
+
+    func stop() async {
+        let completion = lock.withLock { () -> (AudioCallbacks?, [Float]?) in
+            recording = false
+            let value = (callbacks, finalAudio)
+            callbacks = nil
+            return value
+        }
+        completion.0?.onFinal(completion.1)
+    }
+}
+
+@MainActor
+private final class RuntimeSessionPanel: PopupPresenting {
+    private(set) var isShowingInteractive = false
+    private var onCancel: (() -> Void)?
+
+    func show(title: String) {}
+    func updateStatus(_ title: String) {}
+    func updateText(_ text: String) {}
+    func appendText(_ text: String) {}
+    func setDecisionEnabled(_ enabled: Bool) {}
+    func showIncompleteWarning(_ message: String) {}
+    func hide(delay: TimeInterval) { isShowingInteractive = false }
+
+    func showInteractive(
+        text: String,
+        title: String,
+        toasts: DictionaryToasts,
+        onConfirm: @escaping (String) -> Void,
+        onCancel: @escaping () -> Void,
+        onAddToDictionary: ((String) -> AddTermResult)?
+    ) {
+        isShowingInteractive = true
+        self.onCancel = onCancel
+    }
+
+    func cancel() {
+        let callback = onCancel
+        onCancel = nil
+        isShowingInteractive = false
+        callback?()
+    }
+}
+
+@MainActor
+private struct RuntimeSessionDelivery: TextDelivering {
+    func deliver(_ text: String, to pid: pid_t?) async -> TextDeliveryOutcome { .delivered }
+}
+
+@MainActor
+private struct RuntimeSessionFrontmost: FrontmostAppProviding {
+    func frontmostPid() -> pid_t? { 42 }
+}
+
 private struct CredentialDouble: CredentialProviding {
     let values: [String: String]
 
@@ -102,14 +254,21 @@ private struct CredentialDouble: CredentialProviding {
 @MainActor
 @Suite("App runtime coordinator", .serialized)
 struct AppRuntimeCoordinatorTests {
-    private func config(backend: String, model: String = "model") -> Config {
+    private func config(
+        backend: String,
+        model: String = "model",
+        editorBackend: String? = nil
+    ) -> Config {
         var raw = JSONObject()
         raw["schema_version"] = .int(9)
         raw["primary_language"] = .string("ru")
         raw["stt_backend"] = .string(backend)
         raw["model_name"] = .string(model)
         raw["stt_cloud_model"] = .string(model)
-        raw["ai_editor_enabled"] = .bool(false)
+        raw["ai_editor_enabled"] = .bool(editorBackend != nil)
+        raw["ai_editor_backend"] = .string(editorBackend ?? "local")
+        raw["ai_editor_model"] = .string("editor-\(editorBackend ?? "local")")
+        raw["gemini_model"] = .string("editor-gemini")
         return Config(raw: raw)
     }
 
@@ -133,6 +292,32 @@ struct AppRuntimeCoordinatorTests {
             configURL: url
         )
         return (coordinator, router, session, factory, directory)
+    }
+
+    private func makeCommitRig(
+        initial: Config,
+        gate: RuntimeCommitGate
+    ) -> (
+        AppRuntimeCoordinator, TranscriberRouter, AiEditorRouter,
+        RuntimeSessionDouble, RuntimeFactoryDouble, URL
+    ) {
+        let transcriber = TranscriberRouter()
+        let editor = AiEditorRouter()
+        let session = RuntimeSessionDouble()
+        let factory = RuntimeFactoryDouble()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runtime-commit-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let coordinator = AppRuntimeCoordinator(
+            initialConfig: initial,
+            transcriberRouter: transcriber,
+            editorRouter: editor,
+            factory: factory,
+            session: session,
+            configURL: directory.appendingPathComponent("config.json"),
+            commitBarrier: { stage in await gate.reach(stage) }
+        )
+        return (coordinator, transcriber, editor, session, factory, directory)
     }
 
     private func settle(_ milliseconds: Int = 100) async {
@@ -298,6 +483,52 @@ struct AppRuntimeCoordinatorTests {
         await runtime.shutdown()
     }
 
+    @Test("A rejected editor stage restores both previous runtime services")
+    func rejectedEditorStageRollsBackTranscriber() async throws {
+        let initial = config(backend: "local", editorBackend: "local")
+        let gate = RuntimeCommitGate()
+        let (runtime, transcriber, editor, session, factory, directory) = makeCommitRig(
+            initial: initial,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await runtime.activateInitial(initial)
+        let previousTranscriber = factory.services["local"]
+        let previousEditor = RuntimeEditorDouble(backend: "local", modelID: "external")
+        _ = await editor.install(
+            previousEditor,
+            descriptor: previousEditor.descriptor,
+            activationGeneration: 100
+        )
+        await gate.arm(.betweenRouterInstalls)
+
+        runtime.requestConfiguration(config(backend: "gemini", editorBackend: "gemini"))
+        await gate.waitForEntry()
+        var dictionary = runtime.desiredConfiguration
+        #expect(UserTerms.add(to: &dictionary, lang: "en", term: "RollbackTerm", source: .manual))
+        try dictionary.saveAtomically(to: directory.appendingPathComponent("config.json"))
+        runtime.updateDictionarySnapshot(dictionary)
+        await gate.release()
+        await settle()
+
+        #expect(transcriber.currentDescriptorSnapshot.backend == "local")
+        #expect(editor.currentDescriptorSnapshot.backend == "local")
+        #expect(await previousTranscriber?.stopCount == 0)
+        #expect(await previousEditor.stopCount == 0)
+        #expect(await factory.services["gemini"]?.stopCount == 1)
+        #expect(await factory.editorServices["gemini"]?.stopCount == 1)
+        #expect(UserTerms.activeTerms(session.configs.last ?? initial, lang: "en") == ["RollbackTerm"])
+        if case let .degraded(active, desired, _, recovery) = runtime.state {
+            #expect(active?.transcriber.backend == "local")
+            #expect(active?.aiEditor.backend == "local")
+            #expect(desired.sttBackend == "gemini")
+            #expect(recovery.contains(.retry))
+        } else {
+            Issue.record("Expected a rejected router transaction to be recoverable")
+        }
+        await runtime.shutdown()
+    }
+
     @Test("Partial initial activation does not acknowledge an unwritten configuration")
     func partialInitialActivationDoesNotAcknowledgeDirtyUsage() async throws {
         var initial = usageConfig()
@@ -443,6 +674,252 @@ struct AppRuntimeCoordinatorTests {
         session.isRuntimeIdle = true
         await settle()
         #expect(router.currentDescriptorSnapshot.backend == "gemini")
+    }
+
+    @Test("A prepared candidate cannot commit after recording starts")
+    func preparationCannotCommitIntoRecording() async {
+        let local = config(backend: "local")
+        let (coordinator, router, session, factory, directory) = makeRig(initial: local)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(local)
+        let gate = RuntimePreparationGate()
+        factory.beforePreparation = { backend in
+            if backend == "gemini" { await gate.pause() }
+        }
+
+        coordinator.requestConfiguration(config(backend: "gemini"))
+        await gate.waitForEntry()
+        session.isRuntimeIdle = false
+        await gate.release()
+        await settle()
+
+        #expect(router.currentDescriptorSnapshot.backend == "local")
+        session.isRuntimeIdle = true
+        await settle(150)
+        #expect(router.currentDescriptorSnapshot.backend == "gemini")
+        await coordinator.shutdown()
+    }
+
+    @Test("The real session holds runtime changes across recording, file, and popup activities")
+    func realSessionActivitiesHoldRuntime() async {
+        let initial = config(backend: "local")
+        let transcriber = TranscriberRouter()
+        let editor = AiEditorRouter()
+        let recorder = RuntimeSessionRecorder()
+        let panel = RuntimeSessionPanel()
+        let session = SessionController(
+            config: initial,
+            transcriber: transcriber,
+            aiEditor: editor,
+            recorder: recorder,
+            panel: panel,
+            delivery: RuntimeSessionDelivery(),
+            frontmost: RuntimeSessionFrontmost(),
+            runtimeDescriptorProvider: {
+                RuntimeDescriptor(
+                    transcriber: transcriber.currentDescriptorSnapshot,
+                    aiEditor: editor.currentDescriptorSnapshot
+                )
+            }
+        )
+        let factory = RuntimeFactoryDouble()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runtime-real-session-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let coordinator = AppRuntimeCoordinator(
+            initialConfig: initial,
+            transcriberRouter: transcriber,
+            editorRouter: editor,
+            factory: factory,
+            session: session,
+            configURL: directory.appendingPathComponent("config.json")
+        )
+        await coordinator.activateInitial(initial)
+        let base = Date()
+
+        let preparation = RuntimePreparationGate()
+        factory.beforePreparation = { backend in
+            if backend == "gemini" { await preparation.pause() }
+        }
+        coordinator.requestConfiguration(config(backend: "gemini"))
+        await preparation.waitForEntry()
+        session.toggle(now: base)
+        await settle()
+        await preparation.release()
+        await settle()
+        #expect(session.isRecording)
+        #expect(transcriber.currentDescriptorSnapshot.backend == "local")
+
+        session.toggle(now: base.addingTimeInterval(1))
+        await settle(150)
+        #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
+
+        let fileGate = RuntimePreparationGate()
+        await factory.services["gemini"]?.suspendFile(using: fileGate)
+        let file = Task {
+            await session.transcribeFile(url: URL(fileURLWithPath: "held.wav"))
+        }
+        await fileGate.waitForEntry()
+        coordinator.requestConfiguration(config(backend: "openai"))
+        await settle()
+        #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
+        await fileGate.release()
+        _ = await file.value
+        await settle(150)
+        #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
+
+        recorder.finalAudio = [Float](repeating: 0.2, count: 16_000)
+        session.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        session.toggle(now: base.addingTimeInterval(3))
+        while !panel.isShowingInteractive { await Task.yield() }
+        coordinator.requestConfiguration(initial)
+        await settle()
+        #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
+
+        panel.cancel()
+        await settle(150)
+        #expect(transcriber.currentDescriptorSnapshot.backend == "local")
+        _ = await session.shutdown()
+        await coordinator.shutdown()
+    }
+
+    @Test("A newer intent waits for a coherent two-router commit")
+    func newerIntentWaitsForCoherentCommit() async {
+        let gate = RuntimeCommitGate()
+        let initial = config(backend: "local", editorBackend: "local")
+        let (coordinator, transcriber, editor, session, factory, directory) = makeCommitRig(
+            initial: initial,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(initial)
+        let nextPreparation = RuntimePreparationGate()
+        factory.beforePreparation = { backend in
+            if backend == "openai" { await nextPreparation.pause() }
+        }
+        await gate.arm(.betweenRouterInstalls)
+
+        coordinator.requestConfiguration(config(backend: "gemini", editorBackend: "gemini"))
+        await gate.waitForEntry()
+        #expect(session.runtimeMutationInProgress)
+        #expect(!session.beginRuntimeMutation())
+        #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
+        #expect(editor.currentDescriptorSnapshot.backend == "local")
+
+        coordinator.requestConfiguration(config(backend: "openai", editorBackend: "local"))
+        await gate.release()
+        await nextPreparation.waitForEntry()
+
+        #expect(!session.runtimeMutationInProgress)
+        #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
+        #expect(editor.currentDescriptorSnapshot.backend == "gemini")
+        if case let .reconfiguring(active, desired) = coordinator.state {
+            #expect(active.transcriber.backend == "gemini")
+            #expect(active.aiEditor.backend == "gemini")
+            #expect(desired.sttBackend == "openai")
+        } else {
+            Issue.record("Expected the newer runtime to remain pending")
+        }
+
+        await nextPreparation.release()
+        await settle(150)
+        #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
+        #expect(editor.currentDescriptorSnapshot.backend == "local")
+        await coordinator.shutdown()
+    }
+
+    @Test("A dictionary update during commit is persisted after the coherent runtime")
+    func dictionaryUpdateDuringCommitIsAppliedNext() async throws {
+        let gate = RuntimeCommitGate()
+        let initial = config(backend: "local", editorBackend: "local")
+        let (coordinator, transcriber, editor, session, _, directory) = makeCommitRig(
+            initial: initial,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(initial)
+        await gate.arm(.beforeTranscriberInstall)
+
+        coordinator.requestConfiguration(config(backend: "gemini", editorBackend: "gemini"))
+        await gate.waitForEntry()
+        var dictionary = coordinator.desiredConfiguration
+        #expect(UserTerms.add(to: &dictionary, lang: "en", term: "CommitTerm", source: .manual))
+        try dictionary.saveAtomically(to: directory.appendingPathComponent("config.json"))
+        coordinator.updateDictionarySnapshot(dictionary)
+        await gate.release()
+        await settle(150)
+
+        #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
+        #expect(editor.currentDescriptorSnapshot.backend == "gemini")
+        #expect(UserTerms.activeTerms(try #require(session.configs.last), lang: "en") == ["CommitTerm"])
+        let disk = try Config.loadValidated(from: directory.appendingPathComponent("config.json"))
+        #expect(UserTerms.activeTerms(disk, lang: "en") == ["CommitTerm"])
+        await coordinator.shutdown()
+    }
+
+    @Test("Shutdown waits for a two-router commit before stopping services")
+    func shutdownWaitsForCommit() async {
+        let gate = RuntimeCommitGate()
+        let initial = config(backend: "local", editorBackend: "local")
+        let (coordinator, transcriber, editor, session, factory, directory) = makeCommitRig(
+            initial: initial,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(initial)
+        await gate.arm(.betweenRouterInstalls)
+        coordinator.requestConfiguration(config(backend: "gemini", editorBackend: "gemini"))
+        await gate.waitForEntry()
+
+        let shutdown = Task { await coordinator.shutdown() }
+        while coordinator.state != .stopping { await Task.yield() }
+        #expect(session.runtimeMutationInProgress)
+        #expect(await factory.services["gemini"]?.stopCount == 0)
+        shutdown.cancel()
+        await gate.release()
+        await shutdown.value
+
+        #expect(!session.runtimeMutationInProgress)
+        #expect(transcriber.currentDescriptorSnapshot == .unavailable)
+        #expect(editor.currentDescriptorSnapshot == .disabled)
+        #expect(await factory.services["gemini"]?.stopCount == 1)
+        #expect(await factory.editorServices["gemini"]?.stopCount == 1)
+        #expect(coordinator.state == .stopping)
+    }
+
+    @Test("Shutdown is terminal while router stop waits for an active use")
+    func shutdownRejectsRecoveryDuringRouterDrain() async {
+        let initial = config(backend: "local", editorBackend: "local")
+        let (coordinator, transcriber, session, factory, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(initial)
+        let fileGate = RuntimePreparationGate()
+        await factory.services["local"]?.suspendFile(using: fileGate)
+        let file = Task {
+            await transcriber.transcribeFile(
+                FileTranscriptionRequest(url: URL(fileURLWithPath: "held.wav")),
+                progress: { _ in }
+            )
+        }
+        await fileGate.waitForEntry()
+
+        let shutdown = Task { await coordinator.shutdown() }
+        while session.runtimeAvailable { await Task.yield() }
+        coordinator.keepPreviousRuntime()
+        coordinator.adoptPersistedConfiguration(initial)
+        await coordinator.activateInitial(initial)
+
+        #expect(coordinator.state == .stopping)
+        #expect(!session.runtimeAvailable)
+
+        await fileGate.release()
+        _ = await file.value
+        await shutdown.value
+        #expect(coordinator.state == .stopping)
+        #expect(!session.runtimeAvailable)
+        #expect(transcriber.currentDescriptorSnapshot == .unavailable)
     }
 
     @Test("A rapid newer selection supersedes an obsolete candidate")

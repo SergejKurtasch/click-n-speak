@@ -47,6 +47,22 @@ enum RuntimeCoordinatorState: Sendable, Equatable {
     case stopping
 }
 
+enum RuntimeCommitStage: Sendable, Equatable {
+    case beforeTranscriberInstall
+    case betweenRouterInstalls
+}
+
+private enum RuntimeCommitError: LocalizedError {
+    case installationRejected(component: String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .installationRejected(component):
+            "The prepared \(component) runtime could not be activated"
+        }
+    }
+}
+
 @MainActor
 protocol RuntimeSessionCoordinating: AnyObject {
     var isRuntimeIdle: Bool { get }
@@ -69,6 +85,7 @@ final class AppRuntimeCoordinator {
     private weak var session: (any RuntimeSessionCoordinating)?
     private let configURL: URL
     private let log: @Sendable (String) -> Void
+    private let commitBarrier: @Sendable (RuntimeCommitStage) async -> Void
 
     private var activeConfig: Config?
     private var activeRuntime: RuntimeDescriptor?
@@ -76,6 +93,11 @@ final class AppRuntimeCoordinator {
     private var desiredConfig: Config
     private var desiredGeneration = 0
     private var pendingTask: Task<Void, Never>?
+    private var committingGeneration: Int?
+    private var postCommitApplyPending = false
+    private var dictionaryUpdateDuringCommit = false
+    private var shutdownRequested = false
+    private var commitCompletionWaiters: [CheckedContinuation<Void, Never>] = []
 
     private(set) var state: RuntimeCoordinatorState = .uninitialized {
         didSet { onStateChanged?(state) }
@@ -94,6 +116,10 @@ final class AppRuntimeCoordinator {
     func updateDictionarySnapshot(_ config: Config) {
         dictionarySnapshot = config
         desiredConfig = mergingDictionaryFields(into: desiredConfig)
+        if committingGeneration != nil {
+            dictionaryUpdateDuringCommit = true
+            return
+        }
         if let activeConfig {
             let updated = mergingDictionaryFields(into: activeConfig)
             self.activeConfig = updated
@@ -127,6 +153,7 @@ final class AppRuntimeCoordinator {
         factory: any RuntimeServiceBuilding,
         session: any RuntimeSessionCoordinating,
         configURL: URL,
+        commitBarrier: @escaping @Sendable (RuntimeCommitStage) async -> Void = { _ in },
         log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.dictionarySnapshot = initialConfig
@@ -136,6 +163,7 @@ final class AppRuntimeCoordinator {
         self.factory = factory
         self.session = session
         self.configURL = configURL
+        self.commitBarrier = commitBarrier
         self.log = log
         session.setRuntimeAvailable(false)
     }
@@ -143,6 +171,7 @@ final class AppRuntimeCoordinator {
     var canRecord: Bool { activeRuntime?.transcriber.readiness == .ready }
 
     func activateInitial(_ config: Config) async {
+        guard !shutdownRequested else { return }
         pendingTask?.cancel()
         desiredGeneration += 1
         desiredConfig = mergingDictionaryFields(into: config)
@@ -150,10 +179,19 @@ final class AppRuntimeCoordinator {
     }
 
     func requestConfiguration(_ config: Config) {
+        guard !shutdownRequested else { return }
         let config = mergingDictionaryFields(into: config)
         desiredConfig = config
         desiredGeneration += 1
         let generation = desiredGeneration
+
+        if committingGeneration != nil {
+            postCommitApplyPending = true
+            state = activeRuntime.map {
+                .reconfiguring(active: $0, desired: RuntimeSelection(config: config))
+            } ?? .preparing(desired: RuntimeSelection(config: config))
+            return
+        }
         pendingTask?.cancel()
 
         if let activeConfig, RuntimeSelection(config: activeConfig) == RuntimeSelection(config: config),
@@ -175,7 +213,19 @@ final class AppRuntimeCoordinator {
     }
 
     func keepPreviousRuntime() {
+        guard !shutdownRequested else { return }
         guard let activeConfig, let activeRuntime else { return }
+        if committingGeneration != nil {
+            let previous = mergingDictionaryFields(into: activeConfig)
+            desiredConfig = previous
+            desiredGeneration += 1
+            postCommitApplyPending = true
+            state = .reconfiguring(
+                active: activeRuntime,
+                desired: RuntimeSelection(config: previous)
+            )
+            return
+        }
         desiredGeneration += 1
         pendingTask?.cancel()
         pendingTask = nil
@@ -200,8 +250,18 @@ final class AppRuntimeCoordinator {
     /// to disk, such as explicit Reload Config. This may replace dictionary
     /// ownership and intentionally supersede a pending runtime selection.
     func adoptPersistedConfiguration(_ config: Config) {
+        guard !shutdownRequested else { return }
         dictionarySnapshot = config
         onConfigActivated?(config)
+        if committingGeneration != nil {
+            desiredConfig = config
+            desiredGeneration += 1
+            postCommitApplyPending = true
+            state = activeRuntime.map {
+                .reconfiguring(active: $0, desired: RuntimeSelection(config: config))
+            } ?? .preparing(desired: RuntimeSelection(config: config))
+            return
+        }
         guard let activeRuntime, let activeConfig else {
             requestConfiguration(config)
             return
@@ -220,8 +280,21 @@ final class AppRuntimeCoordinator {
     }
 
     func shutdown() async {
+        shutdownRequested = true
         state = .stopping
         desiredGeneration += 1
+        if committingGeneration == nil {
+            pendingTask?.cancel()
+        }
+        if committingGeneration != nil {
+            await withCheckedContinuation { continuation in
+                if committingGeneration == nil {
+                    continuation.resume()
+                } else {
+                    commitCompletionWaiters.append(continuation)
+                }
+            }
+        }
         pendingTask?.cancel()
         pendingTask = nil
         session?.setRuntimeAvailable(false)
@@ -229,6 +302,8 @@ final class AppRuntimeCoordinator {
         await editorRouter.stop()
         await transcriberRouter.stop()
         activeRuntime = nil
+        session?.setRuntimeAvailable(false)
+        state = .stopping
     }
 
     private func apply(config: Config, generation: Int) async {
@@ -252,6 +327,7 @@ final class AppRuntimeCoordinator {
 
             var preparedTranscriber: PreparedTranscriber?
             var preparedEditor: PreparedEditor?
+            var initialEditorError: Error?
             do {
                 if needsTranscriber {
                     preparedTranscriber = try await factory.prepareTranscriber(config: config)
@@ -262,23 +338,35 @@ final class AppRuntimeCoordinator {
                         preparedEditor = try await factory.prepareEditor(config: config)
                         try ensureCurrent(generation)
                     } catch {
-                        if activeRuntime == nil, let preparedTranscriber {
-                            try ensureCurrent(generation)
-                            try await activateInitialTranscriberOnly(
-                                preparedTranscriber,
-                                desiredConfig: config,
-                                generation: generation,
-                                editorError: error
-                            )
-                            return
+                        if activeRuntime == nil, preparedTranscriber != nil {
+                            initialEditorError = error
                         }
-                        throw error
+                        if initialEditorError == nil { throw error }
                     }
                 }
             } catch {
                 if let preparedTranscriber { await preparedTranscriber.service.stop() }
                 if let editor = preparedEditor?.service { await editor.stop() }
                 throw error
+            }
+
+            do {
+                try await beginRuntimeCommit(generation: generation)
+            } catch {
+                if let preparedTranscriber { await preparedTranscriber.service.stop() }
+                if let editor = preparedEditor?.service { await editor.stop() }
+                throw error
+            }
+            defer { finishRuntimeCommit(generation: generation) }
+
+            if let initialEditorError, let preparedTranscriber {
+                try await activateInitialTranscriberOnly(
+                    preparedTranscriber,
+                    desiredConfig: config,
+                    generation: generation,
+                    editorError: initialEditorError
+                )
+                return
             }
 
             let runtime = try await commitPreparedRuntime(
@@ -292,8 +380,17 @@ final class AppRuntimeCoordinator {
             activeConfig = activatedConfig
             activeRuntime = runtime
             session?.updateConfig(activatedConfig)
-            session?.setRuntimeAvailable(true)
-            state = .ready(active: runtime)
+            session?.setRuntimeAvailable(!shutdownRequested)
+            if shutdownRequested {
+                state = .stopping
+            } else if desiredGeneration == generation, !postCommitApplyPending {
+                state = .ready(active: runtime)
+            } else {
+                state = .reconfiguring(
+                    active: runtime,
+                    desired: RuntimeSelection(config: desiredConfig)
+                )
+            }
             RuntimeTelemetry.emitRuntimeEvent("runtime_activated", fields: [
                 "generation": generation,
                 "stt_backend": runtime.transcriber.backend,
@@ -321,48 +418,63 @@ final class AppRuntimeCoordinator {
         }
     }
 
-    /// Persist first, then publish candidates through generation-aware routers.
-    /// A failed write leaves the active services untouched, while a superseded
-    /// task can no longer overwrite a newer router generation after an `await`.
+    /// Persist first, then publish both candidates while the session owns an
+    /// exclusive runtime mutation reservation. Once the first router install
+    /// starts, a newer intent is queued for the next commit instead of
+    /// cancelling this one between the two publications.
     private func commitPreparedRuntime(
         config: Config,
         generation: Int,
         preparedTranscriber: PreparedTranscriber?,
         preparedEditor: PreparedEditor?
     ) async throws -> RuntimeDescriptor {
-        var transcriberInstalled = false
-        var editorInstalled = false
+        var transcriberInstallation: TranscriberRouterInstallation?
+        var editorInstallation: AiEditorRouterInstallation?
         do {
-            try ensureCurrent(generation)
             let persistedConfig = mergingDictionaryFields(into: config)
             try persistedConfig.saveAtomically(to: configURL)
             onConfigActivated?(persistedConfig)
-            try ensureCurrent(generation)
 
             if let preparedTranscriber {
-                transcriberInstalled = await transcriberRouter.install(
+                await commitBarrier(.beforeTranscriberInstall)
+                transcriberInstallation = await transcriberRouter.stageInstall(
                     preparedTranscriber.service,
                     descriptor: preparedTranscriber.descriptor,
                     activationGeneration: generation
                 )
-                guard transcriberInstalled else { throw CancellationError() }
-                try ensureCurrent(generation)
+                guard transcriberInstallation != nil else {
+                    throw RuntimeCommitError.installationRejected(component: "transcription")
+                }
             }
             if let preparedEditor {
-                editorInstalled = await editorRouter.install(
+                if transcriberInstallation != nil {
+                    await commitBarrier(.betweenRouterInstalls)
+                }
+                editorInstallation = await editorRouter.stageInstall(
                     preparedEditor.service,
                     descriptor: preparedEditor.descriptor,
                     activationGeneration: generation
                 )
-                guard editorInstalled else { throw CancellationError() }
-                try ensureCurrent(generation)
+                guard editorInstallation != nil else {
+                    throw RuntimeCommitError.installationRejected(component: "editor")
+                }
+            }
+            if let transcriberInstallation {
+                await transcriberRouter.commit(transcriberInstallation)
+            }
+            if let editorInstallation {
+                await editorRouter.commit(editorInstallation)
             }
         } catch {
-            if let preparedTranscriber, !transcriberInstalled {
-                await preparedTranscriber.service.stop()
-            }
-            if let editor = preparedEditor?.service, !editorInstalled {
+            if let editorInstallation {
+                await editorRouter.rollback(editorInstallation)
+            } else if let editor = preparedEditor?.service {
                 await editor.stop()
+            }
+            if let transcriberInstallation {
+                await transcriberRouter.rollback(transcriberInstallation)
+            } else if let preparedTranscriber {
+                await preparedTranscriber.service.stop()
             }
             throw error
         }
@@ -397,24 +509,26 @@ final class AppRuntimeCoordinator {
         generation: Int,
         editorError: Error
     ) async throws {
-        try ensureCurrent(generation)
-        guard await transcriberRouter.install(
+        await commitBarrier(.beforeTranscriberInstall)
+        guard let transcriberInstallation = await transcriberRouter.stageInstall(
             prepared.service,
             descriptor: prepared.descriptor,
             activationGeneration: generation
         ) else {
             await prepared.service.stop()
-            throw CancellationError()
+            throw RuntimeCommitError.installationRejected(component: "transcription")
         }
-        try ensureCurrent(generation)
-        guard await editorRouter.install(
+        await commitBarrier(.betweenRouterInstalls)
+        guard let editorInstallation = await editorRouter.stageInstall(
             nil,
             descriptor: .disabled,
             activationGeneration: generation
         ) else {
-            throw CancellationError()
+            await transcriberRouter.rollback(transcriberInstallation)
+            throw RuntimeCommitError.installationRejected(component: "editor")
         }
-        try ensureCurrent(generation)
+        await transcriberRouter.commit(transcriberInstallation)
+        await editorRouter.commit(editorInstallation)
         let runtime = RuntimeDescriptor(
             transcriber: prepared.descriptor,
             aiEditor: .disabled
@@ -426,13 +540,15 @@ final class AppRuntimeCoordinator {
         // Recording remains available with the successfully prepared STT, but
         // the session must not attempt to invoke the unavailable editor.
         session?.updateConfig(effectiveConfig)
-        session?.setRuntimeAvailable(true)
-        state = .degraded(
-            active: runtime,
-            desired: RuntimeSelection(config: desiredConfig),
-            message: editorError.localizedDescription,
-            recovery: recoveryActions(for: editorError)
-        )
+        session?.setRuntimeAvailable(!shutdownRequested)
+        state = shutdownRequested
+            ? .stopping
+            : .degraded(
+                active: runtime,
+                desired: RuntimeSelection(config: desiredConfig),
+                message: editorError.localizedDescription,
+                recovery: recoveryActions(for: editorError)
+            )
         RuntimeTelemetry.emitRuntimeEvent("runtime_partially_activated", fields: [
             "generation": generation,
             "stt_backend": runtime.transcriber.backend,
@@ -446,6 +562,48 @@ final class AppRuntimeCoordinator {
             try ensureCurrent(generation)
             try await Task.sleep(for: .milliseconds(50))
         }
+    }
+
+    private func beginRuntimeCommit(generation: Int) async throws {
+        while true {
+            try ensureCurrent(generation)
+            guard let session else {
+                committingGeneration = generation
+                return
+            }
+            if session.beginRuntimeMutation() {
+                do {
+                    try ensureCurrent(generation)
+                    committingGeneration = generation
+                    return
+                } catch {
+                    session.endRuntimeMutation()
+                    throw error
+                }
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    private func finishRuntimeCommit(generation: Int) {
+        session?.endRuntimeMutation()
+        committingGeneration = nil
+        if dictionaryUpdateDuringCommit, let activeConfig {
+            let updated = mergingDictionaryFields(into: activeConfig)
+            self.activeConfig = updated
+            session?.updateConfig(updated)
+        }
+        dictionaryUpdateDuringCommit = false
+        let waiters = commitCompletionWaiters
+        commitCompletionWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        let shouldApplyPending = !shutdownRequested
+            && (postCommitApplyPending || desiredGeneration != generation)
+        postCommitApplyPending = false
+        guard shouldApplyPending else { return }
+        requestConfiguration(desiredConfig)
     }
 
     private func ensureCurrent(_ generation: Int) throws {
@@ -470,6 +628,7 @@ final class AppRuntimeCoordinator {
     }
 
     private func telemetryErrorKind(for error: Error) -> String {
+        if error is RuntimeCommitError { return "router_installation_rejected" }
         guard let error = error as? RuntimePreparationError else {
             return error is CancellationError ? "cancelled" : "unexpected"
         }

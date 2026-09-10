@@ -691,6 +691,44 @@ struct SessionControllerTests {
         await controller.shutdown()
     }
 
+    @Test("A file job keeps its starting prompt and languages across config changes")
+    func fileJobUsesConfigurationSnapshot() async {
+        let transcriber = SuspendingFileTranscriber()
+        let editor = FakeAiEditor()
+        var initial = Self.makeConfig(primary: "ru", additional: ["en"])
+        initial.raw["initial_prompt"] = .string("OLD FILE PROMPT")
+        initial.raw["ai_editor_enabled"] = .bool(true)
+        let controller = SessionController(
+            config: initial,
+            transcriber: transcriber,
+            aiEditor: editor,
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+        let job = Task {
+            await controller.transcribeFile(
+                url: URL(fileURLWithPath: "snapshot.wav"),
+                refine: true
+            )
+        }
+        await transcriber.waitUntilStarted()
+
+        var updated = Self.makeConfig(primary: "de", additional: ["fr"])
+        updated.raw["initial_prompt"] = .string("NEW FILE PROMPT")
+        updated.raw["ai_editor_enabled"] = .bool(true)
+        controller.updateConfig(updated)
+        await transcriber.finish()
+        _ = await job.value
+
+        let request = await transcriber.fileRequests.first
+        #expect(request?.initialPrompt == "OLD FILE PROMPT")
+        #expect(request?.allowedLanguages == ["ru", "en"])
+        #expect(editor.lastLanguages == ["ru", "en"])
+        await controller.shutdown()
+    }
+
     @Test("Shutdown is terminal for new hotkey and file work")
     func shutdownBlocksNewActivities() async {
         let rig = makeRig()
@@ -1143,6 +1181,43 @@ struct SessionControllerTests {
     func autoDetectSendsNoLanguages() {
         let rig = makeRig(config: Self.makeConfig(autoDetect: true))
         #expect(rig.controller.allowedLanguages().isEmpty)
+    }
+
+    @Test("A recording keeps its starting prompt and languages for every chunk")
+    func recordingUsesConfigurationSnapshot() async {
+        var initial = Self.makeConfig(primary: "ru", additional: ["en"])
+        initial.raw["initial_prompt"] = .string("OLD RECORDING PROMPT")
+        initial.raw["ai_editor_enabled"] = .bool(true)
+        let editor = FakeAiEditor()
+        let rig = makeRig(
+            texts: ["first", "second"],
+            config: initial,
+            aiEditor: editor
+        )
+        await rig.transcriber.suspendOneDecode()
+        let base = Date()
+        rig.controller.toggle(now: base)
+        await settle()
+        rig.recorder.emitChunk(audio)
+        await rig.transcriber.waitUntilRequestCount(1)
+
+        var updated = Self.makeConfig(primary: "de", additional: ["fr"])
+        updated.raw["initial_prompt"] = .string("NEW RECORDING PROMPT")
+        updated.raw["ai_editor_enabled"] = .bool(true)
+        rig.controller.updateConfig(updated)
+        await rig.transcriber.resumeDecode()
+        await settle()
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(1))
+        while !rig.panel.isShowingInteractive { await Task.yield() }
+
+        let requests = await rig.transcriber.requests
+        #expect(requests.count == 2)
+        #expect(requests.allSatisfy { $0.allowedLanguages == ["ru", "en"] })
+        #expect(requests.allSatisfy { $0.initialPrompt?.contains("OLD RECORDING PROMPT") == true })
+        #expect(requests.allSatisfy { $0.initialPrompt?.contains("NEW RECORDING PROMPT") == false })
+        #expect(editor.lastLanguages == ["ru", "en"])
+        await rig.controller.shutdown()
     }
 
     // MARK: - Dictionary

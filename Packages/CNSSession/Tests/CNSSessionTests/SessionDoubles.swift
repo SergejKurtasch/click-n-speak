@@ -303,6 +303,7 @@ actor FakeTranscriber: Transcribing {
 /// the real SessionController guard while the request is in flight.
 actor SuspendingFileTranscriber: Transcribing {
     private(set) var fileRequestCount = 0
+    private(set) var fileRequests: [FileTranscriptionRequest] = []
     private var continuation: CheckedContinuation<Void, Never>?
 
     func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
@@ -314,6 +315,7 @@ actor SuspendingFileTranscriber: Transcribing {
         progress: @escaping @Sendable (FileTranscriptionProgress) -> Void
     ) async -> FileTranscriptionResult {
         fileRequestCount += 1
+        fileRequests.append(request)
         await withCheckedContinuation { continuation = $0 }
         return FileTranscriptionResult(text: "file text", status: .success)
     }
@@ -445,6 +447,7 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
     var refineStatus: RefineStatus = .ok
     var lastInputText: String?
     var lastMisrecognitions: [(String, String)]?
+    var lastLanguages: [String]?
     var didCallRefine = false
 
     func refine(
@@ -456,6 +459,7 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
         didCallRefine = true
         lastInputText = text
         lastMisrecognitions = misrecognitions
+        lastLanguages = languages
         if refineDelay > 0 {
             try? await Task.sleep(nanoseconds: UInt64(refineDelay * 1_000_000_000))
         }
@@ -469,6 +473,7 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
         misrecognitions: [(String, String)]?
     ) async -> RefineResult {
         lastMisrecognitions = misrecognitions
+        lastLanguages = languages
         return RefineResult(text: refinedText, status: refineStatus)
     }
 }

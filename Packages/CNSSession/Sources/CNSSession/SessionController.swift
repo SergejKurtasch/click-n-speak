@@ -146,6 +146,7 @@ public final class SessionController {
     private var lastToggleAt: Date?
     private var sawFinalChunk = false
     private var completedOutcomeSessionId: Int?
+    private var activeSessionConfig: Config?
     private var activeSessionRuntimeDescriptor: RuntimeDescriptor = .unavailable
     private var activeSessionPromptHash = ""
     private var lastTranscriptionError: String?
@@ -392,8 +393,9 @@ public final class SessionController {
         sawFirstDecode = false
         lastTranscriptionError = nil
         completedOutcomeSessionId = nil
+        activeSessionConfig = config
         activeSessionRuntimeDescriptor = runtimeDescriptorProvider()
-        activeSessionPromptHash = Self.promptHash(config.initialPrompt)
+        activeSessionPromptHash = Self.promptHash(activeSessionConfig?.initialPrompt ?? "")
         // A popup still open means this recording extends it: keep the popup and
         // the app it belongs to, and append the new text (§6 nr. 12).
         appendToPopup = panel.isShowingInteractive && popupDraft != nil
@@ -718,9 +720,10 @@ public final class SessionController {
     }
 
     private func processChunk(_ chunk: SessionChunk, sessionId id: Int) async {
+        let sessionConfig = activeSessionConfig ?? config
         let context = await contextBuilder.build(
             instruction: strings.transcriptionInstruction,
-            vocabPrompt: config.initialPrompt,
+            vocabPrompt: sessionConfig.initialPrompt,
             transcribedParts: transcribedParts,
             tokenCount: { [transcriber] text in await transcriber.tokenCount(text) }
         )
@@ -728,7 +731,7 @@ public final class SessionController {
         let request = TranscriptionRequest(
             audio: chunk.audio,
             initialPrompt: context.isEmpty ? nil : context,
-            allowedLanguages: allowedLanguages(),
+            allowedLanguages: allowedLanguages(for: sessionConfig),
             isFinalChunk: chunk.isFinal,
             decodeTimeout: sawFirstDecode
                 ? TranscriptionDeadlinePolicy.warmDecodeSeconds
@@ -809,6 +812,7 @@ public final class SessionController {
     /// Hand the accumulated text to the user for editing.
     private func finalize(sessionId id: Int) async {
         guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
+        let sessionConfig = activeSessionConfig ?? config
         var fullText = ChunkJoiner.join(transcribedParts)
         guard !fullText.isEmpty else {
             if restoreDraftAfterEmptyAppendIfNeeded() {
@@ -826,11 +830,14 @@ public final class SessionController {
             return
         }
 
-        if config.aiEditorEnabled, let editor = aiEditor {
-            let langs = allowedLanguages()
-            let known = VocabProvider.collectKnownTerms(config: .object(config.raw), languages: langs.isEmpty ? nil : langs)
+        if sessionConfig.aiEditorEnabled, let editor = aiEditor {
+            let langs = allowedLanguages(for: sessionConfig)
+            let known = VocabProvider.collectKnownTerms(
+                config: .object(sessionConfig.raw),
+                languages: langs.isEmpty ? nil : langs
+            )
             let mis = VocabProvider.collectEditorHints(
-                config: .object(config.raw),
+                config: .object(sessionConfig.raw),
                 languages: langs.isEmpty ? nil : langs,
                 correctionsURL: dictionaryCoordinator?.correctionsURL
             )
@@ -862,9 +869,9 @@ public final class SessionController {
             after: lastRefineResult?.status,
             hintsInPrompt: activeSessionRuntimeDescriptor.aiEditor.kind == .cloud
         ) {
-            let languages = allowedLanguages()
+            let languages = allowedLanguages(for: sessionConfig)
             let pairs = VocabProvider.collectDirectReplacements(
-                config: .object(config.raw),
+                config: .object(sessionConfig.raw),
                 languages: languages.isEmpty ? nil : languages
             )
             fullText = VocabProvider.applyReplacements(fullText, pairs: pairs)
@@ -960,10 +967,11 @@ public final class SessionController {
     private func handleConfirm(_ userText: String) {
         guard claimPopupOutcome(reason: "confirm") else { return }
         let draft = popupDraft
+        let sessionConfig = activeSessionConfig ?? config
         let raw = draft?.rawWhisper
             ?? rawChunks.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         let lang = draft?.lastDetectedLanguage
-            ?? (detectedLanguage.isEmpty ? config.primaryLanguage : detectedLanguage)
+            ?? (detectedLanguage.isEmpty ? sessionConfig.primaryLanguage : detectedLanguage)
         let pid = draft?.targetPID ?? previousAppPid
         transition(to: .injecting(sessionID: sessionId, targetPID: pid), reason: "popup_confirm")
 
@@ -992,7 +1000,7 @@ public final class SessionController {
             userFinal: userText,
             lang: lang,
             promptHash: promptHash,
-            userTerms: UserTerms.activeTerms(config, lang: lang),
+            userTerms: UserTerms.activeTerms(sessionConfig, lang: lang),
             segments: draft?.datasetSegments,
             incomplete: draft?.failedChunkIndices.isEmpty == false
         )
@@ -1196,6 +1204,10 @@ public final class SessionController {
     /// `get_allowed_languages`: primary first, then additional, deduplicated.
     /// Empty means auto-detect — Whisper then gets no language hint at all.
     func allowedLanguages() -> [String] {
+        allowedLanguages(for: config)
+    }
+
+    private func allowedLanguages(for config: Config) -> [String] {
         if config.raw["language_auto_detect"]?.isTruthy == true { return [] }
         let primary = config.primaryLanguage
         return [primary] + LanguageCode.dedupeList(config.additionalLanguages, primary: primary)
@@ -1326,6 +1338,8 @@ public final class SessionController {
         guard isRuntimeIdle, runtimeAvailable, !restartPending else {
             return .failed(.init(kind: .unavailable, message: "Another transcription is already running"))
         }
+        let fileConfig = config
+        let fileRuntime = runtimeDescriptorProvider()
         fileJobActive = true
         transition(to: .fileProcessing, reason: "file_transcription_start")
         defer {
@@ -1343,6 +1357,8 @@ public final class SessionController {
             return await self.performFileTranscription(
                 url: url,
                 refine: refine,
+                config: fileConfig,
+                runtime: fileRuntime,
                 progress: progress
             )
         }
@@ -1358,14 +1374,14 @@ public final class SessionController {
     private func performFileTranscription(
         url: URL,
         refine: Bool,
+        config fileConfig: Config,
+        runtime fileRuntime: RuntimeDescriptor,
         progress: @escaping @Sendable (FileTranscriptionProgress) -> Void
     ) async -> FileTranscriptionResult {
-        let fileRuntime = runtimeDescriptorProvider()
-
         let request = FileTranscriptionRequest(
             url: url,
-            initialPrompt: config.initialPrompt.isEmpty ? nil : config.initialPrompt,
-            allowedLanguages: allowedLanguages(),
+            initialPrompt: fileConfig.initialPrompt.isEmpty ? nil : fileConfig.initialPrompt,
+            allowedLanguages: allowedLanguages(for: fileConfig),
             refine: refine
         )
         var result = await transcriber.transcribeFile(request, progress: progress)
@@ -1374,16 +1390,16 @@ public final class SessionController {
         }
         guard case .success = result.status else { return result }
 
-        let languages = allowedLanguages()
+        let languages = allowedLanguages(for: fileConfig)
         var refineStatus: RefineStatus?
         if refine, let aiEditor {
             progress(.init(stage: .refining, completedUnits: 0, totalUnits: 1))
             let known = VocabProvider.collectKnownTerms(
-                config: .object(config.raw),
+                config: .object(fileConfig.raw),
                 languages: languages.isEmpty ? nil : languages
             )
             let misrecognitions = VocabProvider.collectEditorHints(
-                config: .object(config.raw),
+                config: .object(fileConfig.raw),
                 languages: languages.isEmpty ? nil : languages,
                 correctionsURL: dictionaryCoordinator?.correctionsURL
             )
@@ -1405,7 +1421,7 @@ public final class SessionController {
             hintsInPrompt: fileRuntime.aiEditor.kind == .cloud
         ) {
             let pairs = VocabProvider.collectDirectReplacements(
-                config: .object(config.raw),
+                config: .object(fileConfig.raw),
                 languages: languages.isEmpty ? nil : languages
             )
             result.text = VocabProvider.applyReplacements(result.text, pairs: pairs)

@@ -3,16 +3,50 @@ import Foundation
 import Testing
 @testable import CNSTranscription
 
+private actor RouterOperationGate {
+    private var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func pause() async {
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilEntered() async {
+        while !entered { await Task.yield() }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 private actor RouterTranscriberDouble: Transcribing {
     let output: String
     let fileDelayNanoseconds: UInt64
+    let prepareGate: RouterOperationGate?
+    let tokenCountGate: RouterOperationGate?
+    let reloadGate: RouterOperationGate?
+    let fileGate: RouterOperationGate?
     private(set) var requestCount = 0
     private(set) var fileRequestCount = 0
     private(set) var stopCount = 0
 
-    init(output: String, fileDelayNanoseconds: UInt64 = 0) {
+    init(
+        output: String,
+        fileDelayNanoseconds: UInt64 = 0,
+        prepareGate: RouterOperationGate? = nil,
+        tokenCountGate: RouterOperationGate? = nil,
+        reloadGate: RouterOperationGate? = nil,
+        fileGate: RouterOperationGate? = nil
+    ) {
         self.output = output
         self.fileDelayNanoseconds = fileDelayNanoseconds
+        self.prepareGate = prepareGate
+        self.tokenCountGate = tokenCountGate
+        self.reloadGate = reloadGate
+        self.fileGate = fileGate
     }
 
     func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
@@ -22,11 +56,25 @@ private actor RouterTranscriberDouble: Transcribing {
 
     func stop() async { stopCount += 1 }
 
+    func prepare(language: String?) async throws {
+        await prepareGate?.pause()
+    }
+
+    func tokenCount(_ text: String) async -> Int? {
+        await tokenCountGate?.pause()
+        return text.count
+    }
+
+    func reload() async {
+        await reloadGate?.pause()
+    }
+
     func transcribeFile(
         _ request: FileTranscriptionRequest,
         progress: @escaping @Sendable (FileTranscriptionProgress) -> Void
     ) async -> FileTranscriptionResult {
         fileRequestCount += 1
+        await fileGate?.pause()
         if fileDelayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: fileDelayNanoseconds)
         }
@@ -104,6 +152,101 @@ struct RuntimeRouterTests {
         #expect(await router.transcribe(request).text == "current")
         #expect(router.currentDescriptorSnapshot == descriptor)
         #expect(await stale.stopCount == 0, "A rejected candidate remains owned by the caller")
+    }
+
+    @Test("A staged transcriber can roll back without stopping the previous engine")
+    func stagedInstallRollsBack() async throws {
+        let router = TranscriberRouter()
+        let previous = RouterTranscriberDouble(output: "previous")
+        let candidate = RouterTranscriberDouble(output: "candidate")
+        let previousDescriptor = TranscriberDescriptor(
+            backend: "local", modelID: "previous", kind: .local
+        )
+        await router.install(previous, descriptor: previousDescriptor, activationGeneration: 1)
+
+        let installation = try #require(await router.stageInstall(
+            candidate,
+            descriptor: TranscriberDescriptor(
+                backend: "openai", modelID: "candidate", kind: .cloud
+            ),
+            activationGeneration: 2
+        ))
+        #expect(await previous.stopCount == 0)
+        await router.rollback(installation)
+
+        #expect(router.currentDescriptorSnapshot == previousDescriptor)
+        #expect(await router.transcribe(request).text == "previous")
+        #expect(await previous.stopCount == 0)
+        #expect(await candidate.stopCount == 1)
+        await router.stop()
+    }
+
+    @Test("Prepare, token counting, and reload retain a retired engine")
+    func auxiliaryOperationsRetainRetiredEngine() async throws {
+        let router = TranscriberRouter()
+        let prepareGate = RouterOperationGate()
+        let tokenCountGate = RouterOperationGate()
+        let reloadGate = RouterOperationGate()
+        let old = RouterTranscriberDouble(
+            output: "old",
+            prepareGate: prepareGate,
+            tokenCountGate: tokenCountGate,
+            reloadGate: reloadGate
+        )
+        let replacement = RouterTranscriberDouble(output: "new")
+        await router.install(
+            old,
+            descriptor: TranscriberDescriptor(backend: "local", modelID: "old", kind: .local)
+        )
+
+        let prepare = Task { try await router.prepare(language: "ru") }
+        let tokenCount = Task { await router.tokenCount("abc") }
+        let reload = Task { await router.reload() }
+        await prepareGate.waitUntilEntered()
+        await tokenCountGate.waitUntilEntered()
+        await reloadGate.waitUntilEntered()
+
+        await router.install(
+            replacement,
+            descriptor: TranscriberDescriptor(backend: "openai", modelID: "new", kind: .cloud)
+        )
+        #expect(await old.stopCount == 0)
+
+        await prepareGate.release()
+        await tokenCountGate.release()
+        await reloadGate.release()
+        try await prepare.value
+        #expect(await tokenCount.value == 3)
+        await reload.value
+        while await old.stopCount == 0 { await Task.yield() }
+
+        #expect(await old.stopCount == 1)
+        #expect(await router.trackedInFlightGenerationCount == 0)
+        await router.stop()
+    }
+
+    @Test("Router stop waits for an active file request before stopping its engine")
+    func stopWaitsForActiveUse() async {
+        let router = TranscriberRouter()
+        let fileGate = RouterOperationGate()
+        let service = RouterTranscriberDouble(output: "file", fileGate: fileGate)
+        await router.install(
+            service,
+            descriptor: TranscriberDescriptor(backend: "local", modelID: "old", kind: .local)
+        )
+        let request = FileTranscriptionRequest(url: URL(fileURLWithPath: "fixture.wav"))
+        let file = Task { await router.transcribeFile(request) { _ in } }
+        await fileGate.waitUntilEntered()
+
+        let stop = Task { await router.stop() }
+        while router.currentDescriptorSnapshot != .unavailable { await Task.yield() }
+        #expect(await service.stopCount == 0)
+
+        await fileGate.release()
+        _ = await file.value
+        await stop.value
+        #expect(await service.stopCount == 1)
+        #expect(await router.trackedInFlightGenerationCount == 0)
     }
 
 }
