@@ -540,8 +540,45 @@ public final class SessionController {
                 }
                 audioBacklog.close()
                 continuation?.finish()
+            },
+            onCaptureInterrupted: { interruption in
+                let interruptedChunkIndex = audioBacklog.snapshot.nextIndex
+                Task { @MainActor [weak self] in
+                    self?.handleAudioCaptureInterruption(
+                        interruption,
+                        sessionID: id,
+                        chunkIndex: interruptedChunkIndex
+                    )
+                }
             }
         )
+    }
+
+    private func handleAudioCaptureInterruption(
+        _ interruption: AudioCaptureInterruption,
+        sessionID id: Int,
+        chunkIndex: Int
+    ) {
+        guard !isShuttingDown, sessionId == id else { return }
+        switch state {
+        case .starting, .recording:
+            markIncompleteChunk(index: chunkIndex, reason: interruption.rawValue)
+            RuntimeTelemetry.emitRuntimeEvent("audio_capture_interrupted", fields: [
+                "session_id": id,
+                "kind": interruption.rawValue,
+            ])
+            beginStop(reason: "audio_\(interruption.rawValue)")
+        case .stopping, .processing:
+            // The interruption happened before this MainActor hop. Preserve that
+            // provenance even if a user stop reached the state machine first.
+            markIncompleteChunk(index: chunkIndex, reason: interruption.rawValue)
+            RuntimeTelemetry.emitRuntimeEvent("audio_capture_interrupted", fields: [
+                "session_id": id,
+                "kind": interruption.rawValue,
+            ])
+        default:
+            return
+        }
     }
 
     private func handleAudioBacklogLimit(
@@ -590,7 +627,7 @@ public final class SessionController {
 
     // MARK: - Stop
 
-    private func beginStop() {
+    private func beginStop(reason: String = "hotkey_stop") {
         guard let id = state.sessionID else { return }
         switch state {
         case .starting, .recording:
@@ -600,7 +637,7 @@ public final class SessionController {
             return
         }
         stopRequestedUptime = ProcessInfo.processInfo.systemUptime
-        transition(to: .stopping(sessionID: id), reason: "hotkey_stop")
+        transition(to: .stopping(sessionID: id), reason: reason)
         panel.updateStatus(strings.transcribing)
         recorderStartTask?.cancel()
         recorderStopTask = Task { [weak self] in

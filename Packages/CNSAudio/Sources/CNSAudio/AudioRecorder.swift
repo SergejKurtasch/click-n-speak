@@ -37,8 +37,8 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     private let log: @Sendable (String) -> Void
     private let playsSounds: Bool
     private let closeWatchdog: StreamCloseWatchdog
+    private let engineAdapter: any AudioEngineAdapting
 
-    private let engine = AVAudioEngine()
     /// Serializes graph start/stop. The tap has a separate short-lived gate so
     /// stop can wait for a callback that already owns a buffer before draining.
     private let engineLock = NSLock()
@@ -53,6 +53,9 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         var stopping = false
         var acceptingSamples = false
         var tapInstalled = false
+        var graphSetupInProgress = false
+        var teardownStarted = false
+        var interruptionReported = false
         var generation = 0
         var callbacks = Callbacks()
         var chunker = AudioChunker()
@@ -81,6 +84,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     public init(
         config: ChunkingConfig = ChunkingConfig(),
         vad: VoiceActivityDetecting = FVADVoiceActivityDetector(),
+        engineAdapter: (any AudioEngineAdapting)? = nil,
         playsSounds: Bool = true,
         streamCloseTimeout: TimeInterval = 12.0,
         log: @escaping @Sendable (String) -> Void = { _ in },
@@ -88,6 +92,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     ) {
         self.config = config
         self.vad = vad
+        self.engineAdapter = engineAdapter ?? AVAudioEngineAdapter()
         self.log = log
         self.playsSounds = playsSounds
         self.closeWatchdog = StreamCloseWatchdog(
@@ -103,6 +108,9 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             interleaved: false
         )!
         self.ringBuffer = SampleRingBuffer(capacitySeconds: 30, sampleRate: config.sampleRate)
+        self.engineAdapter.setConfigurationChangeHandler { [weak self] in
+            self?.handleConfigurationChange()
+        }
     }
 
     public var isRecording: Bool {
@@ -122,6 +130,9 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             state.stopping = false
             state.acceptingSamples = false
             state.tapInstalled = false
+            state.graphSetupInProgress = false
+            state.teardownStarted = false
+            state.interruptionReported = false
             state.callbacks = callbacks
             state.chunker = AudioChunker(config: config)
             state.accumulation.removeAll(keepingCapacity: true)
@@ -147,42 +158,56 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         }
         try ensureStartIsActive(generation: generation)
 
-        let inputFormat: AVAudioFormat
+        let inputSampleRate: Double
         do {
-            inputFormat = try engineLock.withLock {
+            inputSampleRate = try engineLock.withLock {
                 try ensureStartIsActive(generation: generation)
-                let input = engine.inputNode
-                let format = input.outputFormat(forBus: 0)
-                let channels = Int(format.channelCount)
-                try Self.validateInputFormat(sampleRate: format.sampleRate, channels: channels)
-                guard let newConverter = AVAudioConverter(from: format, to: targetFormat) else {
+                stateLock.withLock { state in
+                    if state.generation == generation { state.graphSetupInProgress = true }
+                }
+                let inputFormat = engineAdapter.inputFormatSnapshot()
+                try Self.validateInputFormat(
+                    sampleRate: inputFormat.sampleRate,
+                    channels: inputFormat.channelCount
+                )
+                guard let newConverter = engineAdapter.makeConverter(
+                    from: inputFormat,
+                    to: targetFormat
+                ) else {
                     throw AudioRecorderError.converterUnavailable
                 }
+                try ensureStartIsActive(generation: generation)
                 converter = newConverter
-                input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-                    self?.handleTap(buffer)
+                engineAdapter.installTap(bufferSize: 1024, inputFormat: inputFormat) { [weak self] buffer in
+                    self?.handleTap(buffer, generation: generation)
                 }
                 stateLock.withLock { state in
                     if state.generation == generation { state.tapInstalled = true }
                 }
-                engine.prepare()
+                try ensureStartIsActive(generation: generation)
+                engineAdapter.prepare()
+                try ensureStartIsActive(generation: generation)
                 do {
-                    try engine.start()
+                    try engineAdapter.start()
                 } catch {
-                    input.removeTap(onBus: 0)
-                    stateLock.withLock { state in
-                        if state.generation == generation { state.tapInstalled = false }
-                    }
                     throw AudioRecorderError.engineStartFailed(error.localizedDescription)
                 }
-                return format
+                try ensureStartIsActive(generation: generation)
+                stateLock.withLock { state in
+                    if state.generation == generation { state.graphSetupInProgress = false }
+                }
+                return inputFormat.sampleRate
             }
         } catch {
+            scheduleGraphTeardownIfNeeded(generation: generation)
             resetFailedStart(generation: generation)
             throw error
         }
         let startStillActive = stateLock.withLock { state -> Bool in
-            guard state.generation == generation, state.recording, !state.stopping else { return false }
+            guard state.generation == generation,
+                  state.recording,
+                  !state.stopping,
+                  !state.interruptionReported else { return false }
             state.acceptingSamples = true
             return true
         }
@@ -191,7 +216,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             throw CancellationError()
         }
         startConsumer()
-        log("AudioRecorder started (input \(Int(inputFormat.sampleRate)) Hz → \(config.sampleRate) Hz)")
+        log("AudioRecorder started (input \(Int(inputSampleRate)) Hz → \(config.sampleRate) Hz)")
     }
 
     /// Stop recording. Drains the buffer, applies the final-chunk guard, and
@@ -205,21 +230,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         }
         guard let (callbacks, generation) = stopContext else { return }
 
-        engineLock.withLock {
-            let shouldRemoveTap = stateLock.withLock { state -> Bool in
-                guard state.generation == generation, state.tapInstalled else { return false }
-                state.tapInstalled = false
-                return true
-            }
-            if shouldRemoveTap { engine.inputNode.removeTap(onBus: 0) }
-        }
-        // A callback that passed the accepting-samples check owns this lock until
-        // its converted samples are in the ring. Once acquired here, no sample
-        // from this generation can appear after the final drain.
-        tapWorkLock.withLock {}
-        // Tear the engine down off this thread, watched for hangs. Sample
-        // acceptance is already false and the tap gate is quiescent.
-        closeWatchdog.close { [engine] in engine.stop() }
+        scheduleGraphTeardownIfNeeded(generation: generation)
 
         let consumer = consumerTask
         consumer?.cancel()
@@ -253,6 +264,8 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             state.stopping = false
             state.acceptingSamples = false
             state.tapInstalled = false
+            state.graphSetupInProgress = false
+            state.interruptionReported = false
             state.callbacks = Callbacks()
         }
         converter = nil
@@ -260,12 +273,16 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
 
     // MARK: - Tap (audio thread): convert + write only
 
-    private func handleTap(_ buffer: AVAudioPCMBuffer) {
+    private func handleTap(_ buffer: AVAudioPCMBuffer, generation: Int) {
         let startedAt = ProcessInfo.processInfo.systemUptime
-        guard stateLock.withLock({ $0.acceptingSamples }) else { return }
+        guard stateLock.withLock({
+            $0.generation == generation && $0.acceptingSamples
+        }) else { return }
         tapWorkLock.lock()
         defer { tapWorkLock.unlock() }
-        guard stateLock.withLock({ $0.acceptingSamples }) else { return }
+        guard stateLock.withLock({
+            $0.generation == generation && $0.acceptingSamples
+        }) else { return }
         guard let converter else { return }
         let ratio = targetFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
@@ -286,6 +303,19 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
                 state.maximumTapDurationMs = max(state.maximumTapDurationMs, elapsedMs)
             }
         }
+    }
+
+    private func handleConfigurationChange() {
+        let callback = stateLock.withLock { state -> Callbacks? in
+            guard state.recording,
+                  !state.stopping,
+                  (state.graphSetupInProgress || state.tapInstalled),
+                  !state.interruptionReported else { return nil }
+            state.acceptingSamples = false
+            state.interruptionReported = true
+            return state.callbacks
+        }
+        callback?.onCaptureInterrupted(.configurationChanged)
     }
 
     // MARK: - Consumer task: VAD + chunking, off the audio thread
@@ -338,7 +368,10 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     private func ensureStartIsActive(generation: Int) throws {
         try Task.checkCancellation()
         let active = stateLock.withLock {
-            $0.generation == generation && $0.recording && !$0.stopping
+            $0.generation == generation
+                && $0.recording
+                && !$0.stopping
+                && !$0.interruptionReported
         }
         if !active { throw CancellationError() }
     }
@@ -350,7 +383,35 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             state.stopping = false
             state.acceptingSamples = false
             state.tapInstalled = false
+            state.graphSetupInProgress = false
+            state.interruptionReported = false
             state.callbacks = Callbacks()
+        }
+        converter = nil
+    }
+
+    private func scheduleGraphTeardownIfNeeded(generation: Int) {
+        let shouldRemoveTap: Bool? = engineLock.withLock {
+            stateLock.withLock { state -> Bool? in
+                guard state.generation == generation,
+                      state.tapInstalled,
+                      !state.teardownStarted else { return nil }
+                state.teardownStarted = true
+                state.graphSetupInProgress = false
+                state.tapInstalled = false
+                return true
+            }
+        }
+        guard let shouldRemoveTap else { return }
+
+        // A callback that passed the accepting-samples check owns this lock until
+        // its converted samples are in the ring. Once acquired here, no sample
+        // from this generation can appear after the final drain.
+        tapWorkLock.withLock {}
+        // Both potentially blocking graph teardown steps run under one watchdog.
+        closeWatchdog.close { [engineAdapter] in
+            if shouldRemoveTap { engineAdapter.removeTap() }
+            engineAdapter.stop()
         }
     }
 

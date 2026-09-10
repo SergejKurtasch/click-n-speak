@@ -6,6 +6,10 @@ public enum RecorderError: Error {
     case previousStreamStuck
 }
 
+public enum AudioCaptureInterruption: String, Sendable, Equatable {
+    case configurationChanged = "configuration_changed"
+}
+
 /// What the app did with a term the user added from the popup.
 public enum AddTermResult: Sendable, Equatable {
     /// Added; `message` overrides the default "Added: {term}" toast when non-nil.
@@ -58,10 +62,16 @@ public protocol PopupPresenting: AnyObject {
 public struct AudioCallbacks: Sendable {
     public var onChunk: @Sendable ([Float]) -> Void
     public var onFinal: @Sendable ([Float]?) -> Void
+    public var onCaptureInterrupted: @Sendable (AudioCaptureInterruption) -> Void
 
-    public init(onChunk: @escaping @Sendable ([Float]) -> Void = { _ in }, onFinal: @escaping @Sendable ([Float]?) -> Void = { _ in }) {
+    public init(
+        onChunk: @escaping @Sendable ([Float]) -> Void = { _ in },
+        onFinal: @escaping @Sendable ([Float]?) -> Void = { _ in },
+        onCaptureInterrupted: @escaping @Sendable (AudioCaptureInterruption) -> Void = { _ in }
+    ) {
         self.onChunk = onChunk
         self.onFinal = onFinal
+        self.onCaptureInterrupted = onCaptureInterrupted
     }
 }
 

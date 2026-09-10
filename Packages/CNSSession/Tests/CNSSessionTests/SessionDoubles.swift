@@ -191,6 +191,11 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
         lock.lock(); let cb = callbacks; lock.unlock()
         cb?.onChunk(samples)
     }
+
+    func emitConfigurationChange() {
+        lock.lock(); let cb = callbacks; lock.unlock()
+        cb?.onCaptureInterrupted(.configurationChanged)
+    }
 }
 
 /// Returns scripted texts, one per chunk, and can be made slow on demand.

@@ -129,6 +129,24 @@ struct SessionControllerTests {
         #expect(rig.panel.interactiveTexts == ["первая часть вторая часть"])
     }
 
+    @Test("Audio configuration change preserves partial text with an incomplete warning")
+    func audioConfigurationChangePreservesPartialDraft() async {
+        let rig = makeRig(texts: ["partial capture"])
+        rig.controller.toggle(now: Date())
+        await settle()
+        rig.recorder.emitChunk(audio)
+        await rig.transcriber.waitUntilRequestCount(1)
+
+        rig.recorder.emitConfigurationChange()
+        rig.controller.toggle(now: Date().addingTimeInterval(1))
+        await settle(80)
+
+        #expect(rig.controller.isRecording == false)
+        #expect(rig.controller.isProcessing == false)
+        #expect(rig.panel.interactiveTexts == ["partial capture"])
+        #expect(rig.panel.incompleteWarnings.count == 1)
+    }
+
     @Test("Confirming injects into the app that was frontmost at start")
     func confirmInjects() async {
         let rig = makeRig()
