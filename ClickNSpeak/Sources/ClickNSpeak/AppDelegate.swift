@@ -240,11 +240,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         dictionaryCoordinator.startPromptWatching()
 
-        menuCtrl.onCredentialsChanged = { [weak runtimeCoordinator] in
-            runtimeCoordinator?.revalidateDesiredConfiguration()
+        menuCtrl.onCredentialsChanged = { [weak runtimeCoordinator] provider in
+            runtimeCoordinator?.revalidateDesiredConfiguration(
+                reason: .credentials(provider: provider)
+            )
         }
-        menuCtrl.onModelDownloadCompleted = { [weak runtimeCoordinator] in
-            runtimeCoordinator?.revalidateDesiredConfiguration()
+        menuCtrl.onModelDownloadCompleted = { [weak runtimeCoordinator] modelID in
+            runtimeCoordinator?.revalidateDesiredConfiguration(reason: .model(id: modelID))
         }
         menuCtrl.onPermissionRefreshRequested = { [weak self] in
             self?.refreshMenuPermissions()
@@ -260,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuCtrl.onRuntimeRecoveryRequested = { [weak runtimeCoordinator] action in
             switch action {
             case .retry:
-                runtimeCoordinator?.revalidateDesiredConfiguration()
+                runtimeCoordinator?.revalidateDesiredConfiguration(reason: .retry)
             case .keepPreviousRuntime:
                 runtimeCoordinator?.keepPreviousRuntime()
             default:

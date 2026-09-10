@@ -33,6 +33,20 @@ enum RuntimeRecoveryAction: String, Sendable, Equatable {
     case redownloadModel
 }
 
+enum RuntimeRevalidationReason: Sendable, Equatable {
+    case credentials(provider: String)
+    case model(id: String)
+    case retry
+}
+
+private struct RuntimeForceTargets: OptionSet, Sendable {
+    let rawValue: UInt8
+
+    static let transcriber = RuntimeForceTargets(rawValue: 1 << 0)
+    static let editor = RuntimeForceTargets(rawValue: 1 << 1)
+    static let all: RuntimeForceTargets = [.transcriber, .editor]
+}
+
 enum RuntimeCoordinatorState: Sendable, Equatable {
     case uninitialized
     case preparing(desired: RuntimeSelection)
@@ -98,6 +112,9 @@ final class AppRuntimeCoordinator {
     private var dictionaryUpdateDuringCommit = false
     private var shutdownRequested = false
     private var commitCompletionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var desiredForceTargets: RuntimeForceTargets = []
+    private var credentialRevalidationProviders = Set<String>()
+    private var invalidatedCredentialProviders = Set<String>()
 
     private(set) var state: RuntimeCoordinatorState = .uninitialized {
         didSet { onStateChanged?(state) }
@@ -123,7 +140,9 @@ final class AppRuntimeCoordinator {
         if let activeConfig {
             let updated = mergingDictionaryFields(into: activeConfig)
             self.activeConfig = updated
-            session?.updateConfig(updated)
+            if let activeRuntime {
+                publishActiveRuntimeToSession(config: updated, runtime: activeRuntime)
+            }
         }
     }
 
@@ -173,9 +192,17 @@ final class AppRuntimeCoordinator {
     func activateInitial(_ config: Config) async {
         guard !shutdownRequested else { return }
         pendingTask?.cancel()
+        desiredForceTargets = []
+        credentialRevalidationProviders.removeAll()
+        invalidatedCredentialProviders.removeAll()
         desiredGeneration += 1
         desiredConfig = mergingDictionaryFields(into: config)
-        await apply(config: desiredConfig, generation: desiredGeneration)
+        await apply(
+            config: desiredConfig,
+            generation: desiredGeneration,
+            forceTargets: [],
+            credentialProviders: []
+        )
     }
 
     func requestConfiguration(_ config: Config) {
@@ -194,7 +221,8 @@ final class AppRuntimeCoordinator {
         }
         pendingTask?.cancel()
 
-        if let activeConfig, RuntimeSelection(config: activeConfig) == RuntimeSelection(config: config),
+        if desiredForceTargets.isEmpty,
+           let activeConfig, RuntimeSelection(config: activeConfig) == RuntimeSelection(config: config),
            let activeRuntime {
             activateDataOnlyConfig(config, runtime: activeRuntime)
             return
@@ -203,18 +231,39 @@ final class AppRuntimeCoordinator {
         state = activeRuntime.map {
             .reconfiguring(active: $0, desired: RuntimeSelection(config: config))
         } ?? .preparing(desired: RuntimeSelection(config: config))
+        let forceTargets = desiredForceTargets
+        let credentialProviders = credentialRevalidationProviders
         pendingTask = Task { [weak self] in
-            await self?.apply(config: config, generation: generation)
+            await self?.apply(
+                config: config,
+                generation: generation,
+                forceTargets: forceTargets,
+                credentialProviders: credentialProviders
+            )
         }
     }
 
-    func revalidateDesiredConfiguration() {
+    func revalidateDesiredConfiguration(reason: RuntimeRevalidationReason) {
+        guard !shutdownRequested else { return }
+        let targets = forceTargets(for: reason, config: desiredConfig)
+        guard !targets.isEmpty else { return }
+        desiredForceTargets.formUnion(targets)
+        if case let .credentials(provider) = reason {
+            let provider = provider.lowercased()
+            credentialRevalidationProviders.insert(provider)
+            quarantineActiveCredentialRuntime()
+        }
         requestConfiguration(desiredConfig)
     }
 
     func keepPreviousRuntime() {
         guard !shutdownRequested else { return }
         guard let activeConfig, let activeRuntime else { return }
+        guard activeRuntime.transcriber.readiness == .ready else { return }
+        guard !runtimeUsesPendingCredential(activeRuntime) else { return }
+        desiredForceTargets = []
+        credentialRevalidationProviders.removeAll()
+        invalidatedCredentialProviders.removeAll()
         if committingGeneration != nil {
             let previous = mergingDictionaryFields(into: activeConfig)
             desiredConfig = previous
@@ -233,7 +282,7 @@ final class AppRuntimeCoordinator {
             try activeConfig.saveAtomically(to: configURL)
             desiredConfig = activeConfig
             session?.updateConfig(activeConfig)
-            session?.setRuntimeAvailable(true)
+            session?.setRuntimeAvailable(activeRuntime.transcriber.readiness == .ready)
             state = .ready(active: activeRuntime)
             onConfigActivated?(activeConfig)
         } catch {
@@ -251,6 +300,9 @@ final class AppRuntimeCoordinator {
     /// ownership and intentionally supersede a pending runtime selection.
     func adoptPersistedConfiguration(_ config: Config) {
         guard !shutdownRequested else { return }
+        desiredForceTargets = []
+        credentialRevalidationProviders.removeAll()
+        invalidatedCredentialProviders.removeAll()
         dictionarySnapshot = config
         onConfigActivated?(config)
         if committingGeneration != nil {
@@ -306,7 +358,12 @@ final class AppRuntimeCoordinator {
         state = .stopping
     }
 
-    private func apply(config: Config, generation: Int) async {
+    private func apply(
+        config: Config,
+        generation: Int,
+        forceTargets: RuntimeForceTargets,
+        credentialProviders: Set<String>
+    ) async {
         let desired = RuntimeSelection(config: config)
         if state == .uninitialized {
             state = .preparing(desired: desired)
@@ -317,10 +374,12 @@ final class AppRuntimeCoordinator {
             try ensureCurrent(generation)
 
             let previousSelection = activeConfig.map(RuntimeSelection.init(config:))
-            let needsTranscriber = previousSelection == nil
+            let needsTranscriber = forceTargets.contains(.transcriber)
+                || previousSelection == nil
                 || previousSelection?.sttBackend != desired.sttBackend
                 || previousSelection?.sttModelID != desired.sttModelID
-            let needsEditor = previousSelection == nil
+            let needsEditor = forceTargets.contains(.editor)
+                || previousSelection == nil
                 || previousSelection?.editorEnabled != desired.editorEnabled
                 || previousSelection?.editorBackend != desired.editorBackend
                 || previousSelection?.editorModelID != desired.editorModelID
@@ -379,8 +438,12 @@ final class AppRuntimeCoordinator {
             let activatedConfig = mergingDictionaryFields(into: config)
             activeConfig = activatedConfig
             activeRuntime = runtime
-            session?.updateConfig(activatedConfig)
-            session?.setRuntimeAvailable(!shutdownRequested)
+            consumeRevalidationIfCurrent(
+                generation: generation,
+                targets: forceTargets,
+                credentialProviders: credentialProviders
+            )
+            publishActiveRuntimeToSession(config: activatedConfig, runtime: runtime)
             if shutdownRequested {
                 state = .stopping
             } else if desiredGeneration == generation, !postCommitApplyPending {
@@ -402,13 +465,28 @@ final class AppRuntimeCoordinator {
             log("Runtime preparation generation \(generation) was superseded.")
         } catch {
             guard generation == desiredGeneration else { return }
+            let deactivatedCredential = await deactivateUnavailableCredentialIfNeeded(
+                error: error,
+                config: config,
+                generation: generation,
+                forceTargets: forceTargets,
+                credentialProviders: credentialProviders
+            )
+            guard generation == desiredGeneration else { return }
             let message = error.localizedDescription
-            session?.setRuntimeAvailable(activeRuntime != nil)
+            if let activeConfig, let activeRuntime {
+                publishActiveRuntimeToSession(config: activeConfig, runtime: activeRuntime)
+            } else {
+                session?.setRuntimeAvailable(false)
+            }
             state = .degraded(
                 active: activeRuntime,
                 desired: desired,
                 message: message,
-                recovery: recoveryActions(for: error)
+                recovery: recoveryActions(
+                    for: error,
+                    deactivatedCredential: deactivatedCredential
+                )
             )
             log("Runtime activation failed: \(message)")
             RuntimeTelemetry.emitRuntimeEvent("runtime_activation_failed", fields: [
@@ -539,8 +617,7 @@ final class AppRuntimeCoordinator {
         activeRuntime = runtime
         // Recording remains available with the successfully prepared STT, but
         // the session must not attempt to invoke the unavailable editor.
-        session?.updateConfig(effectiveConfig)
-        session?.setRuntimeAvailable(!shutdownRequested)
+        publishActiveRuntimeToSession(config: effectiveConfig, runtime: runtime)
         state = shutdownRequested
             ? .stopping
             : .degraded(
@@ -591,7 +668,9 @@ final class AppRuntimeCoordinator {
         if dictionaryUpdateDuringCommit, let activeConfig {
             let updated = mergingDictionaryFields(into: activeConfig)
             self.activeConfig = updated
-            session?.updateConfig(updated)
+            if let activeRuntime {
+                publishActiveRuntimeToSession(config: updated, runtime: activeRuntime)
+            }
         }
         dictionaryUpdateDuringCommit = false
         let waiters = commitCompletionWaiters
@@ -604,6 +683,210 @@ final class AppRuntimeCoordinator {
         postCommitApplyPending = false
         guard shouldApplyPending else { return }
         requestConfiguration(desiredConfig)
+    }
+
+    private func consumeRevalidationIfCurrent(
+        generation: Int,
+        targets: RuntimeForceTargets,
+        credentialProviders: Set<String>
+    ) {
+        guard generation == desiredGeneration else { return }
+        desiredForceTargets.subtract(targets)
+        invalidatedCredentialProviders.subtract(credentialProviders)
+        if desiredForceTargets.isEmpty {
+            credentialRevalidationProviders.removeAll()
+        }
+    }
+
+    private func forceTargets(
+        for reason: RuntimeRevalidationReason,
+        config: Config
+    ) -> RuntimeForceTargets {
+        switch reason {
+        case let .credentials(provider):
+            let provider = provider.lowercased()
+            var targets: RuntimeForceTargets = []
+            if config.sttBackend.lowercased() == provider {
+                targets.insert(.transcriber)
+            }
+            if config.aiEditorEnabled, config.aiEditorBackend.lowercased() == provider {
+                targets.insert(.editor)
+            }
+            return targets
+        case let .model(id):
+            var targets: RuntimeForceTargets = []
+            if config.sttBackend == "local", localSTTModel(config: config, matches: id) {
+                targets.insert(.transcriber)
+            }
+            if config.aiEditorEnabled,
+               config.aiEditorBackend == "local",
+               localEditorModel(config: config, matches: id) {
+                targets.insert(.editor)
+            }
+            return targets
+        case .retry:
+            return .all
+        }
+    }
+
+    private func localSTTModel(config: Config, matches id: String) -> Bool {
+        if config.sttModelName == id { return true }
+        return ModelRegistry.whisperModelByLegacyID(config.sttModelName)?.id == id
+    }
+
+    private func localEditorModel(config: Config, matches id: String) -> Bool {
+        if config.aiEditorModel == id { return true }
+        if ModelRegistry.aiEditorModel(id: config.aiEditorModel)?.id == id { return true }
+        if config.aiEditorModel == "mlx-community/Qwen2.5-1.5B-Instruct-4bit" {
+            return ModelRegistry.defaultAiEditorModelID == id
+        }
+        return false
+    }
+
+    /// Existing activities retain their captured runtime snapshot, while new
+    /// activities cannot start with a client whose credential just changed.
+    private func quarantineActiveCredentialRuntime() {
+        guard let activeConfig, let activeRuntime else { return }
+        publishActiveRuntimeToSession(config: activeConfig, runtime: activeRuntime)
+    }
+
+    private func publishActiveRuntimeToSession(
+        config: Config,
+        runtime: RuntimeDescriptor
+    ) {
+        var effectiveConfig = config
+        var runtimeAvailable = !shutdownRequested
+            && runtime.transcriber.readiness == .ready
+        for provider in credentialRevalidationProviders {
+            if desiredForceTargets.contains(.transcriber),
+               runtime.transcriber.backend.lowercased() == provider {
+                runtimeAvailable = false
+            }
+            if desiredForceTargets.contains(.editor),
+               runtime.aiEditor.backend.lowercased() == provider {
+                effectiveConfig.raw["ai_editor_enabled"] = .bool(false)
+            }
+        }
+        session?.updateConfig(effectiveConfig)
+        session?.setRuntimeAvailable(runtimeAvailable)
+    }
+
+    private func runtimeUsesPendingCredential(_ runtime: RuntimeDescriptor) -> Bool {
+        credentialRevalidationProviders.contains { provider in
+            (desiredForceTargets.contains(.transcriber)
+                && runtime.transcriber.backend.lowercased() == provider)
+                || (desiredForceTargets.contains(.editor)
+                    && runtime.aiEditor.backend.lowercased() == provider)
+        }
+    }
+
+    /// Credential deletion invalidates the already constructed client. Once
+    /// the session becomes idle, remove only the affected cloud components so
+    /// no later request can silently keep using the previous secret.
+    private func deactivateUnavailableCredentialIfNeeded(
+        error: Error,
+        config: Config,
+        generation: Int,
+        forceTargets: RuntimeForceTargets,
+        credentialProviders: Set<String>
+    ) async -> Bool {
+        guard case let RuntimePreparationError.credentialMissing(backend) = error else {
+            return false
+        }
+        let provider = backend.lowercased()
+        guard credentialProviders.contains(provider), let activeRuntime else { return false }
+        let disableTranscriber = forceTargets.contains(.transcriber)
+            && activeRuntime.transcriber.backend.lowercased() == provider
+        let disableEditor = forceTargets.contains(.editor)
+            && activeRuntime.aiEditor.backend.lowercased() == provider
+        guard disableTranscriber || disableEditor else { return false }
+
+        do {
+            try await beginRuntimeCommit(generation: generation)
+        } catch {
+            return false
+        }
+        defer { finishRuntimeCommit(generation: generation) }
+
+        var transcriberInstallation: TranscriberRouterInstallation?
+        var editorInstallation: AiEditorRouterInstallation?
+        do {
+            if disableTranscriber {
+                await commitBarrier(.beforeTranscriberInstall)
+                transcriberInstallation = await transcriberRouter.stageDisable(
+                    activationGeneration: generation
+                )
+                guard transcriberInstallation != nil else {
+                    throw RuntimeCommitError.installationRejected(component: "transcription")
+                }
+            }
+            if disableEditor {
+                if transcriberInstallation != nil {
+                    await commitBarrier(.betweenRouterInstalls)
+                }
+                editorInstallation = await editorRouter.stageInstall(
+                    nil,
+                    descriptor: .disabled,
+                    activationGeneration: generation
+                )
+                guard editorInstallation != nil else {
+                    throw RuntimeCommitError.installationRejected(component: "editor")
+                }
+            }
+            if let transcriberInstallation {
+                await transcriberRouter.commit(transcriberInstallation)
+            }
+            if let editorInstallation {
+                await editorRouter.commit(editorInstallation)
+            }
+        } catch {
+            if let editorInstallation {
+                await editorRouter.rollback(editorInstallation)
+            }
+            if let transcriberInstallation {
+                await transcriberRouter.rollback(transcriberInstallation)
+            }
+            return false
+        }
+
+        let runtime = RuntimeDescriptor(
+            transcriber: transcriberRouter.currentDescriptorSnapshot,
+            aiEditor: editorRouter.currentDescriptorSnapshot
+        )
+        var effectiveConfig = mergingDictionaryFields(into: self.activeConfig ?? config)
+        if disableEditor {
+            effectiveConfig.raw["ai_editor_enabled"] = .bool(false)
+        }
+        self.activeConfig = effectiveConfig
+        self.activeRuntime = runtime
+        invalidatedCredentialProviders.insert(provider)
+        session?.updateConfig(effectiveConfig)
+        session?.setRuntimeAvailable(runtime.transcriber.readiness == .ready)
+        RuntimeTelemetry.emitRuntimeEvent("runtime_credential_invalidated", fields: [
+            "generation": generation,
+            "provider": provider,
+            "stt_disabled": disableTranscriber,
+            "editor_disabled": disableEditor
+        ])
+        return true
+    }
+
+    private func recoveryActions(
+        for error: Error,
+        deactivatedCredential: Bool
+    ) -> [RuntimeRecoveryAction] {
+        if deactivatedCredential { return [.openAPIKeys] }
+        if case let RuntimePreparationError.credentialMissing(backend) = error,
+           invalidatedCredentialProviders.contains(backend.lowercased()) {
+            return [.openAPIKeys]
+        }
+        if let activeRuntime, runtimeUsesPendingCredential(activeRuntime) {
+            if error is RuntimePreparationError {
+                return [.retry, .openAPIKeys]
+            }
+            return [.retry]
+        }
+        return recoveryActions(for: error)
     }
 
     private func ensureCurrent(_ generation: Int) throws {

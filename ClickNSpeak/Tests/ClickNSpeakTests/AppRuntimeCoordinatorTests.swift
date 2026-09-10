@@ -30,10 +30,14 @@ final class RuntimeSessionDouble: RuntimeSessionCoordinating {
 
 actor RuntimeTranscriberDouble: Transcribing {
     let name: String
+    let credentialGeneration: Int
     private(set) var stopCount = 0
     private var fileGate: RuntimePreparationGate?
 
-    init(name: String) { self.name = name }
+    init(name: String, credentialGeneration: Int = 0) {
+        self.name = name
+        self.credentialGeneration = credentialGeneration
+    }
 
     func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
         TranscriptionResult(text: name)
@@ -57,9 +61,11 @@ actor RuntimeTranscriberDouble: Transcribing {
 actor RuntimeEditorDouble: AiEditing {
     nonisolated let isReady = true
     nonisolated let descriptor: AiEditorDescriptor
+    let credentialGeneration: Int
     private(set) var stopCount = 0
 
-    init(backend: String, modelID: String) {
+    init(backend: String, modelID: String, credentialGeneration: Int = 0) {
+        self.credentialGeneration = credentialGeneration
         descriptor = AiEditorDescriptor(
             backend: backend,
             modelID: modelID,
@@ -93,6 +99,7 @@ final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
     var beforePreparation: (@Sendable (String) async -> Void)?
     var failEditor = false
     var failingBackends = Set<String>()
+    var credentialGenerations: [String: Int] = [:]
     var delays: [String: Duration] = [:]
     private(set) var preparedBackends: [String] = []
     private(set) var services: [String: RuntimeTranscriberDouble] = [:]
@@ -100,12 +107,16 @@ final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
 
     func prepareTranscriber(config: Config) async throws -> PreparedTranscriber {
         let backend = config.sttBackend
+        let credentialGeneration = lock.withLock { credentialGenerations[backend, default: 0] }
         if let before = lock.withLock({ beforePreparation }) { await before(backend) }
         if let delay = lock.withLock({ delays[backend] }) { try await Task.sleep(for: delay) }
         if lock.withLock({ failingBackends.contains(backend) }) {
             throw RuntimePreparationError.credentialMissing(backend: backend)
         }
-        let service = RuntimeTranscriberDouble(name: backend)
+        let service = RuntimeTranscriberDouble(
+            name: backend,
+            credentialGeneration: credentialGeneration
+        )
         lock.withLock {
             preparedBackends.append(backend)
             services[backend] = service
@@ -130,7 +141,12 @@ final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
         }
         let backend = config.aiEditorBackend
         let modelID = backend == "gemini" ? config.geminiModel : config.aiEditorModel
-        let service = RuntimeEditorDouble(backend: backend, modelID: modelID)
+        let credentialGeneration = lock.withLock { credentialGenerations[backend, default: 0] }
+        let service = RuntimeEditorDouble(
+            backend: backend,
+            modelID: modelID,
+            credentialGeneration: credentialGeneration
+        )
         lock.withLock { editorServices[backend] = service }
         return PreparedEditor(service: service, descriptor: service.descriptor)
     }
@@ -549,6 +565,44 @@ struct AppRuntimeCoordinatorTests {
         await runtime.shutdown()
     }
 
+    @Test("Credential change quarantines a stale partial initial activation")
+    func credentialChangeQuarantinesPartialInitialRuntime() async throws {
+        let gate = RuntimeCommitGate()
+        let initial = config(backend: "gemini", editorBackend: "gemini")
+        let (coordinator, transcriber, editor, session, factory, directory) = makeCommitRig(
+            initial: initial,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        factory.credentialGenerations["gemini"] = 1
+        factory.failEditor = true
+        await gate.arm(.betweenRouterInstalls)
+        let initialActivation = Task { await coordinator.activateInitial(initial) }
+        await gate.waitForEntry()
+
+        let nextPreparation = RuntimePreparationGate()
+        factory.failEditor = false
+        factory.beforePreparation = { backend in
+            if backend == "gemini" { await nextPreparation.pause() }
+        }
+        factory.credentialGenerations["gemini"] = 2
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        await gate.release()
+        await nextPreparation.waitForEntry()
+
+        #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
+        #expect(editor.currentDescriptorSnapshot == .disabled)
+        #expect(!session.runtimeAvailable)
+
+        await nextPreparation.release()
+        await initialActivation.value
+        await settle(150)
+        #expect(session.runtimeAvailable)
+        #expect(editor.currentDescriptorSnapshot.backend == "gemini")
+        #expect(factory.services["gemini"]?.credentialGeneration == 2)
+        await coordinator.shutdown()
+    }
+
     @Test("Failed dirty flush retains ownership and retry writes the latest confirmation")
     func failedDictionaryFlushRetriesLatestSnapshot() async throws {
         let initial = usageConfig()
@@ -830,6 +884,45 @@ struct AppRuntimeCoordinatorTests {
         await coordinator.shutdown()
     }
 
+    @Test("A credential event during commit quarantines the stale published candidate")
+    func credentialChangeDuringCommitQuarantinesPublishedRuntime() async throws {
+        let gate = RuntimeCommitGate()
+        let initial = config(backend: "local", editorBackend: "local")
+        let desired = config(backend: "gemini", editorBackend: "gemini")
+        let (coordinator, transcriber, editor, session, factory, directory) = makeCommitRig(
+            initial: initial,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(initial)
+        factory.credentialGenerations["gemini"] = 1
+        await gate.arm(.betweenRouterInstalls)
+        coordinator.requestConfiguration(desired)
+        await gate.waitForEntry()
+
+        let nextPreparation = RuntimePreparationGate()
+        factory.beforePreparation = { backend in
+            if backend == "gemini" { await nextPreparation.pause() }
+        }
+        factory.credentialGenerations["gemini"] = 2
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        await gate.release()
+        await nextPreparation.waitForEntry()
+
+        #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
+        #expect(editor.currentDescriptorSnapshot.backend == "gemini")
+        #expect(!session.runtimeAvailable)
+        #expect(session.configs.last?.aiEditorEnabled == false)
+
+        await nextPreparation.release()
+        await settle(150)
+        #expect(session.runtimeAvailable)
+        #expect(session.configs.last?.aiEditorEnabled == true)
+        #expect(factory.services["gemini"]?.credentialGeneration == 2)
+        #expect(factory.editorServices["gemini"]?.credentialGeneration == 2)
+        await coordinator.shutdown()
+    }
+
     @Test("A dictionary update during commit is persisted after the coherent runtime")
     func dictionaryUpdateDuringCommitIsAppliedNext() async throws {
         let gate = RuntimeCommitGate()
@@ -950,11 +1043,240 @@ struct AppRuntimeCoordinatorTests {
         #expect(router.currentDescriptorSnapshot.backend == "local")
 
         factory.failingBackends.remove("gemini")
-        coordinator.revalidateDesiredConfiguration()
+        coordinator.revalidateDesiredConfiguration(reason: .retry)
         await settle()
 
         #expect(router.currentDescriptorSnapshot.backend == "gemini")
         #expect(factory.preparedBackends.filter { $0 == "gemini" }.count == 1)
+    }
+
+    @Test("Credential revalidation rebuilds an already active cloud client")
+    func revalidationRebuildsActiveClient() async throws {
+        let active = config(backend: "gemini")
+        let (coordinator, _, _, factory, directory) = makeRig(initial: active)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        factory.credentialGenerations["gemini"] = 1
+        await coordinator.activateInitial(active)
+        let previous = try #require(factory.services["gemini"])
+
+        factory.credentialGenerations["gemini"] = 2
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        await settle()
+
+        let replacement = try #require(factory.services["gemini"])
+        #expect(previous !== replacement)
+        #expect(replacement.credentialGeneration == 2)
+        #expect(factory.preparedBackends.filter { $0 == "gemini" }.count == 2)
+        await coordinator.shutdown()
+    }
+
+    @Test("Gemini credentials rebuild every selected Gemini component only")
+    func geminiCredentialRevalidationTargetsSelectedComponents() async throws {
+        let gate = RuntimeCommitGate()
+        let localWithGeminiEditor = config(backend: "local", editorBackend: "gemini")
+        let (coordinator, _, _, session, factory, directory) = makeCommitRig(
+            initial: localWithGeminiEditor,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        factory.credentialGenerations["gemini"] = 1
+        await coordinator.activateInitial(localWithGeminiEditor)
+        let localSTT = try #require(factory.services["local"])
+        let previousEditor = try #require(factory.editorServices["gemini"])
+
+        factory.credentialGenerations["gemini"] = 2
+        session.isRuntimeIdle = false
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        #expect(session.runtimeAvailable)
+        #expect(session.configs.last?.aiEditorEnabled == false)
+        session.isRuntimeIdle = true
+        await settle()
+
+        #expect(factory.services["local"] === localSTT)
+        let replacementEditor = try #require(factory.editorServices["gemini"])
+        #expect(previousEditor !== replacementEditor)
+        #expect(replacementEditor.credentialGeneration == 2)
+        await coordinator.shutdown()
+    }
+
+    @Test("A shared Gemini credential rebuilds both STT and editor")
+    func sharedGeminiCredentialRebuildsBothComponents() async throws {
+        let gate = RuntimeCommitGate()
+        let active = config(backend: "gemini", editorBackend: "gemini")
+        let (coordinator, _, _, _, factory, directory) = makeCommitRig(initial: active, gate: gate)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        factory.credentialGenerations["gemini"] = 1
+        await coordinator.activateInitial(active)
+        let previousSTT = try #require(factory.services["gemini"])
+        let previousEditor = try #require(factory.editorServices["gemini"])
+
+        factory.credentialGenerations["gemini"] = 2
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        await settle()
+
+        #expect(factory.services["gemini"] !== previousSTT)
+        #expect(factory.editorServices["gemini"] !== previousEditor)
+        await coordinator.shutdown()
+    }
+
+    @Test("An unrelated OpenAI credential does not rebuild local inference")
+    func openAICredentialLeavesLocalInferenceInstalled() async throws {
+        let gate = RuntimeCommitGate()
+        let active = config(backend: "local", editorBackend: "local")
+        let (coordinator, _, _, _, factory, directory) = makeCommitRig(initial: active, gate: gate)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(active)
+        let previousSTT = try #require(factory.services["local"])
+        let previousEditor = try #require(factory.editorServices["local"])
+
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "openai"))
+        await settle()
+
+        #expect(factory.services["local"] === previousSTT)
+        #expect(factory.editorServices["local"] === previousEditor)
+        await coordinator.shutdown()
+    }
+
+    @Test("Removing an editor credential disables it without replacing local STT")
+    func removedEditorCredentialDisablesOnlyEditor() async throws {
+        let gate = RuntimeCommitGate()
+        let active = config(backend: "local", editorBackend: "gemini")
+        let (coordinator, transcriber, editor, session, factory, directory) = makeCommitRig(
+            initial: active,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(active)
+        let localSTT = try #require(factory.services["local"])
+        let previousEditor = try #require(factory.editorServices["gemini"])
+        factory.failEditor = true
+
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        await settle()
+
+        #expect(transcriber.currentDescriptorSnapshot.backend == "local")
+        #expect(factory.services["local"] === localSTT)
+        #expect(editor.currentDescriptorSnapshot == .disabled)
+        #expect(await previousEditor.stopCount == 1)
+        #expect(session.runtimeAvailable)
+        if case let .degraded(runtime, _, _, recovery) = coordinator.state {
+            #expect(runtime?.transcriber.backend == "local")
+            #expect(runtime?.aiEditor == .disabled)
+            #expect(recovery.contains(.openAPIKeys))
+        } else {
+            Issue.record("Expected credential recovery state")
+        }
+        await coordinator.shutdown()
+    }
+
+    @Test("Removing a shared cloud credential disables both Gemini components")
+    func removedSharedCredentialDisablesCloudRuntime() async throws {
+        let gate = RuntimeCommitGate()
+        let active = config(backend: "gemini", editorBackend: "gemini")
+        let (coordinator, transcriber, editor, session, factory, directory) = makeCommitRig(
+            initial: active,
+            gate: gate
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(active)
+        let previousSTT = try #require(factory.services["gemini"])
+        let previousEditor = try #require(factory.editorServices["gemini"])
+        factory.failingBackends.insert("gemini")
+        factory.failEditor = true
+
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        await settle()
+
+        #expect(transcriber.currentDescriptorSnapshot == .unavailable)
+        #expect(editor.currentDescriptorSnapshot == .disabled)
+        #expect(await previousSTT.stopCount == 1)
+        #expect(await previousEditor.stopCount == 1)
+        #expect(!session.runtimeAvailable)
+        if case let .degraded(runtime, _, _, recovery) = coordinator.state {
+            #expect(runtime?.transcriber == .unavailable)
+            #expect(runtime?.aiEditor == .disabled)
+            #expect(recovery == [.openAPIKeys])
+        } else {
+            Issue.record("Expected credential recovery state")
+        }
+
+        coordinator.revalidateDesiredConfiguration(reason: .retry)
+        await settle()
+        if case let .degraded(_, _, _, recovery) = coordinator.state {
+            #expect(recovery == [.openAPIKeys])
+        } else {
+            Issue.record("Expected credential recovery state after retry")
+        }
+        coordinator.keepPreviousRuntime()
+        #expect(!session.runtimeAvailable)
+        if case .degraded = coordinator.state {
+            // The stopped credential client cannot be restored as a previous runtime.
+        } else {
+            Issue.record("Expected unavailable runtime to remain degraded")
+        }
+
+        factory.failingBackends.remove("gemini")
+        factory.failEditor = false
+        factory.credentialGenerations["gemini"] = 2
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        await settle()
+        #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
+        #expect(editor.currentDescriptorSnapshot.backend == "gemini")
+        #expect(session.runtimeAvailable)
+        await coordinator.shutdown()
+    }
+
+    @Test("Credential revalidation waits for recording and newest generation wins")
+    func credentialRevalidationWaitsForIdleAndSupersedesOlderGeneration() async throws {
+        let active = config(backend: "gemini")
+        let (coordinator, _, session, factory, directory) = makeRig(initial: active)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        factory.credentialGenerations["gemini"] = 1
+        await coordinator.activateInitial(active)
+        let original = try #require(factory.services["gemini"])
+        session.isRuntimeIdle = false
+        factory.credentialGenerations["gemini"] = 2
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        #expect(!session.runtimeAvailable)
+        await settle()
+        #expect(factory.services["gemini"] === original)
+
+        session.isRuntimeIdle = true
+        factory.delays["gemini"] = .milliseconds(200)
+        await settle(60)
+        factory.credentialGenerations["gemini"] = 3
+        coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
+        await settle(350)
+
+        let replacement = try #require(factory.services["gemini"])
+        #expect(replacement !== original)
+        #expect(replacement.credentialGeneration == 3)
+        #expect(factory.preparedBackends.filter { $0 == "gemini" }.count == 2)
+        #expect(session.runtimeAvailable)
+        await coordinator.shutdown()
+    }
+
+    @Test("Model revalidation rebuilds only the selected local model")
+    func modelRevalidationTargetsSelectedLocalComponent() async throws {
+        let gate = RuntimeCommitGate()
+        let active = config(backend: "local", model: "stt-model", editorBackend: "local")
+        let (coordinator, _, _, _, factory, directory) = makeCommitRig(initial: active, gate: gate)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await coordinator.activateInitial(active)
+        let previousSTT = try #require(factory.services["local"])
+        let previousEditor = try #require(factory.editorServices["local"])
+
+        coordinator.revalidateDesiredConfiguration(reason: .model(id: "editor-local"))
+        await settle()
+        let replacementEditor = try #require(factory.editorServices["local"])
+        #expect(factory.services["local"] === previousSTT)
+        #expect(replacementEditor !== previousEditor)
+
+        coordinator.revalidateDesiredConfiguration(reason: .model(id: "stt-model"))
+        await settle()
+        #expect(factory.services["local"] !== previousSTT)
+        #expect(factory.editorServices["local"] === replacementEditor)
+        await coordinator.shutdown()
     }
 
     @Test("Keep previous runtime restores its persisted configuration")

@@ -34,8 +34,8 @@ public final class MenuBarController: NSObject {
     ) async -> FileTranscriptionResult)?
     public var onCancelFileTranscription: (() -> Void)?
     public var onSetupRequested: (() -> Void)?
-    public var onCredentialsChanged: (() -> Void)?
-    public var onModelDownloadCompleted: (() -> Void)?
+    public var onCredentialsChanged: ((String) -> Void)?
+    public var onModelDownloadCompleted: ((String) -> Void)?
     public var onPermissionRefreshRequested: (() -> Void)?
     public var onRevertTermsRequested: (() -> Void)?
     public var onDownloadStateChanged: ((MenuDownloadSnapshot) -> Void)?
@@ -872,7 +872,7 @@ public final class MenuBarController: NSObject {
                         password: key
                     )
                     log("Gemini API Key saved to Keychain.")
-                    onCredentialsChanged?()
+                    onCredentialsChanged?("gemini")
                 } catch {
                     log("Failed to save Gemini API Key: \(error)")
                     presentCredentialPersistenceError()
@@ -885,7 +885,7 @@ public final class MenuBarController: NSObject {
                     account: KeychainHelper.geminiAccount
                 )
                 log("Gemini API Key cleared.")
-                onCredentialsChanged?()
+                onCredentialsChanged?("gemini")
             } catch {
                 log("Failed to clear Gemini API Key: \(error)")
                 presentCredentialPersistenceError()
@@ -927,7 +927,7 @@ public final class MenuBarController: NSObject {
                         password: key
                     )
                     log("OpenAI API Key saved to Keychain.")
-                    onCredentialsChanged?()
+                    onCredentialsChanged?("openai")
                 } catch {
                     log("Failed to save OpenAI API Key: \(error)")
                     presentCredentialPersistenceError()
@@ -940,7 +940,7 @@ public final class MenuBarController: NSObject {
                     account: KeychainHelper.openAIAccount
                 )
                 log("OpenAI API Key cleared.")
-                onCredentialsChanged?()
+                onCredentialsChanged?("openai")
             } catch {
                 log("Failed to clear OpenAI API Key: \(error)")
                 presentCredentialPersistenceError()
@@ -1516,7 +1516,7 @@ public final class MenuBarController: NSObject {
                 MenuDownloadSnapshot(phase: .completed, modelID: model.id, fractionCompleted: 1)
             )
             self?.onLocalModelsChanged?()
-            self?.onModelDownloadCompleted?()
+            self?.onModelDownloadCompleted?(model.id)
         }
         downloader.onError = { [weak self] msg in
             self?.log("Download failed: \(msg)")

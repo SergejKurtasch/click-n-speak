@@ -181,6 +181,39 @@ struct RuntimeRouterTests {
         await router.stop()
     }
 
+    @Test("A staged transcriber disable supports rollback and commit")
+    func stagedDisableIsTransactional() async throws {
+        let router = TranscriberRouter()
+        let service = RouterTranscriberDouble(output: "active")
+        let descriptor = TranscriberDescriptor(
+            backend: "gemini", modelID: "cloud", kind: .cloud
+        )
+        await router.install(service, descriptor: descriptor, activationGeneration: 1)
+
+        let rollbackToken = try #require(
+            await router.stageDisable(activationGeneration: 2)
+        )
+        #expect(router.currentDescriptorSnapshot == .unavailable)
+        #expect(await service.stopCount == 0)
+        await router.rollback(rollbackToken)
+        #expect(router.currentDescriptorSnapshot == descriptor)
+        #expect(await router.transcribe(request).text == "active")
+        #expect(await service.stopCount == 0)
+
+        let commitToken = try #require(
+            await router.stageDisable(activationGeneration: 3)
+        )
+        await router.commit(commitToken)
+        #expect(router.currentDescriptorSnapshot == .unavailable)
+        #expect(await service.stopCount == 1)
+        let unavailable = await router.transcribe(request)
+        if case let .failed(failure) = unavailable.outcome {
+            #expect(failure.kind == .unavailable)
+        } else {
+            Issue.record("Expected unavailable transcription outcome")
+        }
+    }
+
     @Test("Prepare, token counting, and reload retain a retired engine")
     func auxiliaryOperationsRetainRetiredEngine() async throws {
         let router = TranscriberRouter()

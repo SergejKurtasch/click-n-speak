@@ -18,7 +18,7 @@ public actor TranscriberRouter: Transcribing {
 
     private struct PendingInstallation: Sendable {
         let id: Int
-        let candidate: Entry
+        let candidate: Entry?
         let previous: Entry?
     }
 
@@ -81,6 +81,30 @@ public actor TranscriberRouter: Transcribing {
         let installation = PendingInstallation(
             id: nextInstallationID,
             candidate: candidate,
+            previous: previous
+        )
+        pendingInstallation = installation
+        return TranscriberRouterInstallation(id: installation.id)
+    }
+
+    /// Stage removal of the active transcriber while retaining it for rollback.
+    /// Credential deletion uses this to make an invalid cloud client unavailable
+    /// without stopping it until the coordinated runtime commit succeeds.
+    public func stageDisable(
+        activationGeneration: Int? = nil
+    ) -> TranscriberRouterInstallation? {
+        guard !isStopping, pendingInstallation == nil else { return nil }
+        let requestedGeneration = activationGeneration ?? (latestActivationGeneration + 1)
+        guard requestedGeneration > latestActivationGeneration else { return nil }
+        latestActivationGeneration = requestedGeneration
+        nextInstallationID += 1
+        let previous = active
+        active = nil
+        descriptorSnapshot.set(.unavailable)
+        abortTarget.set(nil)
+        let installation = PendingInstallation(
+            id: nextInstallationID,
+            candidate: nil,
             previous: previous
         )
         pendingInstallation = installation
@@ -184,7 +208,9 @@ public actor TranscriberRouter: Transcribing {
         var owned = retired
         if let active { owned[active.generation] = active.service }
         if let pending = pendingInstallation {
-            owned[pending.candidate.generation] = pending.candidate.service
+            if let candidate = pending.candidate {
+                owned[candidate.generation] = candidate.service
+            }
             if let previous = pending.previous {
                 owned[previous.generation] = previous.service
             }
