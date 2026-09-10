@@ -208,6 +208,8 @@ actor FakeTranscriber: Transcribing {
     private var decodeContinuation: CheckedContinuation<Void, Never>?
     private var suspendReload = false
     private var reloadContinuation: CheckedContinuation<Void, Never>?
+    private var suspendPreWarm = false
+    private(set) var preWarmCancelledCount = 0
 
     init(
         texts: [String],
@@ -288,7 +290,22 @@ actor FakeTranscriber: Transcribing {
 
     func preWarm() async -> PrewarmResult {
         preWarmCount += 1
+        while suspendPreWarm {
+            if Task.isCancelled {
+                preWarmCancelledCount += 1
+                return .skipped
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
         return .warmed
+    }
+
+    func setSuspendPreWarm(_ suspended: Bool) {
+        suspendPreWarm = suspended
+    }
+
+    func waitUntilPreWarmStarted() async {
+        while preWarmCount == 0 { await Task.yield() }
     }
 
     nonisolated func abortInFlight() {

@@ -1057,6 +1057,28 @@ struct SessionControllerTests {
         #expect(await rig.transcriber.warmupCount == 0)
     }
 
+    @Test("Hotkey cancels an in-flight synthetic prewarm before recording")
+    func hotkeyCancelsInFlightPrewarm() async {
+        let rig = makeRig()
+        await rig.transcriber.setSuspendPreWarm(true)
+        let warmup = Task { await rig.controller.warmupIfIdle(full: false) }
+        await rig.transcriber.waitUntilPreWarmStarted()
+
+        rig.controller.toggle(now: Date())
+        await settle(20)
+
+        let cancelCount = await rig.transcriber.preWarmCancelledCount
+        let abortCount = await rig.transcriber.abortCount
+        await rig.transcriber.setSuspendPreWarm(false)
+        let accepted = await warmup.value
+
+        #expect(cancelCount == 1)
+        #expect(abortCount == 1)
+        #expect(accepted == false)
+        #expect(rig.recorder.isRecording)
+        #expect(rig.controller.isRecording)
+    }
+
     @Test("Dataset metadata uses the runtime captured at session start")
     func datasetUsesFactualRuntimeDescriptor() async throws {
         let directory = FileManager.default.temporaryDirectory

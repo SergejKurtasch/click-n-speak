@@ -1,5 +1,11 @@
 import Foundation
 
+public enum PrewarmResult: Sendable, Equatable {
+    case warmed
+    case skipped
+    case failed
+}
+
 public struct RestartDecision: Sendable {
     public let shouldRestart: Bool
     public let reason: String?
@@ -85,12 +91,19 @@ public final class TranscriberHealthMonitor {
         return RestartDecision(shouldRestart: false)
     }
 
-    public func recordPrewarm(durationSeconds: TimeInterval, success: Bool, now: TimeInterval? = nil) -> RestartDecision {
+    public func recordPrewarm(
+        durationSeconds: TimeInterval,
+        outcome: PrewarmResult,
+        now: TimeInterval? = nil
+    ) -> RestartDecision {
+        guard outcome != .skipped else {
+            return RestartDecision(shouldRestart: false)
+        }
         let current = now ?? ProcessInfo.processInfo.systemUptime
         if !cooldownElapsed(now: current) {
             return RestartDecision(shouldRestart: false)
         }
-        if !success {
+        if outcome == .failed {
             return RestartDecision(shouldRestart: true, reason: "prewarm_failed")
         }
         if durationSeconds >= severePrewarmSeconds {

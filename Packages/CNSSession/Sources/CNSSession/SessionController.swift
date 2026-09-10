@@ -383,6 +383,10 @@ public final class SessionController {
     // MARK: - Start
 
     private func beginStart() {
+        if warmupTask != nil {
+            warmupTask?.cancel()
+            transcriber.abortInFlight()
+        }
         let hotkeyUptime = ProcessInfo.processInfo.systemUptime
         sessionId += 1
         let id = sessionId
@@ -1235,11 +1239,12 @@ public final class SessionController {
         let duration = ProcessInfo.processInfo.systemUptime - startedAt
         let decision = healthMonitor.recordPrewarm(
             durationSeconds: duration,
-            success: result == .warmed
+            outcome: result
         )
         RuntimeTelemetry.emitRuntimeEvent("transcriber_prewarm", fields: [
             "full": full,
             "duration_ms": duration * 1000,
+            "outcome": String(describing: result),
             "accepted_while_idle": true
         ])
         if decision.shouldRestart {

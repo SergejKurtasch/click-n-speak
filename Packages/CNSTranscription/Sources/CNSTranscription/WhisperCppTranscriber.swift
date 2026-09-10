@@ -13,7 +13,12 @@ import whisper
 /// hallucination filter are applied by `GuardedTranscriber` wrapping this, so
 /// the engine adapter stays focused on decoding.
 public actor WhisperCppTranscriber: Transcribing {
-    public enum LoadError: Error, Sendable { case modelNotFound(String), initFailed, inferenceBusy }
+    public enum LoadError: Error, Sendable {
+        case modelNotFound(String)
+        case initFailed
+        case inferenceBusy
+        case warmupFailed
+    }
 
     /// `_PRE_WARM_THROTTLE_S` in the Python app.
     static let preWarmThrottleSeconds: TimeInterval = 45
@@ -353,9 +358,9 @@ public actor WhisperCppTranscriber: Transcribing {
                 timeout: TranscriptionDeadlinePolicy.coldDecodeSeconds
             ) else { return }
             defer { lease.release() }
-            warmupDone = decodeSilence(seconds: 0.5, language: language)
+            warmupDone = decodeSilence(seconds: 0.5, language: language) == .warmed
         } else {
-            warmupDone = decodeSilence(seconds: 0.5, language: language)
+            warmupDone = decodeSilence(seconds: 0.5, language: language) == .warmed
         }
     }
 
@@ -366,10 +371,14 @@ public actor WhisperCppTranscriber: Transcribing {
             ) else { throw LoadError.inferenceBusy }
             defer { lease.release() }
             _ = try load()
-            if !warmupDone { warmupDone = decodeSilence(seconds: 0.5, language: language) }
+            if !warmupDone {
+                try acceptPreparationWarmup(decodeSilence(seconds: 0.5, language: language))
+            }
         } else {
             _ = try load()
-            if !warmupDone { warmupDone = decodeSilence(seconds: 0.5, language: language) }
+            if !warmupDone {
+                try acceptPreparationWarmup(decodeSilence(seconds: 0.5, language: language))
+            }
         }
     }
 
@@ -382,20 +391,51 @@ public actor WhisperCppTranscriber: Transcribing {
         }
         guard let lease = inferenceGate?.tryAcquire() else {
             return inferenceGate == nil
-                ? (decodeSilence(seconds: 0.5, language: nil) ? .warmed : .failed)
+                ? decodeSilence(seconds: 0.5, language: nil)
                 : .skipped
         }
         defer { lease.release() }
-        return decodeSilence(seconds: 0.5, language: nil) ? .warmed : .failed
+        return decodeSilence(seconds: 0.5, language: nil)
     }
 
-    private func decodeSilence(seconds: Double, language: String?) -> Bool {
-        guard let ctx = try? load() else { return false }
+    private func acceptPreparationWarmup(_ result: PrewarmResult) throws {
+        switch result {
+        case .warmed:
+            warmupDone = true
+        case .skipped:
+            throw CancellationError()
+        case .failed:
+            throw LoadError.warmupFailed
+        }
+    }
+
+    static func prewarmResult(for result: TranscriptionResult) -> PrewarmResult {
+        switch result.outcome {
+        case .success, .noSpeech:
+            return .warmed
+        case .aborted, .guarded:
+            return .skipped
+        case .timedOut, .failed:
+            return .failed
+        }
+    }
+
+    private func decodeSilence(seconds: Double, language: String?) -> PrewarmResult {
+        guard let ctx = try? load() else { return .failed }
         var params = makeParams()
         let silence = [Float](repeating: 0, count: Int(16000 * seconds))
-        _ = runDecode(ctx: ctx, audio: silence, params: &params, language: language, prompt: nil)
-        lastDecodeAt = Date()
-        return true
+        let result = runDecode(
+            ctx: ctx,
+            audio: silence,
+            params: &params,
+            language: language,
+            prompt: nil
+        )
+        let prewarmResult = Self.prewarmResult(for: result)
+        if prewarmResult == .warmed {
+            lastDecodeAt = Date()
+        }
+        return prewarmResult
     }
 
     public func stop() async {

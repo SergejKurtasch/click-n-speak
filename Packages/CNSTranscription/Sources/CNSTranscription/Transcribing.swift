@@ -1,4 +1,7 @@
+import CNSCore
 import Foundation
+
+public typealias PrewarmResult = CNSCore.PrewarmResult
 
 /// One transcription request for an audio chunk. Fields mirror the parameters of
 /// `TranscriberProcessWrapper.transcribe` in `transcriber.py`.
@@ -37,12 +40,6 @@ public struct TranscriptionRequest: Sendable {
 public enum TranscriptionDeadlinePolicy {
     public static let warmDecodeSeconds: TimeInterval = 30
     public static let coldDecodeSeconds: TimeInterval = 90
-}
-
-public enum PrewarmResult: Sendable, Equatable {
-    case warmed
-    case skipped
-    case failed
 }
 
 public enum TranscriptionGuardReason: String, Sendable, Equatable {
