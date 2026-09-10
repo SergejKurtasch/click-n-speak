@@ -432,6 +432,32 @@ struct AppRuntimeCoordinatorTests {
         await runtime.shutdown()
     }
 
+    @Test("Language change rebuilds the effective prompt before persistence")
+    func languageChangeRebuildsPrompt() async throws {
+        var initial = config(backend: "local")
+        initial.raw["primary_language"] = .string("ru")
+        initial.raw["additional_languages"] = .array([])
+        _ = UserTerms.add(to: &initial, lang: "ru", term: "словарь", source: .manual)
+        _ = UserTerms.add(to: &initial, lang: "de", term: "Wörterbuch", source: .manual)
+        initial.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: initial.raw))
+        let (runtime, _, _, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await runtime.activateInitial(initial)
+
+        let desired = LanguageSettings.selectPrimary("de", in: initial)
+        runtime.requestConfiguration(desired)
+        await settle()
+
+        let disk = try Config.loadValidated(
+            from: directory.appendingPathComponent("config.json")
+        )
+        #expect(disk.primaryLanguage == "de")
+        #expect(disk.initialPrompt == InitialPromptBuilder().build(config: disk.raw))
+        #expect(disk.initialPrompt.contains("Wörterbuch"))
+        #expect(!disk.initialPrompt.contains("словарь"))
+        await runtime.shutdown()
+    }
+
     @Test("Dictionary changes during preparation are included in the runtime write")
     func dictionaryChangeDuringPreparation() async throws {
         let initial = usageConfig()
@@ -452,6 +478,36 @@ struct AppRuntimeCoordinatorTests {
         #expect(disk.sttBackend == "gemini")
         #expect(disk.raw["user_terms"]?.objectValue?["ru"]?.arrayValue?.first?.objectValue?["use_count"]?.intValue == 1)
         #expect(dictionary.snapshot == disk)
+        await runtime.shutdown()
+    }
+
+    @Test("A language change supersedes a stale runtime preparation snapshot")
+    func languageChangeDuringPreparation() async throws {
+        var initial = usageConfig()
+        initial.raw["primary_language"] = .string("ru")
+        initial.raw["additional_languages"] = .array([])
+        _ = UserTerms.add(to: &initial, lang: "de", term: "Wörterbuch", source: .manual)
+        initial.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: initial.raw))
+        let (runtime, _, _, factory, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        let gate = RuntimePreparationGate()
+        factory.beforePreparation = { backend in if backend == "gemini" { await gate.pause() } }
+        var desired = initial
+        desired.raw["stt_backend"] = .string("gemini")
+        runtime.requestConfiguration(desired)
+        await gate.waitForEntry()
+
+        try dictionary.applyLanguageSettings(LanguageSettings.selectPrimary("de", in: initial))
+        await gate.release()
+        await settle()
+
+        let disk = try Config.loadValidated(from: directory.appendingPathComponent("config.json"))
+        #expect(disk.primaryLanguage == "de")
+        #expect(disk.initialPrompt.contains("Wörterbuch"))
+        #expect(dictionary.snapshot == disk)
+        #expect(runtime.desiredConfiguration.primaryLanguage == "de")
         await runtime.shutdown()
     }
 
@@ -950,6 +1006,45 @@ struct AppRuntimeCoordinatorTests {
         let disk = try Config.loadValidated(from: directory.appendingPathComponent("config.json"))
         #expect(UserTerms.activeTerms(disk, lang: "en") == ["CommitTerm"])
         await coordinator.shutdown()
+    }
+
+    @Test("A language transaction during runtime commit becomes the next coherent snapshot")
+    func languageUpdateDuringRuntimeCommit() async throws {
+        var initial = Config.migrated(config(backend: "local", editorBackend: "local").raw)
+        initial.raw["replacement_policy_initialized"] = .bool(true)
+        initial.raw["primary_language"] = .string("ru")
+        initial.raw["additional_languages"] = .array([.string("en")])
+        _ = UserTerms.add(to: &initial, lang: "ru", term: "словарь", source: .manual)
+        _ = UserTerms.add(to: &initial, lang: "de", term: "Wörterbuch", source: .manual)
+        initial.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: initial.raw))
+        let gate = RuntimeCommitGate()
+        let (runtime, _, _, session, _, directory) = makeCommitRig(initial: initial, gate: gate)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = dictionary(initial: initial, directory: directory, runtime: runtime)
+        await runtime.activateInitial(initial)
+        await gate.arm(.betweenRouterInstalls)
+
+        var desired = initial
+        desired.raw["stt_backend"] = .string("gemini")
+        desired.raw["ai_editor_backend"] = .string("gemini")
+        runtime.requestConfiguration(desired)
+        await gate.waitForEntry()
+        try dictionary.applyLanguageSettings(
+            LanguageSettings.selectPrimary("de", in: dictionary.snapshot)
+        )
+        await gate.release()
+        await settle()
+
+        let disk = try Config.loadValidated(
+            from: directory.appendingPathComponent("config.json")
+        )
+        let published = try #require(session.configs.last)
+        #expect(disk == dictionary.snapshot)
+        #expect(runtime.desiredConfiguration.primaryLanguage == "de")
+        #expect(published.primaryLanguage == "de")
+        #expect(published.initialPrompt == InitialPromptBuilder().build(config: published.raw))
+        #expect(published.initialPrompt.contains("Wörterbuch"))
+        await runtime.shutdown()
     }
 
     @Test("Shutdown waits for a two-router commit before stopping services")

@@ -5,7 +5,6 @@ import CNSUI
 /// Owns the sequential first-run flow without blocking the AppKit run loop.
 @MainActor
 final class AppLaunchCoordinator {
-    private let paths: Paths
     private let i18n: I18n
     private let permissions: any PermissionServicing
     private let log: @Sendable (String) -> Void
@@ -15,12 +14,10 @@ final class AppLaunchCoordinator {
     private var isRunning = false
 
     init(
-        paths: Paths,
         i18n: I18n,
         permissions: any PermissionServicing,
         log: @escaping @Sendable (String) -> Void
     ) {
-        self.paths = paths
         self.i18n = i18n
         self.permissions = permissions
         self.log = log
@@ -65,13 +62,6 @@ final class AppLaunchCoordinator {
                 config: config,
                 i18n: i18n,
                 onConfigChanged: { [weak self] updated in
-                    if let self {
-                        do {
-                            try updated.saveAtomically(to: self.paths.configFile)
-                        } catch {
-                            self.log("Failed to save language selection: \(error.localizedDescription)")
-                        }
-                    }
                     self?.languagePicker = nil
                     continuation.resume(returning: updated)
                 },

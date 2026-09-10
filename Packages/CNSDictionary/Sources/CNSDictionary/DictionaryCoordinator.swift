@@ -199,6 +199,7 @@ public enum DictionaryCoordinatorError: LocalizedError {
     case noSnapshot
     case invalidReplacement
     case conflictingReplacement
+    case persistenceRollbackFailed
 
     public var errorDescription: String? {
         switch self {
@@ -209,6 +210,7 @@ public enum DictionaryCoordinatorError: LocalizedError {
         case .noSnapshot: "No previous dictionary snapshot is available"
         case .invalidReplacement: "Both replacement values are required"
         case .conflictingReplacement: "One source phrase cannot have multiple replacement targets"
+        case .persistenceRollbackFailed: "Dictionary persistence rollback failed"
         }
     }
 }
@@ -226,7 +228,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         }
     }
     private static let analysisFields = [
-        "user_terms", "primary_language", "additional_languages", "skipped_terms",
+        "user_terms", "primary_language", "additional_languages", "language_auto_detect", "skipped_terms",
         "pending_suggestions", "prompt_update_mode", "auto_prompt_check_interval",
         "auto_prompt_check_min_count_primary", "auto_prompt_check_min_count_additional",
         "auto_prompt_lookback",
@@ -351,6 +353,65 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         snapshot = config
         dirty = false
         promptSynchronizer.prime()
+    }
+
+    /// Adopt bytes written externally (for example, from the Edit Config
+    /// action) after synchronizing the active per-language prompt files. This
+    /// is deliberately separate from the write acknowledgement path above:
+    /// external reloads already persisted the JSON and must not write it again.
+    public func adoptPersistedConfiguration(_ config: Config) throws {
+        var adopted = config
+        let rebuiltPrompt = promptBuilder.build(config: config.raw)
+        let promptNeedsRebuild = config.initialPrompt != rebuiltPrompt
+        if promptNeedsRebuild {
+            adopted.raw["initial_prompt"] = .string(rebuiltPrompt)
+        }
+        let languages = Set(activeLanguages(config: config))
+        let snapshots = try languages.sorted().map { try promptSynchronizer.capture(language: $0) }
+        do {
+            for language in languages {
+                try promptSynchronizer.write(
+                    language: language,
+                    terms: termStrings(config: config, language: language)
+                )
+            }
+            if promptNeedsRebuild {
+                try adopted.saveAtomically(to: paths.configFile)
+            }
+        } catch {
+            do {
+                for snapshot in snapshots.reversed() { try promptSynchronizer.restore(snapshot) }
+            } catch {
+                throw DictionaryCoordinatorError.persistenceRollbackFailed
+            }
+            throw error
+        }
+        snapshot = adopted
+        dirty = false
+        promptSynchronizer.prime()
+    }
+
+    /// Persist recognition-language settings through the dictionary/config
+    /// owner so the derived prompt and active per-language term files advance
+    /// with the same snapshot. Unrelated fields come from the latest owner
+    /// snapshot, never from a potentially stale UI projection.
+    public func applyLanguageSettings(_ settings: Config) throws {
+        var candidate = snapshot
+        candidate.raw["primary_language"] = settings.raw["primary_language"]
+        candidate.raw["additional_languages"] = settings.raw["additional_languages"]
+        candidate.raw["language_auto_detect"] = settings.raw["language_auto_detect"]
+        if let pickerDone = settings.raw["language_picker_done"] {
+            candidate.raw["language_picker_done"] = pickerDone
+        }
+        candidate = LanguageSettings.setAutoDetect(
+            settings.raw["language_auto_detect"]?.boolValue ?? false,
+            in: candidate
+        )
+        try commit(
+            candidate,
+            promptLanguages: Set(activeLanguages(config: candidate)),
+            invalidations: []
+        )
     }
 
     @discardableResult
@@ -1243,9 +1304,10 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     ) throws {
         var candidate = input
         candidate.raw["initial_prompt"] = .string(promptBuilder.build(config: candidate.raw))
-        let old = snapshot
+        let languages = promptLanguages.map(LanguageCode.normalize).sorted()
+        let fileSnapshots = try languages.map { try promptSynchronizer.capture(language: $0) }
         do {
-            for language in promptLanguages {
+            for language in languages {
                 try promptSynchronizer.write(
                     language: language,
                     terms: termStrings(config: candidate, language: language)
@@ -1253,11 +1315,12 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             }
             try candidate.saveAtomically(to: paths.configFile)
         } catch {
-            for language in promptLanguages {
-                try? promptSynchronizer.write(
-                    language: language,
-                    terms: termStrings(config: old, language: language)
-                )
+            do {
+                for fileSnapshot in fileSnapshots.reversed() {
+                    try promptSynchronizer.restore(fileSnapshot)
+                }
+            } catch {
+                throw DictionaryCoordinatorError.persistenceRollbackFailed
             }
             throw error
         }
@@ -1271,9 +1334,13 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     }
 
     private func activeLanguages() -> [String] {
-        [snapshot.primaryLanguage] + LanguageCode.dedupeList(
-            snapshot.additionalLanguages,
-            primary: snapshot.primaryLanguage
+        activeLanguages(config: snapshot)
+    }
+
+    private func activeLanguages(config: Config) -> [String] {
+        [config.primaryLanguage] + LanguageCode.dedupeList(
+            config.additionalLanguages,
+            primary: config.primaryLanguage
         )
     }
 

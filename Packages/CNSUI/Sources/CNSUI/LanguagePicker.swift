@@ -158,16 +158,19 @@ class LanguagePickerViewModel: ObservableObject {
 
     func save() {
         let validatedPrimary = Self.supportedCodes.contains(primary) ? primary : "en"
-        let validatedAdditional = LanguageCode.dedupeList(
-            additional.filter { Self.supportedCodes.contains($0) },
-            primary: validatedPrimary
-        )
-        var raw = config.raw
-        raw["primary_language"] = .string(validatedPrimary)
-        raw["additional_languages"] = .array(validatedAdditional.map { .string($0) })
-        raw["language_auto_detect"] = .bool(autoDetect)
-        raw["language_picker_done"] = .bool(true)
-        config.raw = raw
+        let desiredAdditional = Self.supportedCodes.filter {
+            $0 != validatedPrimary && additional.contains($0)
+        }
+        var updated = LanguageSettings.selectPrimary(validatedPrimary, in: config)
+        for language in updated.additionalLanguages where !desiredAdditional.contains(language) {
+            updated = LanguageSettings.toggleAdditional(language, in: updated)
+        }
+        for language in desiredAdditional where !updated.additionalLanguages.contains(language) {
+            updated = LanguageSettings.toggleAdditional(language, in: updated)
+        }
+        updated = LanguageSettings.setAutoDetect(autoDetect, in: updated)
+        updated.raw["language_picker_done"] = .bool(true)
+        config = updated
     }
 
     private static let supportedCodes = ["ru", "en", "uk", "de", "es", "fr"]

@@ -6,6 +6,11 @@ import Foundation
 /// survives editors that save by atomically replacing the file.
 @MainActor
 public final class PromptFileSynchronizer {
+    struct FileSnapshot {
+        let language: String
+        let data: Data?
+        let observedContents: String?
+    }
     private let paths: Paths
     private let activeLanguages: () -> [String]
     private let onExternalChange: (String, String) -> Void
@@ -54,6 +59,39 @@ public final class PromptFileSynchronizer {
         let text = terms.joined(separator: ", ")
         try AtomicFile.writeText(text, to: paths.initialPromptFile(lang: lang))
         observedContents[lang] = text
+    }
+
+    func capture(language: String) throws -> FileSnapshot {
+        let lang = LanguageCode.normalize(language)
+        let url = paths.initialPromptFile(lang: lang)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return FileSnapshot(
+                language: lang,
+                data: nil,
+                observedContents: observedContents[lang]
+            )
+        }
+        return FileSnapshot(
+            language: lang,
+            data: try Data(contentsOf: url),
+            observedContents: observedContents[lang]
+        )
+    }
+
+    func restore(_ snapshot: FileSnapshot) throws {
+        let url = paths.initialPromptFile(lang: snapshot.language)
+        if let data = snapshot.data {
+            try AtomicFile.writeData(data, to: url)
+        } else {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+        if let observed = snapshot.observedContents {
+            observedContents[snapshot.language] = observed
+        } else {
+            observedContents.removeValue(forKey: snapshot.language)
+        }
     }
 
     public func scanForExternalChanges() {

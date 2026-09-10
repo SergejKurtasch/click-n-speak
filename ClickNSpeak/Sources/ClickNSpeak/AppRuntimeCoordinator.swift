@@ -131,14 +131,27 @@ final class AppRuntimeCoordinator {
     /// The dictionary owner publishes data, not a runtime selection or a write
     /// acknowledgement. Preserve both the active and pending runtime choices.
     func updateDictionarySnapshot(_ config: Config) {
+        let languageChanged = languageSettingsDiffer(dictionarySnapshot, config)
         dictionarySnapshot = config
-        desiredConfig = mergingDictionaryFields(into: desiredConfig)
+        desiredConfig = mergingDictionaryFields(into: desiredConfig, adoptingLanguageSettings: true)
         if committingGeneration != nil {
             dictionaryUpdateDuringCommit = true
             return
         }
+        // A preparation task may have captured the previous language/prompt.
+        // Supersede it before it can persist stale bytes, then prepare the
+        // latest desired snapshot. Ready/degraded runtimes adopt data-only
+        // changes without restarting services.
+        if languageChanged {
+            switch state {
+            case .preparing, .reconfiguring:
+                requestConfiguration(desiredConfig)
+            default:
+                break
+            }
+        }
         if let activeConfig {
-            let updated = mergingDictionaryFields(into: activeConfig)
+            let updated = mergingDictionaryFields(into: activeConfig, adoptingLanguageSettings: true)
             self.activeConfig = updated
             if let activeRuntime {
                 publishActiveRuntimeToSession(config: updated, runtime: activeRuntime)
@@ -146,12 +159,36 @@ final class AppRuntimeCoordinator {
         }
     }
 
-    private func mergingDictionaryFields(into config: Config) -> Config {
+    private func mergingDictionaryFields(
+        into config: Config,
+        adoptingLanguageSettings: Bool = false
+    ) -> Config {
+        let languageSettingsChanged = languageSettingsDiffer(config, dictionarySnapshot)
         var merged = config
         for key in Self.dictionaryOwnedKeys {
             merged.raw[key] = dictionarySnapshot.raw[key]
         }
+        if adoptingLanguageSettings {
+            for key in Self.languageSettingsKeys {
+                merged.raw[key] = dictionarySnapshot.raw[key]
+            }
+        }
+        if languageSettingsChanged && !adoptingLanguageSettings {
+            merged.raw["initial_prompt"] = .string(
+                InitialPromptBuilder().build(config: merged.raw)
+            )
+        }
         return merged
+    }
+
+    private func languageSettingsDiffer(_ lhs: Config, _ rhs: Config) -> Bool {
+        let lhsPrimary = lhs.primaryLanguage
+        let rhsPrimary = rhs.primaryLanguage
+        return lhsPrimary != rhsPrimary
+            || LanguageCode.dedupeList(lhs.additionalLanguages, primary: lhsPrimary)
+                != LanguageCode.dedupeList(rhs.additionalLanguages, primary: rhsPrimary)
+            || (lhs.raw["language_auto_detect"]?.boolValue ?? false)
+                != (rhs.raw["language_auto_detect"]?.boolValue ?? false)
     }
 
     // Extend this ownership contract when adding mutable dictionary settings.
@@ -163,6 +200,9 @@ final class AppRuntimeCoordinator {
         "replacement_policy_initialized", "auto_prompt_check_interval",
         "auto_prompt_check_min_count_primary", "auto_prompt_check_min_count_additional",
         "auto_prompt_lookback", "max_dictionary_age_days", "notify_on_metrics"
+    ]
+    private static let languageSettingsKeys = [
+        "primary_language", "additional_languages", "language_auto_detect", "language_picker_done"
     ]
 
     init(
@@ -666,7 +706,7 @@ final class AppRuntimeCoordinator {
         session?.endRuntimeMutation()
         committingGeneration = nil
         if dictionaryUpdateDuringCommit, let activeConfig {
-            let updated = mergingDictionaryFields(into: activeConfig)
+            let updated = mergingDictionaryFields(into: activeConfig, adoptingLanguageSettings: true)
             self.activeConfig = updated
             if let activeRuntime {
                 publishActiveRuntimeToSession(config: updated, runtime: activeRuntime)

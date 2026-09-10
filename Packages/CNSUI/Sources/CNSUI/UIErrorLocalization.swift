@@ -15,6 +15,7 @@ enum UIErrorLocalization {
         case .noSnapshot: return i18n.t("ui.error_no_snapshot")
         case .invalidReplacement: return i18n.t("ui.error_invalid_replacement")
         case .conflictingReplacement: return i18n.t("ui.error_conflicting_replacement")
+        case .persistenceRollbackFailed: return i18n.t("ui.error_persistence")
         }
     }
 

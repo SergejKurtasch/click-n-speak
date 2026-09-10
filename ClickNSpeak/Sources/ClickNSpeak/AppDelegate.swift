@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appActivationObserver: NSObjectProtocol?
     private var terminationStarted = false
     private var shutdownNotification: (title: String, body: String)?
+    private var languageChangeNotification: (title: String, body: String)?
+    private var interfaceLanguage = "en"
     private var menuState: MenuState?
 
     init(
@@ -101,9 +103,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let dictionaryCoordinator = preparedDictionary.coordinator
         let config = preparedDictionary.config
         let i18n = I18n.load(config.primaryLanguage, localesDirectory: resources.localesDirectory)
+        interfaceLanguage = i18n.lang
         shutdownNotification = (
             i18n.t("notify.shutdown_timeout_title"),
             i18n.t("notify.shutdown_timeout_body")
+        )
+        languageChangeNotification = (
+            i18n.t("notify.language_changed_title"),
+            i18n.t("notify.language_changed_body")
         )
         self.dictionaryCoordinator = dictionaryCoordinator
         let initialMenuState = MenuState(
@@ -283,7 +290,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.hotkey = hotkey
 
         let launchCoordinator = AppLaunchCoordinator(
-            paths: paths,
             i18n: i18n,
             permissions: permissionService,
             log: log
@@ -295,7 +301,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         launchTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let updated = await launchCoordinator.run(config: config)
+            let selected = await launchCoordinator.run(config: config)
+            var updated = config
+            if selected != config {
+                do {
+                    let previousPrimary = dictionaryCoordinator.snapshot.primaryLanguage
+                    try dictionaryCoordinator.applyLanguageSettings(selected)
+                    updated = dictionaryCoordinator.snapshot
+                    self.notifyInterfaceLanguageRestartIfNeeded(
+                        previousPrimary: previousPrimary,
+                        updated: updated
+                    )
+                } catch {
+                    log("Failed to save language selection: \(error.localizedDescription)")
+                    updated = dictionaryCoordinator.snapshot
+                }
+            }
             self.updateDesiredMenuConfig(updated)
             await runtimeCoordinator.activateInitial(updated)
             do {
@@ -517,12 +538,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             runtimeCoordinator?.requestConfiguration(updated)
             self?.updateDesiredMenuConfig(runtimeCoordinator?.desiredConfiguration ?? updated)
         }
-        menuCtrl.onConfigurationReloaded = { [weak runtimeCoordinator] updated in
-            runtimeCoordinator?.adoptPersistedConfiguration(updated)
+        menuCtrl.onLanguageSettingsChanged = { [weak self, weak dictionaryCoordinator] settings in
+            guard let self, let dictionaryCoordinator else { return }
+            let previousPrimary = dictionaryCoordinator.snapshot.primaryLanguage
+            do {
+                try dictionaryCoordinator.applyLanguageSettings(settings)
+                self.notifyInterfaceLanguageRestartIfNeeded(
+                    previousPrimary: previousPrimary,
+                    updated: dictionaryCoordinator.snapshot
+                )
+            } catch {
+                self.updateDesiredMenuConfig(dictionaryCoordinator.snapshot)
+                if let logger = self.logger {
+                    Task { await logger.info(
+                        "Failed to save language settings: \(error.localizedDescription)"
+                    ) }
+                }
+            }
+        }
+        menuCtrl.onConfigurationReloaded = { [weak self, weak runtimeCoordinator, weak dictionaryCoordinator] updated in
+            guard let self, let dictionaryCoordinator else { return }
+            let previousPrimary = dictionaryCoordinator.snapshot.primaryLanguage
+            try dictionaryCoordinator.adoptPersistedConfiguration(updated)
+            runtimeCoordinator?.adoptPersistedConfiguration(dictionaryCoordinator.snapshot)
+            self.notifyInterfaceLanguageRestartIfNeeded(
+                previousPrimary: previousPrimary,
+                updated: dictionaryCoordinator.snapshot
+            )
         }
         menuCtrl.onHistorySnapshotChanged = { [weak self] history in
             self?.mutateMenuState { $0.history = history }
         }
+    }
+
+    private func notifyInterfaceLanguageRestartIfNeeded(
+        previousPrimary: String,
+        updated: Config
+    ) {
+        guard previousPrimary != updated.primaryLanguage,
+              Self.interfaceLanguageRequiresRestart(
+                  currentLanguage: interfaceLanguage,
+                  updated: updated
+              ),
+              let notification = languageChangeNotification else { return }
+        notificationService?.deliver(title: notification.title, body: notification.body)
+    }
+
+    static func interfaceLanguageRequiresRestart(
+        currentLanguage: String,
+        updated: Config
+    ) -> Bool {
+        LanguageCode.normalize(currentLanguage) != updated.primaryLanguage
     }
 
     private func mutateMenuState(_ mutation: (inout MenuState) -> Void) {

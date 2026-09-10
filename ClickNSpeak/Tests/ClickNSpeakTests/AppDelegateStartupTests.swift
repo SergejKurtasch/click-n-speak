@@ -13,6 +13,22 @@ import Testing
 struct AppDelegateStartupTests {
     private enum DrainFailure: Error { case write }
 
+    @Test("A first-launch recognition language change keeps the current UI locale until restart")
+    func firstLaunchLanguageSelectionRequiresInterfaceRestart() {
+        var initial = Config.migrated(JSONObject())
+        initial.raw["primary_language"] = .string("en")
+        let selected = LanguageSettings.selectPrimary("de", in: initial)
+
+        #expect(AppDelegate.interfaceLanguageRequiresRestart(
+            currentLanguage: "en",
+            updated: selected
+        ))
+        #expect(!AppDelegate.interfaceLanguageRequiresRestart(
+            currentLanguage: "de",
+            updated: selected
+        ))
+    }
+
     @Test("Termination drains session, dictionary, and runtime in ownership order")
     func terminationDrainOrder() async {
         var events: [String] = []
@@ -119,6 +135,31 @@ struct AppDelegateStartupTests {
         #expect(runtime.desiredConfiguration == menuBefore)
         #expect(session.configs.last == activeBefore)
         #expect(try Data(contentsOf: paths.configFile) == diskBefore)
+        await runtime.shutdown()
+    }
+
+    @Test("Production language intents persist through the dictionary owner")
+    func languageIntentUsesDictionaryOwner() async throws {
+        let (app, runtime, _, dictionary, menu, paths) = makeConfigurationBridge()
+        defer {
+            withExtendedLifetime(app) {}
+            try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent())
+        }
+        await runtime.activateInitial(dictionary.snapshot)
+        #expect(dictionary.addManualTerm("Wörterbuch", language: "de"))
+        let selected = LanguageSettings.selectPrimary("de", in: menu.state.config)
+
+        menu.onLanguageSettingsChanged?(selected)
+
+        let persisted = try Config.loadValidated(from: paths.configFile)
+        #expect(dictionary.snapshot == persisted)
+        #expect(runtime.desiredConfiguration == persisted)
+        #expect(menu.state.config == persisted)
+        #expect(persisted.primaryLanguage == "de")
+        #expect(persisted.raw["language_auto_detect"]?.boolValue == false)
+        #expect(persisted.initialPrompt == InitialPromptBuilder().build(config: persisted.raw))
+        #expect(persisted.initialPrompt.contains("Wörterbuch"))
+        #expect(try String(contentsOf: paths.initialPromptFile(lang: "de")) == "Wörterbuch")
         await runtime.shutdown()
     }
 

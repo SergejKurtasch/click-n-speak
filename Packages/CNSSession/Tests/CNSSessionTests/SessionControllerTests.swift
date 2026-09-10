@@ -726,6 +726,20 @@ struct SessionControllerTests {
         #expect(request?.initialPrompt == "OLD FILE PROMPT")
         #expect(request?.allowedLanguages == ["ru", "en"])
         #expect(editor.lastLanguages == ["ru", "en"])
+
+        let nextJob = Task {
+            await controller.transcribeFile(
+                url: URL(fileURLWithPath: "next-snapshot.wav"),
+                refine: true
+            )
+        }
+        while await transcriber.fileRequestCount < 2 { await Task.yield() }
+        await transcriber.finish()
+        _ = await nextJob.value
+        let nextRequest = await transcriber.fileRequests.last
+        #expect(nextRequest?.initialPrompt == "NEW FILE PROMPT")
+        #expect(nextRequest?.allowedLanguages == ["de", "fr"])
+        #expect(editor.lastLanguages == ["de", "fr"])
         await controller.shutdown()
     }
 
@@ -1190,7 +1204,7 @@ struct SessionControllerTests {
         initial.raw["ai_editor_enabled"] = .bool(true)
         let editor = FakeAiEditor()
         let rig = makeRig(
-            texts: ["first", "second"],
+            texts: ["first", "second", "third"],
             config: initial,
             aiEditor: editor
         )
@@ -1217,6 +1231,17 @@ struct SessionControllerTests {
         #expect(requests.allSatisfy { $0.initialPrompt?.contains("OLD RECORDING PROMPT") == true })
         #expect(requests.allSatisfy { $0.initialPrompt?.contains("NEW RECORDING PROMPT") == false })
         #expect(editor.lastLanguages == ["ru", "en"])
+
+        rig.panel.userCancels()
+        await settle()
+        rig.controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(3))
+        while await rig.transcriber.requestCount < 3 { await Task.yield() }
+        let nextRequest = await rig.transcriber.requests.last
+        #expect(nextRequest?.allowedLanguages == ["de", "fr"])
+        #expect(nextRequest?.initialPrompt?.contains("NEW RECORDING PROMPT") == true)
         await rig.controller.shutdown()
     }
 

@@ -10,13 +10,19 @@ public enum AtomicFile {
     }
 
     public static func writeText(_ text: String, to url: URL) throws {
+        guard let data = text.data(using: .utf8) else {
+            throw WriteError.write("Text is not valid UTF-8")
+        }
+        try writeData(data, to: url)
+    }
+
+    /// Atomically replaces a file with exact bytes, including bytes that are
+    /// not valid UTF-8. Used by rollback paths that must preserve user edits.
+    public static func writeData(_ data: Data, to url: URL) throws {
         let dir = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let tmpURL = dir.appendingPathComponent(".\(UUID().uuidString).tmp")
-        guard let data = text.data(using: .utf8) else {
-            throw WriteError.write("Text is not valid UTF-8")
-        }
 
         let fd = open(tmpURL.path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
         guard fd >= 0 else { throw WriteError.create("open failed: \(String(cString: strerror(errno)))") }

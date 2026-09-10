@@ -226,4 +226,72 @@ struct MenuStateTests {
         #expect(submenu.items.contains { $0.title == "Keep current runtime" })
         #expect(submenu.items.contains { $0.title == "Retry" })
     }
+
+    @Test("Language menu emits reduced settings without changing the UI locale")
+    func languageMenuUsesSharedReducerAndStableLocale() throws {
+        var initial = Config.migrated(JSONObject())
+        initial.raw["primary_language"] = .string("ru")
+        initial.raw["additional_languages"] = .array([.string("en")])
+        initial.raw["language_auto_detect"] = .bool(true)
+        let controller = makeController(state: MenuState(config: initial))
+        var emitted: [Config] = []
+        var ordinaryMutations = 0
+        controller.onLanguageSettingsChanged = { emitted.append($0) }
+        controller.onConfigChanged = { _ in ordinaryMutations += 1 }
+
+        let languages = try #require(controller.menu.item(withTitle: "Languages")?.submenu)
+        let german = try #require(languages.items.first {
+            ($0.representedObject as? String) == "de"
+        })
+        _ = NSApplication.shared.sendAction(
+            try #require(german.action),
+            to: german.target,
+            from: german
+        )
+
+        let selected = try #require(emitted.last)
+        #expect(selected.primaryLanguage == "de")
+        #expect(selected.raw["language_auto_detect"]?.boolValue == false)
+        #expect(selected.additionalLanguages == ["en"])
+        #expect(selected.initialPrompt == InitialPromptBuilder().build(config: selected.raw))
+        #expect(ordinaryMutations == 0)
+
+        var state = controller.state
+        state.config = selected
+        controller.apply(state)
+        #expect(controller.menu.item(withTitle: "Languages") != nil)
+        #expect(controller.menu.item(withTitle: "Sprachen") == nil)
+
+        let updatedLanguages = try #require(
+            controller.menu.item(withTitle: "Languages")?.submenu
+        )
+        let additionalFrench = try #require(updatedLanguages.items.last {
+            ($0.representedObject as? String) == "fr"
+        })
+        _ = NSApplication.shared.sendAction(
+            try #require(additionalFrench.action),
+            to: additionalFrench.target,
+            from: additionalFrench
+        )
+        let withFrench = try #require(emitted.last)
+        #expect(withFrench.primaryLanguage == "de")
+        #expect(withFrench.additionalLanguages == ["en", "fr"])
+        #expect(withFrench.initialPrompt == InitialPromptBuilder().build(config: withFrench.raw))
+
+        state.config = withFrench
+        controller.apply(state)
+        let autoDetect = try #require(
+            controller.menu.item(withTitle: "Languages")?.submenu?.items.first {
+                ($0.representedObject as? String) == "auto"
+            }
+        )
+        _ = NSApplication.shared.sendAction(
+            try #require(autoDetect.action),
+            to: autoDetect.target,
+            from: autoDetect
+        )
+        #expect(emitted.last?.raw["language_auto_detect"]?.boolValue == true)
+        #expect(emitted.last?.initialPrompt.isEmpty == true)
+        #expect(ordinaryMutations == 0)
+    }
 }

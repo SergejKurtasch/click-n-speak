@@ -26,7 +26,8 @@ public final class MenuBarController: NSObject {
     private let paths: Paths
     private let permissionService: any PermissionServicing
     public var onConfigChanged: ((Config) -> Void)?
-    public var onConfigurationReloaded: ((Config) -> Void)?
+    public var onLanguageSettingsChanged: ((Config) -> Void)?
+    public var onConfigurationReloaded: ((Config) throws -> Void)?
     public var onTranscribeFileAction: ((
         URL,
         Bool,
@@ -974,30 +975,29 @@ public final class MenuBarController: NSObject {
     }
     @objc private func onSelectPrimaryLanguage(_ sender: NSMenuItem) {
         guard let lang = sender.representedObject as? String else { return }
-        var newConfig = config
-        newConfig.raw["primary_language"] = .string(lang)
-        onConfigChanged?(newConfig)
+        let newConfig = LanguageSettings.selectPrimary(lang, in: config)
+        emitLanguageSettings(newConfig)
         log("Primary language set to \(lang)")
     }
     @objc private func onToggleAdditionalLanguage(_ sender: NSMenuItem) {
         guard let lang = sender.representedObject as? String else { return }
-        var newConfig = config
-        var additional = Set(config.additionalLanguages)
-        if additional.contains(lang) {
-            additional.remove(lang)
-        } else {
-            additional.insert(lang)
-        }
-        newConfig.raw["additional_languages"] = .array(additional.map { .string($0) })
-        onConfigChanged?(newConfig)
+        let newConfig = LanguageSettings.toggleAdditional(lang, in: config)
+        emitLanguageSettings(newConfig)
         log("Additional language toggled: \(lang)")
     }
     @objc private func onToggleAutoDetect() {
-        var newConfig = config
         let current = config.raw["language_auto_detect"]?.boolValue ?? false
-        newConfig.raw["language_auto_detect"] = .bool(!current)
-        onConfigChanged?(newConfig)
+        let newConfig = LanguageSettings.setAutoDetect(!current, in: config)
+        emitLanguageSettings(newConfig)
         log("Auto detect toggled to \(!current)")
+    }
+
+    private func emitLanguageSettings(_ settings: Config) {
+        if let onLanguageSettingsChanged {
+            onLanguageSettingsChanged(settings)
+        } else {
+            onConfigChanged?(settings)
+        }
     }
     public func checkAndDownloadLocalModelIfNeeded() {
         guard config.sttBackend == "local" else { return }
@@ -1437,7 +1437,7 @@ public final class MenuBarController: NSObject {
 
     func reloadConfiguration() throws {
         let newConfig = try Config.loadValidated(from: paths.configFile)
-        onConfigurationReloaded?(newConfig)
+        try onConfigurationReloaded?(newConfig)
         log("Config reloaded from disk")
     }
     @objc private func onRestart() {

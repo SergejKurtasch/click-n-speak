@@ -244,6 +244,28 @@ final class UIPanelsTests: XCTestCase {
         XCTAssertEqual(Set(model.availableLanguages.map(\.code)), Set(["ru", "en", "uk", "de", "es", "fr"]))
     }
 
+    func testLanguagePickerSavesOrderedReducedConfiguration() {
+        var source = config
+        source.raw["primary_language"] = .string("ru")
+        source.raw["additional_languages"] = .array([.string("uk")])
+        source.raw["language_auto_detect"] = .bool(true)
+        let model = LanguagePickerViewModel(config: source, i18n: i18n())
+        model.primary = "de"
+        model.additional = ["fr", "en"]
+        model.autoDetect = false
+
+        model.save()
+
+        XCTAssertEqual(model.config.primaryLanguage, "de")
+        XCTAssertEqual(model.config.additionalLanguages, ["en", "fr"])
+        XCTAssertEqual(model.config.raw["language_auto_detect"]?.boolValue, false)
+        XCTAssertEqual(model.config.raw["language_picker_done"]?.boolValue, true)
+        XCTAssertEqual(
+            model.config.initialPrompt,
+            InitialPromptBuilder().build(config: model.config.raw)
+        )
+    }
+
     func testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific() {
         for ext in ["wav", "mp3", "flac", "ogg", "opus", "caf", "mp4"] {
             XCTAssertTrue(FileDropView.isSupported(URL(fileURLWithPath: "/tmp/fixture.\(ext)")))

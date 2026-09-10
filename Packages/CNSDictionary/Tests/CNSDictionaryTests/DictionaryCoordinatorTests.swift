@@ -79,7 +79,10 @@ final class DictionaryCoordinatorTests: XCTestCase {
     }
 
     func testSuspendedAnalysisCannotRestoreCandidatesAfterReviewOrConfigurationChanges() async throws {
-        for mutation in ["reject", "accept", "primary", "additional", "disabled", "terms", "threshold", "lookback"] {
+        for mutation in [
+            "reject", "accept", "primary", "additional", "auto_detect",
+            "disabled", "terms", "threshold", "lookback",
+        ] {
             let paths = makePaths()
             defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
             var config = makeConfig(mode: "suggest")
@@ -105,6 +108,7 @@ final class DictionaryCoordinatorTests: XCTestCase {
                 var changed = coordinator.snapshot
                 if mutation == "primary" { changed.raw["primary_language"] = .string("de") }
                 if mutation == "additional" { changed.raw["additional_languages"] = .array([.string("fr")]) }
+                if mutation == "auto_detect" { changed.raw["language_auto_detect"] = .bool(true) }
                 if mutation == "threshold" { changed.raw["auto_prompt_check_min_count_primary"] = .int(50) }
                 if mutation == "lookback" { changed.raw["auto_prompt_lookback"] = .int(10) }
                 coordinator.adoptConfiguration(changed)
@@ -301,6 +305,79 @@ final class DictionaryCoordinatorTests: XCTestCase {
         XCTAssertEqual(try Config.loadValidated(from: paths.configFile), external)
     }
 
+    func testExternalAdoptionSynchronizesActivePromptFilesBeforePublishingSnapshot() throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try paths.ensureDataDirectory()
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths)
+        var external = makeConfig()
+        external.raw["primary_language"] = .string("de")
+        external.raw["additional_languages"] = .array([.string("fr")])
+        XCTAssertTrue(UserTerms.add(to: &external, lang: "de", term: "Wörterbuch", source: .manual))
+        XCTAssertTrue(UserTerms.add(to: &external, lang: "fr", term: "dictionnaire", source: .manual))
+        external.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: external.raw))
+        try external.saveAtomically(to: paths.configFile)
+        try "stale".write(to: paths.initialPromptFile(lang: "de"), atomically: true, encoding: .utf8)
+
+        try coordinator.adoptPersistedConfiguration(external)
+
+        XCTAssertEqual(coordinator.snapshot, external)
+        XCTAssertEqual(try String(contentsOf: paths.initialPromptFile(lang: "de")), "Wörterbuch")
+        XCTAssertEqual(try String(contentsOf: paths.initialPromptFile(lang: "fr")), "dictionnaire")
+    }
+
+    func testExternalAdoptionRepairsStaleDerivedPromptBeforePublishing() throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try paths.ensureDataDirectory()
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths)
+        var external = makeConfig()
+        external.raw["primary_language"] = .string("de")
+        external.raw["additional_languages"] = .array([])
+        XCTAssertTrue(UserTerms.add(to: &external, lang: "de", term: "Wörterbuch", source: .manual))
+        external.raw["initial_prompt"] = .string("stale Russian prompt")
+        try external.saveAtomically(to: paths.configFile)
+
+        try coordinator.adoptPersistedConfiguration(external)
+
+        let expected = InitialPromptBuilder().build(config: coordinator.snapshot.raw)
+        XCTAssertEqual(coordinator.snapshot.initialPrompt, expected)
+        XCTAssertEqual(try Config.loadValidated(from: paths.configFile).initialPrompt, expected)
+        XCTAssertFalse(coordinator.snapshot.initialPrompt.contains("stale Russian prompt"))
+    }
+
+    func testFailedConfigSaveRestoresExactPromptFileBytesAndExistence() throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try paths.ensureDataDirectory()
+        var initial = makeConfig()
+        initial.raw["primary_language"] = .string("de")
+        initial.raw["additional_languages"] = .array([])
+        XCTAssertTrue(UserTerms.add(to: &initial, lang: "de", term: "alt", source: .manual))
+        let coordinator = makeCoordinator(config: initial, paths: paths)
+        coordinator.startPromptWatching()
+        defer { coordinator.stop() }
+        let existing = Data("manual-before".utf8)
+        try existing.write(to: paths.initialPromptFile(lang: "de"))
+        let newLanguageFile = paths.initialPromptFile(lang: "fr")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: newLanguageFile.path))
+        try FileManager.default.createDirectory(at: paths.configFile, withIntermediateDirectories: false)
+
+        var changed = initial
+        changed.raw["additional_languages"] = .array([.string("fr")])
+        XCTAssertThrowsError(try coordinator.applyLanguageSettings(changed))
+
+        XCTAssertEqual(try Data(contentsOf: paths.initialPromptFile(lang: "de")), existing)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: newLanguageFile.path))
+        XCTAssertEqual(coordinator.snapshot, initial)
+
+        // The pre-transaction manual edit remains visible to the watcher
+        // because rollback restored its earlier observed baseline as well.
+        try FileManager.default.removeItem(at: paths.configFile)
+        coordinator.scanPromptFilesForTesting()
+        XCTAssertEqual(UserTerms.activeTerms(coordinator.snapshot, lang: "de"), ["manual-before"])
+    }
+
     func testFullLearningFlowAndConfirmIdempotency() async throws {
         let date = Date(timeIntervalSince1970: 2_000_000_000)
         let paths = makePaths()
@@ -366,6 +443,42 @@ final class DictionaryCoordinatorTests: XCTestCase {
         coordinator.scanPromptFilesForTesting()
         XCTAssertEqual(UserTerms.activeTerms(coordinator.snapshot, lang: "en"), ["Alpha", "Beta"])
         XCTAssertTrue(coordinator.snapshot.initialPrompt.contains("Alpha"))
+    }
+
+    func testLanguageSettingsPersistPromptAndPrimeWatcherAsOneOwnerChange() throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try paths.ensureDataDirectory()
+        var initial = makeConfig()
+        initial.raw["primary_language"] = .string("ru")
+        initial.raw["additional_languages"] = .array([.string("en")])
+        XCTAssertTrue(UserTerms.add(to: &initial, lang: "de", term: "Wörterbuch", source: .manual))
+        XCTAssertTrue(UserTerms.add(to: &initial, lang: "fr", term: "dictionnaire", source: .manual))
+        initial.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: initial.raw))
+        let coordinator = makeCoordinator(config: initial, paths: paths)
+        var publications = 0
+        coordinator.onSnapshotChanged = { _, invalidations in
+            XCTAssertTrue(invalidations.contains(.config))
+            publications += 1
+        }
+
+        var selected = LanguageSettings.selectPrimary("de", in: initial)
+        selected = LanguageSettings.toggleAdditional("fr", in: selected)
+        try coordinator.applyLanguageSettings(selected)
+
+        XCTAssertEqual(coordinator.snapshot.primaryLanguage, "de")
+        XCTAssertEqual(coordinator.snapshot.additionalLanguages, ["en", "fr"])
+        XCTAssertEqual(
+            coordinator.snapshot.initialPrompt,
+            InitialPromptBuilder().build(config: coordinator.snapshot.raw)
+        )
+        XCTAssertEqual(try Config.loadValidated(from: paths.configFile), coordinator.snapshot)
+        XCTAssertEqual(try String(contentsOf: paths.initialPromptFile(lang: "de")), "Wörterbuch")
+        XCTAssertEqual(try String(contentsOf: paths.initialPromptFile(lang: "fr")), "dictionnaire")
+        XCTAssertEqual(publications, 1)
+
+        coordinator.scanPromptFilesForTesting()
+        XCTAssertEqual(publications, 1, "Owner-written prompt files must not be re-imported")
     }
 
     func testSuggestAutoAndDisabledModes() async throws {
