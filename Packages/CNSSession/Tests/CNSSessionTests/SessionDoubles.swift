@@ -286,8 +286,9 @@ actor FakeTranscriber: Transcribing {
         warmupCount += 1
     }
 
-    func preWarm() async {
+    func preWarm() async -> PrewarmResult {
         preWarmCount += 1
+        return .warmed
     }
 
     nonisolated func abortInFlight() {

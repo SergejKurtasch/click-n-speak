@@ -108,10 +108,29 @@ struct LocalAiEditorTests {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    @Test("Local preparation cannot overlap an active inference lease")
+    func preparationRespectsSharedGate() async throws {
+        let gate = InferenceExecutionGate()
+        let lease = try #require(gate.tryAcquire())
+        let generator = ScriptedLocalGenerator([.output("unused")])
+        let (editor, directory) = try makeEditor(
+            generator: generator,
+            gate: gate,
+            fileGateTimeout: 0.02
+        )
+        await #expect(throws: LocalAiEditorError.inferenceBusy) {
+            try await editor.prepare()
+        }
+        #expect(!editor.isReady)
+        lease.release()
+        try await editor.prepare()
+        #expect(editor.isReady)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     @Test("Whisper ownership skips local Qwen, while cancellation releases a waiting file request")
     func sharedGateAndFileCancellation() async throws {
         let gate = InferenceExecutionGate()
-        let whisperLease = try #require(gate.tryAcquire())
         let generator = ScriptedLocalGenerator([.output(longEditorInput + ".")])
         let (editor, directory) = try makeEditor(
             generator: generator,
@@ -119,6 +138,7 @@ struct LocalAiEditorTests {
             fileGateTimeout: 1
         )
         try await editor.prepare()
+        let whisperLease = try #require(gate.tryAcquire())
 
         let realtime = await editor.refine(
             text: longEditorInput,

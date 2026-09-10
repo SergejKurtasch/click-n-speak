@@ -157,11 +157,12 @@ public actor TranscriberRouter: Transcribing {
         }
     }
 
-    public func preWarm() async {
-        guard let entry = active else { return }
+    public func preWarm() async -> PrewarmResult {
+        guard let entry = active else { return .skipped }
         beginUse(entry.generation)
-        await entry.service.preWarm()
+        let result = await entry.service.preWarm()
         await endUse(entry.generation)
+        return result
     }
 
     public func tokenCount(_ text: String) async -> Int? {

@@ -50,10 +50,11 @@ public actor MLXLocalTextGenerator: LocalTextGenerating {
     }
 }
 
-public enum LocalAiEditorError: LocalizedError, Sendable {
+public enum LocalAiEditorError: LocalizedError, Sendable, Equatable {
     case modelDirectoryMissing
     case modelSnapshotIncomplete(String)
     case notPrepared
+    case inferenceBusy
 
     public var errorDescription: String? {
         switch self {
@@ -63,6 +64,8 @@ public enum LocalAiEditorError: LocalizedError, Sendable {
             "The local AI editor model is missing \(file)"
         case .notPrepared:
             "The local AI editor has not been prepared"
+        case .inferenceBusy:
+            "The local AI editor is waiting for another local inference operation"
         }
     }
 }
@@ -112,6 +115,10 @@ public actor LocalAiEditor: AiEditing {
 
     public func prepare() async throws {
         try Self.validateSnapshot(at: modelDirectory)
+        guard let lease = try await gate.acquire(timeout: fileGateTimeout) else {
+            throw LocalAiEditorError.inferenceBusy
+        }
+        defer { lease.release() }
         try await generator.prepare()
         readiness.set(true)
     }

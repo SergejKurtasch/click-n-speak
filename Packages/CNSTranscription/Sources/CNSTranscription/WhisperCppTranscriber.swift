@@ -13,7 +13,7 @@ import whisper
 /// hallucination filter are applied by `GuardedTranscriber` wrapping this, so
 /// the engine adapter stays focused on decoding.
 public actor WhisperCppTranscriber: Transcribing {
-    public enum LoadError: Error, Sendable { case modelNotFound(String), initFailed }
+    public enum LoadError: Error, Sendable { case modelNotFound(String), initFailed, inferenceBusy }
 
     /// `_PRE_WARM_THROTTLE_S` in the Python app.
     static let preWarmThrottleSeconds: TimeInterval = 45
@@ -348,31 +348,54 @@ public actor WhisperCppTranscriber: Transcribing {
     /// (`WhisperTranscriber.warmup`). Idempotent.
     public func warmup(language: String?) async {
         guard !warmupDone else { return }
-        warmupDone = true
-        decodeSilence(seconds: 0.5, language: language)
+        if let inferenceGate {
+            guard let lease = try? await inferenceGate.acquire(
+                timeout: TranscriptionDeadlinePolicy.coldDecodeSeconds
+            ) else { return }
+            defer { lease.release() }
+            warmupDone = decodeSilence(seconds: 0.5, language: language)
+        } else {
+            warmupDone = decodeSilence(seconds: 0.5, language: language)
+        }
     }
 
     public func prepare(language: String?) async throws {
-        _ = try load()
-        await warmup(language: language)
+        if let inferenceGate {
+            guard let lease = try await inferenceGate.acquire(
+                timeout: TranscriptionDeadlinePolicy.coldDecodeSeconds
+            ) else { throw LoadError.inferenceBusy }
+            defer { lease.release() }
+            _ = try load()
+            if !warmupDone { warmupDone = decodeSilence(seconds: 0.5, language: language) }
+        } else {
+            _ = try load()
+            if !warmupDone { warmupDone = decodeSilence(seconds: 0.5, language: language) }
+        }
     }
 
     /// Cheap keep-warm before a session. Skipped when a real decode happened
     /// less than 45 s ago, matching the Python `pre_warm` throttle that
     /// eliminated the 15-22 s cold-start penalty on rapid re-recordings.
-    public func preWarm() async {
+    public func preWarm() async -> PrewarmResult {
         if let last = lastDecodeAt, Date().timeIntervalSince(last) < Self.preWarmThrottleSeconds {
-            return
+            return .warmed
         }
-        decodeSilence(seconds: 0.5, language: nil)
+        guard let lease = inferenceGate?.tryAcquire() else {
+            return inferenceGate == nil
+                ? (decodeSilence(seconds: 0.5, language: nil) ? .warmed : .failed)
+                : .skipped
+        }
+        defer { lease.release() }
+        return decodeSilence(seconds: 0.5, language: nil) ? .warmed : .failed
     }
 
-    private func decodeSilence(seconds: Double, language: String?) {
-        guard let ctx = try? load() else { return }
+    private func decodeSilence(seconds: Double, language: String?) -> Bool {
+        guard let ctx = try? load() else { return false }
         var params = makeParams()
         let silence = [Float](repeating: 0, count: Int(16000 * seconds))
         _ = runDecode(ctx: ctx, audio: silence, params: &params, language: language, prompt: nil)
         lastDecodeAt = Date()
+        return true
     }
 
     public func stop() async {

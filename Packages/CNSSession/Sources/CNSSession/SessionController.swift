@@ -167,7 +167,7 @@ public final class SessionController {
     private var hardAbortedSessionId: Int?
     private var reloadInProgress = false
     private var pendingPeriodicReload = false
-    private var warmupTask: Task<Void, Never>?
+    private var warmupTask: Task<PrewarmResult, Never>?
     private var audioBacklog: SessionAudioBacklog?
 
     // MARK: - Collaborators
@@ -1223,16 +1223,20 @@ public final class SessionController {
         let task = Task {
             if full {
                 await transcriber.warmup(language: language)
+                return PrewarmResult.warmed
             } else {
-                await transcriber.preWarm()
+                return await transcriber.preWarm()
             }
         }
         warmupTask = task
-        await task.value
+        let result = await task.value
         warmupTask = nil
         guard !isShuttingDown, !Task.isCancelled else { return false }
         let duration = ProcessInfo.processInfo.systemUptime - startedAt
-        let decision = healthMonitor.recordPrewarm(durationSeconds: duration, success: true)
+        let decision = healthMonitor.recordPrewarm(
+            durationSeconds: duration,
+            success: result == .warmed
+        )
         RuntimeTelemetry.emitRuntimeEvent("transcriber_prewarm", fields: [
             "full": full,
             "duration_ms": duration * 1000,
@@ -1242,7 +1246,7 @@ public final class SessionController {
             restartTranscriberReason = decision.reason
             runDeferredReloadIfIdle()
         }
-        return true
+        return result == .warmed
     }
 
     private func transition(to newState: SessionState, reason: String) {

@@ -39,6 +39,12 @@ public enum TranscriptionDeadlinePolicy {
     public static let coldDecodeSeconds: TimeInterval = 90
 }
 
+public enum PrewarmResult: Sendable, Equatable {
+    case warmed
+    case skipped
+    case failed
+}
+
 public enum TranscriptionGuardReason: String, Sendable, Equatable {
     case emptyAudio = "empty_audio"
     case tinyFinalChunk = "tiny_final_chunk"
@@ -156,7 +162,7 @@ public protocol Transcribing: Sendable {
     func prepare(language: String?) async throws
 
     /// Cheap keep-warm (throttled by the caller).
-    func preWarm() async
+    func preWarm() async -> PrewarmResult
 
     /// Release resources / stop any child work.
     func stop() async
@@ -185,7 +191,7 @@ public protocol Transcribing: Sendable {
 public extension Transcribing {
     func warmup(language: String?) async {}
     func prepare(language: String?) async throws { await warmup(language: language) }
-    func preWarm() async {}
+    func preWarm() async -> PrewarmResult { .skipped }
     func stop() async {}
     func reload() async { await stop() }
     nonisolated func abortInFlight() {}
