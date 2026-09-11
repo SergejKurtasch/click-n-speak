@@ -10,6 +10,8 @@ public enum AppUpdaterError: LocalizedError, Sendable, Equatable {
     case mountFailed
     case archiveContainsUnexpectedApplications
     case stagedCandidateMissing
+    case candidateIdentityMissing
+    case invalidLaunchAcknowledgement
     case helperMissing
     case unsafePath
 
@@ -23,6 +25,8 @@ public enum AppUpdaterError: LocalizedError, Sendable, Equatable {
         case .mountFailed: "The update disk image could not be mounted"
         case .archiveContainsUnexpectedApplications: "The update image must contain exactly one application"
         case .stagedCandidateMissing: "The validated update candidate is missing"
+        case .candidateIdentityMissing: "The update candidate has no version or build identity"
+        case .invalidLaunchAcknowledgement: "The update launch acknowledgement is invalid"
         case .helperMissing: "The signed update helper is missing from the application bundle"
         case .unsafePath: "The update attempted to use a path outside its controlled directory"
         }
@@ -38,8 +42,149 @@ public protocol UpdateArchiveDownloading: Sendable {
     ) async throws
 }
 
-public struct URLSessionUpdateArchiveDownloader: UpdateArchiveDownloading {
-    public init() {}
+private final class BoundedUpdateDownloadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let destination: URL
+    private let maximumBytes: Int64
+    private let progress: @Sendable (Double) -> Void
+    private let handle: FileHandle
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var task: URLSessionDataTask?
+    private var terminalError: Error?
+    private var received: Int64 = 0
+    private var expected: Int64 = -1
+    private var lastProgressTime: TimeInterval = 0
+    private var cancelledByCaller = false
+    private var finished = false
+
+    init(
+        destination: URL,
+        maximumBytes: Int64,
+        progress: @escaping @Sendable (Double) -> Void
+    ) throws {
+        self.destination = destination
+        self.maximumBytes = maximumBytes
+        self.progress = progress
+        try Data().write(to: destination, options: [.atomic])
+        do {
+            handle = try FileHandle(forWritingTo: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
+    func run(task: URLSessionDataTask) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let shouldCancel = lock.withLock { () -> Bool in
+                    self.continuation = continuation
+                    self.task = task
+                    return cancelledByCaller
+                }
+                if shouldCancel {
+                    task.cancel()
+                } else {
+                    task.resume()
+                }
+            }
+        } onCancel: {
+            let task = self.lock.withLock { () -> URLSessionDataTask? in
+                self.cancelledByCaller = true
+                return self.task
+            }
+            task?.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            lock.withLock { terminalError = AppUpdaterError.invalidHTTPResponse }
+            completionHandler(.cancel)
+            return
+        }
+        guard http.expectedContentLength <= maximumBytes else {
+            lock.withLock { terminalError = AppUpdaterError.archiveTooLarge }
+            completionHandler(.cancel)
+            return
+        }
+        lock.withLock { expected = http.expectedContentLength }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        var reportedProgress: Double?
+        var shouldCancel = false
+        lock.withLock {
+            guard terminalError == nil, !finished else { return }
+            guard maximumBytes >= received,
+                  Int64(data.count) <= maximumBytes - received else {
+                terminalError = AppUpdaterError.archiveTooLarge
+                shouldCancel = true
+                return
+            }
+            do {
+                try handle.write(contentsOf: data)
+                received += Int64(data.count)
+                let now = Date.timeIntervalSinceReferenceDate
+                if now - lastProgressTime >= 0.1 {
+                    lastProgressTime = now
+                    let denominator = expected > 0 ? expected : maximumBytes
+                    if denominator > 0 {
+                        reportedProgress = min(1, Double(received) / Double(denominator))
+                    }
+                }
+            } catch {
+                terminalError = error
+                shouldCancel = true
+            }
+        }
+        if let reportedProgress { progress(reportedProgress) }
+        if shouldCancel { dataTask.cancel() }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        let completion = lock.withLock { () -> (CheckedContinuation<Void, Error>?, Error?) in
+            guard !finished else { return (nil, nil) }
+            finished = true
+            var finalError = terminalError
+            if finalError == nil, cancelledByCaller {
+                finalError = CancellationError()
+            } else if finalError == nil {
+                finalError = error
+            }
+            if finalError == nil {
+                do { try handle.synchronize() } catch { finalError = error }
+            }
+            try? handle.close()
+            if finalError != nil { try? FileManager.default.removeItem(at: destination) }
+            return (continuation, finalError)
+        }
+        guard let continuation = completion.0 else { return }
+        if let error = completion.1 {
+            continuation.resume(throwing: error)
+        } else {
+            progress(1)
+            continuation.resume()
+        }
+    }
+}
+
+public final class URLSessionUpdateArchiveDownloader: UpdateArchiveDownloading, @unchecked Sendable {
+    private let configuration: URLSessionConfiguration
+
+    public init(configuration: URLSessionConfiguration = .ephemeral) {
+        self.configuration = configuration.copy() as! URLSessionConfiguration
+    }
 
     public func download(
         from source: URL,
@@ -51,18 +196,20 @@ public struct URLSessionUpdateArchiveDownloader: UpdateArchiveDownloading {
         var request = URLRequest(url: source)
         request.timeoutInterval = 4 * 3600
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        let (temporary, response) = try await URLSession.shared.download(for: request)
-        try Task.checkCancellation()
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw AppUpdaterError.invalidHTTPResponse
+        let delegate = try BoundedUpdateDownloadDelegate(
+            destination: destination,
+            maximumBytes: maximumBytes,
+            progress: progress
+        )
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        let task = session.dataTask(with: request)
+        do {
+            try await delegate.run(task: task)
+            session.finishTasksAndInvalidate()
+        } catch {
+            session.invalidateAndCancel()
+            throw error
         }
-        if http.expectedContentLength > maximumBytes {
-            throw AppUpdaterError.archiveTooLarge
-        }
-        let size = Int64((try temporary.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1)
-        guard size >= 0, size <= maximumBytes else { throw AppUpdaterError.archiveTooLarge }
-        try FileManager.default.moveItem(at: temporary, to: destination)
-        progress(1)
     }
 }
 
@@ -268,6 +415,20 @@ public actor AppUpdater {
             throw AppUpdaterError.helperMissing
         }
         let token = UUID().uuidString
+        guard let candidateBundle = Bundle(url: preparedCandidate),
+              let candidateVersion = candidateBundle.object(
+                  forInfoDictionaryKey: "CFBundleShortVersionString"
+              ) as? String,
+              let candidateBuild = candidateBundle.object(
+                  forInfoDictionaryKey: "CFBundleVersion"
+              ) as? String,
+              let candidateExecutable = candidateBundle.executableURL,
+              !candidateVersion.isEmpty,
+              !candidateBuild.isEmpty else {
+            try? FileManager.default.removeItem(at: preparedCandidate)
+            throw AppUpdaterError.candidateIdentityMissing
+        }
+        let candidateExecutableSHA256 = try await ArtifactIntegrity.sha256(of: candidateExecutable)
         let ack = paths.updatesDirectory.appendingPathComponent("ack-\(transactionID)")
         let record = paths.updatesDirectory.appendingPathComponent("transaction-\(transactionID).json")
         let process = Process()
@@ -278,6 +439,11 @@ public actor AppUpdater {
             "--target", target.path,
             "--backup", backup.path,
             "--token", token,
+            "--transaction-id", transactionID,
+            "--candidate-version", candidateVersion,
+            "--candidate-build", candidateBuild,
+            "--candidate-sha256", staged.update.sha256,
+            "--candidate-executable-sha256", candidateExecutableSHA256,
             "--ack", ack.path,
             "--record", record.path,
         ]
@@ -287,19 +453,125 @@ public actor AppUpdater {
         await MainActor.run { NSApp.terminate(nil) }
     }
 
-    /// Called by the replacement after its runtime reached the ready/degraded
-    /// launch boundary. The helper only deletes the backup after this token.
+    public static func hasUpdateLaunchArguments(
+        _ arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        argument("--update-validation-token", in: arguments) != nil
+    }
+
+    /// Called only after the replacement reaches a policy-approved launch
+    /// boundary. The acknowledgement binds candidate identity and exact PID.
     public static func acknowledgeSuccessfulLaunch(
         arguments: [String] = ProcessInfo.processInfo.arguments,
-        paths: Paths
-    ) throws {
-        guard let token = argument("--update-validation-token", in: arguments),
-              let ackPath = argument("--update-ack-path", in: arguments) else { return }
+        paths: Paths,
+        status: UpdateLaunchStatus,
+        processID: Int32 = ProcessInfo.processInfo.processIdentifier,
+        bundle: Bundle = .main
+    ) async throws {
+        guard let token = argument("--update-validation-token", in: arguments) else { return }
+        guard UUID(uuidString: token) != nil,
+              let ackPath = argument("--update-ack-path", in: arguments) else {
+            throw AppUpdaterError.invalidLaunchAcknowledgement
+        }
         let ackURL = URL(fileURLWithPath: ackPath).standardizedFileURL
         let allowedPrefix = paths.updatesDirectory.standardizedFileURL.path + "/"
         guard ackURL.path.hasPrefix(allowedPrefix) else { throw AppUpdaterError.unsafePath }
+        let version = argument("--update-candidate-version", in: arguments)
+        let build = argument("--update-candidate-build", in: arguments)
+        let archiveSHA256 = argument("--update-candidate-sha256", in: arguments)
+        let executableSHA256 = argument("--update-candidate-executable-sha256", in: arguments)
+        let identityArguments = [version, build, archiveSHA256, executableSHA256]
+        if identityArguments.allSatisfy({ $0 == nil }) {
+            try paths.ensureUpdatesDirectory()
+            try AtomicFile.writeData(Data(token.utf8), to: ackURL)
+            return
+        }
+        guard let version,
+              let build,
+              let archiveSHA256,
+              let executableSHA256,
+              archiveSHA256.count == 64,
+              archiveSHA256.allSatisfy(\.isHexDigit),
+              executableSHA256.count == 64,
+              executableSHA256.allSatisfy(\.isHexDigit),
+              let executableURL = bundle.executableURL else {
+            throw AppUpdaterError.invalidLaunchAcknowledgement
+        }
+        guard bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == version,
+              bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String == build else {
+            throw AppUpdaterError.unsafePath
+        }
+        guard try await ArtifactIntegrity.sha256(of: executableURL) == executableSHA256.lowercased() else {
+            throw AppUpdaterError.unsafePath
+        }
         try paths.ensureUpdatesDirectory()
-        try Data(token.utf8).write(to: ackURL, options: [.atomic])
+        let acknowledgement = UpdateLaunchAcknowledgement(
+            token: token,
+            candidate: UpdateCandidateIdentity(
+                version: version,
+                build: build,
+                archiveSHA256: archiveSHA256,
+                executableSHA256: executableSHA256
+            ),
+            processID: processID,
+            status: status
+        )
+        try AtomicFile.writeData(try JSONEncoder().encode(acknowledgement), to: ackURL)
+    }
+
+    @discardableResult
+    public static func recoverInterruptedTransactions(
+        paths: Paths,
+        status: UpdateLaunchStatus,
+        currentApplication: URL = Bundle.main.bundleURL,
+        currentVersion: String = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "",
+        currentBuild: String = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String ?? "",
+        currentExecutableSHA256: String? = nil,
+        currentProcessID: Int32 = ProcessInfo.processInfo.processIdentifier,
+        store: any UpdateTransactionStoring = FileUpdateTransactionStore(),
+        files: any UpdateFileOperating = SystemUpdateFileOperator()
+    ) async throws -> [UpdateRecoveryOutcome] {
+        guard FileManager.default.fileExists(atPath: paths.updatesDirectory.path) else { return [] }
+        let executableSHA256: String
+        if let currentExecutableSHA256 {
+            executableSHA256 = currentExecutableSHA256.lowercased()
+        } else {
+            guard let bundle = Bundle(url: currentApplication),
+                  let executableURL = bundle.executableURL else {
+                throw AppUpdaterError.candidateIdentityMissing
+            }
+            executableSHA256 = try await ArtifactIntegrity.sha256(of: executableURL)
+        }
+        let records = try FileManager.default.contentsOfDirectory(
+            at: paths.updatesDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter {
+            $0.lastPathComponent.hasPrefix("transaction-") && $0.pathExtension == "json"
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        let recovery = UpdateTransactionRecovery(store: store, files: files)
+        return try records.map { recordURL in
+            let record = try store.load(from: recordURL)
+            guard let candidate = record.candidate else { return .deferred }
+            let currentCandidate = UpdateCandidateIdentity(
+                version: currentVersion,
+                build: currentBuild,
+                archiveSHA256: candidate.archiveSHA256,
+                executableSHA256: executableSHA256
+            )
+            return try recovery.recover(
+                recordURL: recordURL,
+                currentApplication: currentApplication,
+                currentCandidate: currentCandidate,
+                currentProcessID: currentProcessID,
+                status: status
+            )
+        }
     }
 
     private func ensureCurrent(_ generation: Int) throws {

@@ -84,10 +84,10 @@ public final class SystemUpdateProcessOperator: UpdateProcessOperating, @uncheck
                 at: application,
                 configuration: configuration
             ) { runningApplication, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let runningApplication {
+                if let runningApplication {
                     continuation.resume(returning: runningApplication.processIdentifier)
+                } else if let error {
+                    continuation.resume(throwing: error)
                 } else {
                     continuation.resume(throwing: UpdateProcessOperationError.launchFailed)
                 }
@@ -173,8 +173,11 @@ public struct UpdateProcessLifecycle: Sendable {
         }
 
         let restoredPID = try await processes.launch(application: target, arguments: [])
-        try swap.discardFailedCandidate(at: failedCandidate)
         return restoredPID
+    }
+
+    public func discardFailedCandidate(at failedCandidate: URL) throws {
+        try swap.discardFailedCandidate(at: failedCandidate)
     }
 
     public func finalizeSuccessfulUpdate(backup: URL) throws {

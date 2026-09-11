@@ -88,14 +88,22 @@ final class CandidateMetadataValidatorTests: XCTestCase {
 private final class FaultingFileOperator: UpdateFileOperating, @unchecked Sendable {
     private let system = SystemUpdateFileOperator()
     private let failOnMove: Int?
+    private let failOnReplace: Int?
     private var moveCount = 0
+    private var replaceCount = 0
 
-    init(failOnMove: Int? = nil) {
+    init(failOnMove: Int? = nil, failOnReplace: Int? = nil) {
         self.failOnMove = failOnMove
+        self.failOnReplace = failOnReplace
     }
 
     func fileExists(at url: URL) -> Bool { system.fileExists(at: url) }
     func createDirectory(at url: URL) throws { try system.createDirectory(at: url) }
+    func replaceItem(at target: URL, with staged: URL, backup: URL) throws {
+        replaceCount += 1
+        if replaceCount == failOnReplace { throw CocoaError(.fileWriteUnknown) }
+        try system.replaceItem(at: target, with: staged, backup: backup)
+    }
     func copyItem(at source: URL, to destination: URL) throws {
         try system.copyItem(at: source, to: destination)
     }
@@ -119,18 +127,10 @@ final class RecoverableAppSwapTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
     }
 
-    func testFailureMovingCurrentAppDoesNotChangeTarget() throws {
+    func testAtomicReplacementFailureDoesNotChangeTarget() throws {
         let fixture = try makeSwapFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let swap = RecoverableAppSwap(files: FaultingFileOperator(failOnMove: 1))
-        XCTAssertThrowsError(try swap.install(staged: fixture.staged, target: fixture.target, backup: fixture.backup))
-        XCTAssertEqual(try String(contentsOf: fixture.target, encoding: .utf8), "old")
-    }
-
-    func testFailureInstallingCandidateRollsBackCurrentApp() throws {
-        let fixture = try makeSwapFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let swap = RecoverableAppSwap(files: FaultingFileOperator(failOnMove: 2))
+        let swap = RecoverableAppSwap(files: FaultingFileOperator(failOnReplace: 1))
         XCTAssertThrowsError(try swap.install(staged: fixture.staged, target: fixture.target, backup: fixture.backup))
         XCTAssertEqual(try String(contentsOf: fixture.target, encoding: .utf8), "old")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
@@ -174,7 +174,7 @@ final class RecoverableAppSwapTests: XCTestCase {
             target: fixture.target,
             backup: fixture.backup
         )
-        let swap = RecoverableAppSwap(files: FaultingFileOperator(failOnMove: 2))
+        let swap = RecoverableAppSwap(files: FaultingFileOperator(failOnReplace: 1))
 
         XCTAssertThrowsError(
             try swap.rollback(
@@ -263,7 +263,179 @@ private struct AcceptingCandidateVerifier: UpdateCandidateVerifying {
     func verify(candidateURL: URL, policy: CandidateVerificationPolicy) async throws {}
 }
 
+private final class StreamingUpdateURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var chunks: [Data] = []
+
+    static func install(chunks: [Data]) {
+        lock.withLock { self.chunks = chunks }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: nil
+        ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        for chunk in Self.lock.withLock({ Self.chunks }) {
+            client?.urlProtocol(self, didLoad: chunk)
+        }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 final class AppUpdaterStagingTests: XCTestCase {
+    func testArchiveDownloadWritesNetworkChunksWithoutPerByteProgress() async throws {
+        let first = Data(repeating: 0x41, count: 4)
+        let second = Data(repeating: 0x42, count: 4)
+        StreamingUpdateURLProtocol.install(chunks: [first, second])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StreamingUpdateURLProtocol.self]
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("update-stream-success-\(UUID().uuidString).dmg")
+        let progressValues = LockedProgressValues()
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        try await URLSessionUpdateArchiveDownloader(configuration: configuration).download(
+            from: URL(string: "https://example.invalid/update.dmg")!,
+            to: destination,
+            maximumBytes: 10,
+            progress: { progressValues.append($0) }
+        )
+
+        XCTAssertEqual(try Data(contentsOf: destination), first + second)
+        XCTAssertLessThanOrEqual(progressValues.values.count, 4)
+        XCTAssertEqual(progressValues.values.last, 1)
+    }
+
+    func testArchiveDownloadStopsAtByteLimitAndRemovesPartialFile() async throws {
+        StreamingUpdateURLProtocol.install(chunks: [
+            Data(repeating: 0x41, count: 4),
+            Data(repeating: 0x42, count: 4),
+        ])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StreamingUpdateURLProtocol.self]
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("update-stream-\(UUID().uuidString).dmg")
+        defer {
+            try? FileManager.default.removeItem(at: destination)
+        }
+
+        do {
+            try await URLSessionUpdateArchiveDownloader(configuration: configuration).download(
+                from: URL(string: "https://example.invalid/update.dmg")!,
+                to: destination,
+                maximumBytes: 6,
+                progress: { _ in }
+            )
+            XCTFail("Expected archive size limit failure")
+        } catch let error as AppUpdaterError {
+            XCTAssertEqual(error, .archiveTooLarge)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    func testLaunchAcknowledgementContainsBoundCandidateAndExactProcess() async throws {
+        let paths = temporaryPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        try paths.ensureUpdatesDirectory()
+        let bundleURL = try makeBundle(version: "2.0.0", build: "200")
+        defer { try? FileManager.default.removeItem(at: bundleURL) }
+        guard let bundle = Bundle(url: bundleURL) else {
+            XCTFail("Expected fixture bundle")
+            return
+        }
+        let token = UUID().uuidString
+        let sha256 = String(repeating: "a", count: 64)
+        let executableSHA256 = try await ArtifactIntegrity.sha256(of: bundle.executableURL!)
+        let acknowledgementURL = paths.updatesDirectory.appendingPathComponent("ack-fixture")
+
+        try await AppUpdater.acknowledgeSuccessfulLaunch(
+            arguments: [
+                "Click-n-speak",
+                "--update-validation-token", token,
+                "--update-ack-path", acknowledgementURL.path,
+                "--update-candidate-version", "2.0.0",
+                "--update-candidate-build", "200",
+                "--update-candidate-sha256", sha256,
+                "--update-candidate-executable-sha256", executableSHA256,
+            ],
+            paths: paths,
+            status: .ready,
+            processID: 4242,
+            bundle: bundle
+        )
+
+        let acknowledgement = try JSONDecoder().decode(
+            UpdateLaunchAcknowledgement.self,
+            from: Data(contentsOf: acknowledgementURL)
+        )
+        XCTAssertEqual(acknowledgement.token, token)
+        XCTAssertEqual(
+            acknowledgement.candidate,
+            UpdateCandidateIdentity(
+                version: "2.0.0",
+                build: "200",
+                archiveSHA256: sha256,
+                executableSHA256: executableSHA256
+            )
+        )
+        XCTAssertEqual(acknowledgement.processID, 4242)
+        XCTAssertEqual(acknowledgement.status, .ready)
+    }
+
+    func testLegacyLaunchAcknowledgementWritesRawToken() async throws {
+        let paths = temporaryPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        let token = UUID().uuidString
+        let acknowledgementURL = paths.updatesDirectory.appendingPathComponent("ack-legacy")
+
+        try await AppUpdater.acknowledgeSuccessfulLaunch(
+            arguments: [
+                "Click-n-speak",
+                "--update-validation-token", token,
+                "--update-ack-path", acknowledgementURL.path,
+            ],
+            paths: paths,
+            status: .ready
+        )
+
+        XCTAssertEqual(try String(contentsOf: acknowledgementURL, encoding: .utf8), token)
+    }
+
+    func testPartialStructuredAcknowledgementIsRejected() async throws {
+        let paths = temporaryPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        let acknowledgementURL = paths.updatesDirectory.appendingPathComponent("ack-partial")
+
+        do {
+            try await AppUpdater.acknowledgeSuccessfulLaunch(
+                arguments: [
+                    "Click-n-speak",
+                    "--update-validation-token", UUID().uuidString,
+                    "--update-ack-path", acknowledgementURL.path,
+                    "--update-candidate-version", "2.0.0",
+                ],
+                paths: paths,
+                status: .ready
+            )
+            XCTFail("Expected partial acknowledgement schema rejection")
+        } catch let error as AppUpdaterError {
+            XCTAssertEqual(error, .invalidLaunchAcknowledgement)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: acknowledgementURL.path))
+    }
+
     func testValidatedStagingStaysInsideInjectedUpdateDirectory() async throws {
         let data = Data("fixture-dmg".utf8)
         let paths = temporaryPaths()
@@ -332,6 +504,36 @@ final class AppUpdaterStagingTests: XCTestCase {
         ])
     }
 
+    private func makeBundle(version: String, build: String) throws -> URL {
+        let bundleURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("update-bundle-\(UUID().uuidString).app", isDirectory: true)
+        let contentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+        let executableDirectory = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
+        try FileManager.default.createDirectory(at: executableDirectory, withIntermediateDirectories: true)
+        let executableURL = executableDirectory.appendingPathComponent("UpdateFixture")
+        try Data("fixture-executable".utf8).write(to: executableURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executableURL.path
+        )
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "com.sergej.clicknspeak.fixture",
+            "CFBundleExecutable": "UpdateFixture",
+            "CFBundleName": "Update Fixture",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": version,
+            "CFBundleVersion": build,
+        ]
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: info,
+            format: .xml,
+            options: 0
+        )
+        try data.write(to: contentsURL.appendingPathComponent("Info.plist"), options: .atomic)
+        return bundleURL
+    }
+
     private func fixtureUpdate(
         data: Data,
         checksum: String? = nil
@@ -351,4 +553,15 @@ final class AppUpdaterStagingTests: XCTestCase {
             teamIdentifier: "ABCDE12345"
         )
     }
+}
+
+private final class LockedProgressValues: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Double] = []
+
+    func append(_ value: Double) {
+        lock.withLock { storage.append(value) }
+    }
+
+    var values: [Double] { lock.withLock { storage } }
 }

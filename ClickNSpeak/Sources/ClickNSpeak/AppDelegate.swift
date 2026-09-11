@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var languageChangeNotification: (title: String, body: String)?
     private var interfaceLanguage = "en"
     private var menuState: MenuState?
+    private var updateLaunchReported = false
 
     init(
         paths: Paths = .resolveDefault(),
@@ -300,6 +301,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         launchTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            let setupPending = !permissionService.isSetupDone()
+                || !permissionService.allPermissionsGranted()
+                || !config.languagePickerDone
+            if setupPending {
+                await self.reportUpdateLaunchIfAllowed(
+                    setupPending: true,
+                    runtimeCanRecord: false,
+                    log: log
+                )
+            }
             let selected = await launchCoordinator.run(config: config)
             var updated = config
             if selected != config {
@@ -318,11 +329,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.updateDesiredMenuConfig(updated)
             await runtimeCoordinator.activateInitial(updated)
-            do {
-                try AppUpdater.acknowledgeSuccessfulLaunch(paths: paths)
-            } catch {
-                log("Update launch acknowledgement failed: \(error.localizedDescription)")
-            }
+            let setupStillPending = !permissionService.isSetupDone()
+                || !permissionService.allPermissionsGranted()
+                || !updated.languagePickerDone
+            await self.reportUpdateLaunchIfAllowed(
+                setupPending: setupStillPending,
+                runtimeCanRecord: runtimeCoordinator.canRecord,
+                log: log
+            )
             self.startHotkeyIfAllowed(log: log)
             self.menuController?.checkAndDownloadLocalModelIfNeeded()
             do {
@@ -337,6 +351,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await self.checkUpdatesInBackground(log: log) }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in
             Task { await self?.checkUpdatesInBackground(log: log) }
+        }
+    }
+
+    private func reportUpdateLaunchIfAllowed(
+        setupPending: Bool,
+        runtimeCanRecord: Bool,
+        log: @escaping @Sendable (String) -> Void
+    ) async {
+        guard !updateLaunchReported,
+              let status = UpdateLaunchReadinessPolicy.status(
+                  configBootstrapped: true,
+                  appRunLoopReady: true,
+                  instanceLockHeld: instanceGuard != nil,
+                  setupPending: setupPending,
+                  runtimeCanRecord: runtimeCanRecord
+              ) else { return }
+        do {
+            if AppUpdater.hasUpdateLaunchArguments() {
+                try await AppUpdater.acknowledgeSuccessfulLaunch(paths: paths, status: status)
+            } else {
+                try await AppUpdater.recoverInterruptedTransactions(paths: paths, status: status)
+            }
+            updateLaunchReported = true
+        } catch {
+            log("Update launch acknowledgement failed: \(error.localizedDescription)")
         }
     }
 

@@ -45,6 +45,9 @@ private final class RemoveFailingUpdateFileOperator: UpdateFileOperating, @unche
 
     func fileExists(at url: URL) -> Bool { system.fileExists(at: url) }
     func createDirectory(at url: URL) throws { try system.createDirectory(at: url) }
+    func replaceItem(at target: URL, with staged: URL, backup: URL) throws {
+        try system.replaceItem(at: target, with: staged, backup: backup)
+    }
     func moveItem(at source: URL, to destination: URL) throws {
         try system.moveItem(at: source, to: destination)
     }
@@ -141,7 +144,7 @@ final class UpdateProcessLifecycleTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: fixture.failedCandidate, encoding: .utf8), "new")
     }
 
-    func testSuccessfulRestoredLaunchRemovesFailedCandidate() async throws {
+    func testSuccessfulRestoredLaunchAllowsRecordedCandidateCleanup() async throws {
         let fixture = try makeInstalledFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let processes = ScriptedUpdateProcessOperator(waitResults: [true], launchResults: [91])
@@ -159,6 +162,8 @@ final class UpdateProcessLifecycleTests: XCTestCase {
         XCTAssertEqual(processes.terminationRequests, [73])
         XCTAssertEqual(processes.launches.map(\.0), [fixture.target])
         XCTAssertEqual(try String(contentsOf: fixture.target, encoding: .utf8), "old")
+        XCTAssertEqual(try String(contentsOf: fixture.failedCandidate, encoding: .utf8), "new")
+        try lifecycle.discardFailedCandidate(at: fixture.failedCandidate)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.failedCandidate.path))
     }
 
@@ -211,6 +216,8 @@ final class UpdateProcessLifecycleTests: XCTestCase {
         XCTAssertEqual(processes.launches.map(\.0), [fixture.target, fixture.target])
         XCTAssertEqual(try String(contentsOf: fixture.target, encoding: .utf8), "old")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.failedCandidate.path))
+        try lifecycle.discardFailedCandidate(at: fixture.failedCandidate)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.failedCandidate.path))
     }
 
