@@ -71,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let logger = FileLogger(fileURL: paths.logFile)
         self.logger = logger
+        RuntimeTelemetry.configure(sink: FileRuntimeTelemetrySink(logger: logger))
         let log: @Sendable (String) -> Void = { message in
             Task { await logger.info(message) }
         }
@@ -461,6 +462,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 },
                 shutdownRuntime: { [weak self] in
                     await self?.runtimeCoordinator?.shutdown()
+                },
+                drainTelemetry: {
+                    await RuntimeTelemetry.drain()
                 }
             )
             guard outcome == .completed else {
@@ -491,7 +495,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static func drainForTermination(
         shutdownSession: () async -> SessionShutdownOutcome,
         drainDictionary: () async throws -> Void,
-        shutdownRuntime: () async -> Void
+        shutdownRuntime: () async -> Void,
+        drainTelemetry: () async -> Void = { await RuntimeTelemetry.drain() }
     ) async -> AppTerminationDrainOutcome {
         let sessionOutcome = await shutdownSession()
         guard sessionOutcome.succeeded else {
@@ -503,6 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .dictionaryFailed
         }
         await shutdownRuntime()
+        await drainTelemetry()
         return .completed
     }
 

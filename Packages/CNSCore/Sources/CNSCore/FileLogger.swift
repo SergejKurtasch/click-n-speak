@@ -32,6 +32,7 @@ public actor FileLogger {
     public func info(_ message: String) { log(.info, message) }
     public func warning(_ message: String) { log(.warning, message) }
     public func error(_ message: String) { log(.error, message) }
+    public func runtimeEvent(_ json: String) { info("runtime_event \(json)") }
 
     private func append(_ line: String) {
         let data = Data(line.utf8)

@@ -34,6 +34,8 @@ def evaluate(
 
     results: list[dict[str, Any]] = []
     failures: list[str] = []
+    if candidate.get("status") not in {None, "passed"}:
+        failures.append("soak_evidence")
     for name, raw_policy in thresholds.items():
         if not isinstance(raw_policy, dict):
             raise ValueError(f"Invalid threshold policy: {name}")

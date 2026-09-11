@@ -29,7 +29,7 @@ struct AppDelegateStartupTests {
         ))
     }
 
-    @Test("Termination drains session, dictionary, and runtime in ownership order")
+    @Test("Termination drains session, dictionary, runtime, and telemetry in ownership order")
     func terminationDrainOrder() async {
         var events: [String] = []
 
@@ -39,11 +39,12 @@ struct AppDelegateStartupTests {
                 return SessionShutdownOutcome()
             },
             drainDictionary: { events.append("dictionary") },
-            shutdownRuntime: { events.append("runtime") }
+            shutdownRuntime: { events.append("runtime") },
+            drainTelemetry: { events.append("telemetry") }
         )
 
         #expect(outcome == .completed)
-        #expect(events == ["session", "dictionary", "runtime"])
+        #expect(events == ["session", "dictionary", "runtime", "telemetry"])
     }
 
     @Test("A failed termination barrier keeps downstream owners alive")

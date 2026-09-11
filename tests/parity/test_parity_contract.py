@@ -133,7 +133,10 @@ def test_soak_summary_uses_only_privacy_safe_structured_events(tmp_path: Path) -
         {"event": "audio_capture_stats", "monotonic": 3.3, "maximum_callback_ms": 2.0, "overflow_samples": 0},
     ]
     log_path.write_text(
-        "\n".join(f"prefix runtime_event {json.dumps(line)}" for line in lines),
+        "\n".join(
+            f"prefix runtime_event {json.dumps({**line, 'run_id': 'synthetic-run'})}"
+            for line in lines
+        ),
         encoding="utf-8",
     )
     result = summarize(parse_runtime_events(log_path))

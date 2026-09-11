@@ -279,6 +279,9 @@ public final class SessionController {
         if !isShuttingDown {
             isShuttingDown = true
             runtimeAvailable = false
+            if sessionId > 0 {
+                emitSessionEndIfNeeded(sessionID: sessionId, reason: "shutdown")
+            }
             // Invalidate every in-flight callback before the first suspension.
             // Some native/editor implementations finish after cancellation.
             sessionId &+= 1
@@ -389,6 +392,11 @@ public final class SessionController {
             transcriber.abortInFlight()
         }
         let hotkeyUptime = ProcessInfo.processInfo.systemUptime
+        // A new recording owns a new identity even when it extends one draft.
+        // Close the preceding segment before resetting its outcome guard.
+        if sessionId > 0 {
+            emitSessionEndIfNeeded(sessionID: sessionId, reason: "append")
+        }
         sessionId += 1
         let id = sessionId
         transcribedParts = []
@@ -985,13 +993,25 @@ public final class SessionController {
             nextState = .idle
         }
         transition(to: nextState, reason: reason)
+        if !panel.isShowingInteractive {
+            let terminalReason = reason == "worker_finished"
+                && transcribedParts.isEmpty
+                && lastTranscriptionError == nil
+                ? "no_speech"
+                : reason
+            emitSessionEndIfNeeded(sessionID: id, reason: terminalReason)
+        }
         RuntimeTelemetry.emitRuntimeEvent("session_worker_complete", fields: [
             "session_id": id,
             "reason": reason
         ])
         var processFields: [String: Any] = [
             "session_id": id,
-            "completed_sessions": completedSessions
+            "completed_sessions": completedSessions,
+            "stt_backend": activeSessionRuntimeDescriptor.transcriber.backend,
+            "stt_model": activeSessionRuntimeDescriptor.transcriber.modelID,
+            "ai_backend": activeSessionRuntimeDescriptor.aiEditor.backend,
+            "ai_model": activeSessionRuntimeDescriptor.aiEditor.modelID ?? "none",
         ]
         for (key, value) in RuntimeTelemetry.collectProcessMetrics() {
             if let value { processFields[key] = value }
@@ -1181,12 +1201,17 @@ public final class SessionController {
             log("Ignoring duplicate popup outcome for session \(sessionId).")
             return false
         }
-        completedOutcomeSessionId = sessionId
+        emitSessionEndIfNeeded(sessionID: sessionId, reason: reason)
+        return true
+    }
+
+    private func emitSessionEndIfNeeded(sessionID: Int, reason: String) {
+        guard completedOutcomeSessionId != sessionID else { return }
+        completedOutcomeSessionId = sessionID
         RuntimeTelemetry.emitRuntimeEvent(
             "session_end",
-            fields: ["session_id": sessionId, "reason": reason]
+            fields: ["session_id": sessionID, "reason": reason]
         )
-        return true
     }
 
     @discardableResult
@@ -1226,7 +1251,7 @@ public final class SessionController {
                 return .alreadyExists
             }
             config = dictionaryCoordinator.snapshot
-            log("Added term to dictionary via coordinator: \(term) -> \(lang)")
+            log("Added manual dictionary term via coordinator (language=\(lang), length=\(term.count)).")
             let langName = LanguageCode.displayNames[lang] ?? lang.uppercased()
             return .added(message: "„\(term)“ → \(langName)")
         }
@@ -1235,7 +1260,7 @@ public final class SessionController {
         }
         config.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: config.raw))
         onConfigChanged(config)
-        log("Added term to dictionary via popup: \(term) -> \(lang)")
+        log("Added manual dictionary term via popup (language=\(lang), length=\(term.count)).")
 
         let langName = LanguageCode.displayNames[lang] ?? lang.uppercased()
         return .added(message: "„\(term)“ → \(langName)")

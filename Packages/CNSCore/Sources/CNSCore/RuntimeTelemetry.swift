@@ -1,9 +1,108 @@
 import Foundation
 
+public protocol RuntimeTelemetrySink: Sendable {
+    func emit(event: String, fields: [String: Any])
+    func drain() async
+}
+
+public final class FileRuntimeTelemetrySink: RuntimeTelemetrySink, @unchecked Sendable {
+    private let logger: FileLogger
+    private let writes = RuntimeTelemetryWriteQueue()
+
+    public init(logger: FileLogger) {
+        self.logger = logger
+    }
+
+    public func emit(event: String, fields: [String: Any]) {
+        var payload = fields
+        payload["event"] = event
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else {
+            return
+        }
+        writes.enqueue { [logger] in
+            await logger.runtimeEvent(json)
+        }
+    }
+
+    public func drain() async {
+        await writes.drain()
+    }
+}
+
+public final class InMemoryRuntimeTelemetrySink: RuntimeTelemetrySink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedJSON: [String] = []
+
+    public init() {}
+
+    public func emit(event: String, fields: [String: Any]) {
+        var payload = fields
+        payload["event"] = event
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else {
+            return
+        }
+        lock.withLock { storedJSON.append(json) }
+    }
+
+    public func drain() async {}
+
+    public var jsonLines: [String] {
+        lock.withLock { storedJSON }
+    }
+}
+
+private final class DiscardRuntimeTelemetrySink: RuntimeTelemetrySink, Sendable {
+    func emit(event: String, fields: [String: Any]) {}
+    func drain() async {}
+}
+
+private final class RuntimeTelemetryWriteQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tail: Task<Void, Never>?
+
+    func enqueue(_ operation: @escaping @Sendable () async -> Void) {
+        lock.withLock {
+            let previous = tail
+            tail = Task {
+                await previous?.value
+                await operation()
+            }
+        }
+    }
+
+    func drain() async {
+        let pending = lock.withLock { tail }
+        await pending?.value
+    }
+}
+
+private final class RuntimeTelemetryState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sink: any RuntimeTelemetrySink = DiscardRuntimeTelemetrySink()
+    private var runID = UUID()
+
+    func configure(sink: any RuntimeTelemetrySink, runID: UUID) {
+        lock.withLock {
+            self.sink = sink
+            self.runID = runID
+        }
+    }
+
+    func snapshot() -> (sink: any RuntimeTelemetrySink, runID: UUID) {
+        lock.withLock { (sink, runID) }
+    }
+}
+
 public enum RuntimeTelemetry {
     private static let sensitiveFieldParts: Set<String> = [
         "text", "transcript", "prompt", "clipboard", "audio"
     ]
+    private static let sensitiveFieldNames: Set<String> = ["key", "secret"]
+    private static let state = RuntimeTelemetryState()
 
     public struct AudioChunk: Sendable {
         public let sessionId: Int
@@ -23,36 +122,61 @@ public enum RuntimeTelemetry {
         }
     }
 
-    public static func emitRuntimeEvent(_ event: String, fields: [String: Any]) {
-        guard fieldsArePrivacySafe(fields.keys) else {
-            print("ERROR: Sensitive runtime telemetry field is forbidden")
-            return
-        }
+    public static func configure(
+        sink: any RuntimeTelemetrySink,
+        runID: UUID = UUID()
+    ) {
+        state.configure(sink: sink, runID: runID)
+    }
 
+    public static func emitRuntimeEvent(_ event: String, fields: [String: Any]) {
+        guard fieldsArePrivacySafe(fields) else { return }
+
+        let configured = state.snapshot()
         var payload: [String: Any] = [
-            "event": event,
-            "monotonic": round(ProcessInfo.processInfo.systemUptime * 1000000) / 1000000
+            "run_id": configured.runID.uuidString,
+            "monotonic": round(ProcessInfo.processInfo.systemUptime * 1_000_000) / 1_000_000,
+            "wall_clock": Date().timeIntervalSince1970,
         ]
 
         for (k, v) in fields {
             payload[k] = v
         }
+        configured.sink.emit(event: event, fields: payload)
+    }
 
-        do {
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-            if let jsonString = String(data: data, encoding: .utf8) {
-                print("runtime_event \(jsonString)")
-            }
-        } catch {
-            print("ERROR: Failed to encode telemetry event: \(error)")
-        }
+    public static func drain() async {
+        await state.snapshot().sink.drain()
+    }
+
+    public static func fieldsArePrivacySafe(_ fields: [String: Any]) -> Bool {
+        privacySafeDictionary(fields)
     }
 
     static func fieldsArePrivacySafe<S: Sequence>(_ keys: S) -> Bool where S.Element == String {
         keys.allSatisfy { key in
             let lowered = key.lowercased()
-            return sensitiveFieldParts.allSatisfy { !lowered.contains($0) }
+            return !sensitiveFieldNames.contains(lowered)
+                && !lowered.hasSuffix("_key")
+                && !lowered.hasSuffix("_secret")
+                && sensitiveFieldParts.allSatisfy { !lowered.contains($0) }
         }
+    }
+
+    private static func privacySafeDictionary(_ fields: [String: Any]) -> Bool {
+        fields.allSatisfy { key, value in
+            fieldsArePrivacySafe(CollectionOfOne(key)) && privacySafeValue(value)
+        }
+    }
+
+    private static func privacySafeValue(_ value: Any) -> Bool {
+        if let dictionary = value as? [String: Any] {
+            return privacySafeDictionary(dictionary)
+        }
+        if let array = value as? [Any] {
+            return array.allSatisfy(privacySafeValue)
+        }
+        return true
     }
 
     public static func collectProcessMetrics(childPid: Int32? = nil) -> [String: Double?] {
