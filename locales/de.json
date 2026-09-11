@@ -405,6 +405,8 @@
   "dialog.file_copy": "In die Zwischenablage kopieren",
   "dialog.file_unsupported": "Wähle eine unterstützte Audio- oder Videodatei.",
   "dialog.file_cancelled": "Dateitranskription wurde abgebrochen.",
+  "dialog.file_cancelling": "Dateitranskription wird abgebrochen...",
+  "dialog.file_busy": "Warten Sie, bis der Abbruch der aktuellen Dateitranskription abgeschlossen ist.",
   "dialog.file_runtime_unavailable": "Der Transkriptionsdienst ist nicht verfügbar.",
   "dialog.file_error_accessibility": "Fehler bei der Dateitranskription",
   "dialog.file_stage_preparing": "Datei wird vorbereitet...",

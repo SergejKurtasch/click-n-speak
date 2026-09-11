@@ -389,7 +389,11 @@ final class CloudSTTTranscriberTests: XCTestCase {
     }
 
     func testSegmentedFileCancellationStopsCurrentRequestAndPreservesInput() async throws {
-        let file = ScriptedHTTPClient([.waitForCancellation])
+        let first = try json(["text": "first completed segment", "language": "en"])
+        let file = ScriptedHTTPClient([
+            .response(200, first),
+            .waitForCancellation,
+        ])
         let transcriber = makeTranscriber(
             .openai,
             realtime: ScriptedHTTPClient([]),
@@ -397,16 +401,21 @@ final class CloudSTTTranscriberTests: XCTestCase {
             maxInlineFileBytes: 1
         )
         let original = CloudSTTTranscriber.makeWAVData(
-            from: [Float](repeating: 0.05, count: 16_000)
+            from: [Float](repeating: 0.05, count: 16_000 * 61)
         )
         let url = try temporaryFile(extension: "wav", data: original)
         let task = Task { await transcriber.transcribeFile(.init(url: url)) { _ in } }
-        while await file.requestCount == 0 { await Task.yield() }
+        while await file.requestCount < 2 { await Task.yield() }
 
         task.cancel()
         let result = await task.value
 
         XCTAssertEqual(result.status, .cancelled)
+        XCTAssertEqual(result.text, "first completed segment")
+        XCTAssertEqual(result.detectedLanguage, "en")
+        XCTAssertEqual(result.backend, "openai")
+        XCTAssertEqual(result.modelID, "fixture-model")
+        XCTAssertEqual(result.segmentCount, 1)
         XCTAssertEqual(try Data(contentsOf: url), original)
     }
 

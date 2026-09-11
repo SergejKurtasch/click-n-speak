@@ -405,6 +405,8 @@
   "dialog.file_copy": "Copiar al portapapeles",
   "dialog.file_unsupported": "Elige un archivo de audio o vídeo compatible.",
   "dialog.file_cancelled": "Se canceló la transcripción del archivo.",
+  "dialog.file_cancelling": "Cancelando la transcripción del archivo...",
+  "dialog.file_busy": "Espera a que termine la cancelación de la transcripción actual.",
   "dialog.file_runtime_unavailable": "El servicio de transcripción no está disponible.",
   "dialog.file_error_accessibility": "Error de transcripción de archivo",
   "dialog.file_stage_preparing": "Preparando archivo...",

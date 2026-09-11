@@ -213,7 +213,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuCtrl.onTranscribeFileAction = { url, refine, progress in
             await session.transcribeFile(url: url, refine: refine, progress: progress)
         }
-        menuCtrl.onCancelFileTranscription = { session.cancelFileTranscription() }
 
         sessionRef.controller = session
         self.session = session

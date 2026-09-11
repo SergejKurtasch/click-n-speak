@@ -173,8 +173,7 @@ public actor CloudSTTTranscriber: Transcribing {
             return .failed(.init(kind: .fileDecode, message: "The audio track could not be decoded"))
         }
 
-        var parts: [String] = []
-        var language = ""
+        var transcript = FileTranscriptAccumulator(backend: backend.rawValue, modelID: modelName)
         var index = 0
         do {
             progress(.init(stage: .decoding, totalUnits: reader.estimatedSegmentCount))
@@ -192,20 +191,28 @@ public actor CloudSTTTranscriber: Transcribing {
                 )
                 switch response {
                 case let .success(payload, _):
-                    if !payload.text.isEmpty { parts.append(payload.text) }
-                    if !payload.detectedLanguage.isEmpty { language = payload.detectedLanguage }
+                    transcript.append(text: payload.text, detectedLanguage: payload.detectedLanguage)
                 case .failure(.aborted):
                     reader.cancel()
-                    return cancelledFileResult(segmentCount: index)
+                    return transcript.result(status: .cancelled, segmentCount: index)
                 case .failure(.timedOut):
                     reader.cancel()
-                    return .failed(.init(kind: .network, message: "Cloud file transcription timed out"))
+                    return transcript.result(
+                        status: .failed(.init(kind: .network, message: "Cloud file transcription timed out")),
+                        segmentCount: index
+                    )
                 case let .failure(.failed(failure)):
                     reader.cancel()
-                    return .failed(failure)
+                    return transcript.result(status: .failed(failure), segmentCount: index)
                 case let .failure(other):
                     reader.cancel()
-                    return .failed(.init(kind: .unknown, message: "Cloud file transcription failed: \(other.telemetryValue)"))
+                    return transcript.result(
+                        status: .failed(.init(
+                            kind: .unknown,
+                            message: "Cloud file transcription failed: \(other.telemetryValue)"
+                        )),
+                        segmentCount: index
+                    )
                 }
                 index += 1
                 progress(.init(stage: .transcribing, completedUnits: index, totalUnits: reader.estimatedSegmentCount))
@@ -213,22 +220,17 @@ public actor CloudSTTTranscriber: Transcribing {
         } catch is CancellationError {
             abortInFlight()
             reader.cancel()
-            return cancelledFileResult(segmentCount: index)
+            return transcript.result(status: .cancelled, segmentCount: index)
         } catch {
             reader.cancel()
-            return .failed(.init(kind: .fileDecode, message: "The media file could not be decoded"))
+            return transcript.result(
+                status: .failed(.init(kind: .fileDecode, message: "The media file could not be decoded")),
+                segmentCount: index
+            )
         }
 
-        let text = FileTranscriptAssembler.join(parts)
         progress(.init(stage: .completed, completedUnits: index, totalUnits: index))
-        return FileTranscriptionResult(
-            text: text,
-            detectedLanguage: language,
-            backend: backend.rawValue,
-            modelID: modelName,
-            status: text.isEmpty ? .noSpeech : .success,
-            segmentCount: index
-        )
+        return transcript.completed(segmentCount: index)
     }
 
     private func requestPayload(

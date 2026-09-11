@@ -407,6 +407,8 @@
   "dialog.file_copy": "Скопіювати",
   "dialog.file_unsupported": "Виберіть підтримуваний аудіо- або відеофайл.",
   "dialog.file_cancelled": "Розшифровку файлу скасовано.",
+  "dialog.file_cancelling": "Скасування розшифрування файлу...",
+  "dialog.file_busy": "Дочекайтеся завершення скасування поточного розшифрування.",
   "dialog.file_runtime_unavailable": "Сервіс розпізнавання недоступний.",
   "dialog.file_error_accessibility": "Помилка розшифровки файлу",
   "dialog.file_stage_preparing": "Підготовка файлу...",

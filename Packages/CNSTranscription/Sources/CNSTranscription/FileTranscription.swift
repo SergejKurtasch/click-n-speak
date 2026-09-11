@@ -197,6 +197,44 @@ public struct FileTranscriptionResult: Sendable, Equatable {
     }
 }
 
+struct FileTranscriptAccumulator {
+    let backend: String
+    let modelID: String
+    private(set) var parts: [String] = []
+    private(set) var detectedLanguage = ""
+
+    mutating func append(text: String, detectedLanguage: String) {
+        if !text.isEmpty { parts.append(text) }
+        if !detectedLanguage.isEmpty { self.detectedLanguage = detectedLanguage }
+    }
+
+    func result(
+        status: FileTranscriptionStatus,
+        segmentCount: Int
+    ) -> FileTranscriptionResult {
+        FileTranscriptionResult(
+            text: FileTranscriptAssembler.join(parts),
+            detectedLanguage: detectedLanguage,
+            backend: backend,
+            modelID: modelID,
+            status: status,
+            segmentCount: segmentCount
+        )
+    }
+
+    func completed(segmentCount: Int) -> FileTranscriptionResult {
+        let text = FileTranscriptAssembler.join(parts)
+        return FileTranscriptionResult(
+            text: text,
+            detectedLanguage: detectedLanguage,
+            backend: backend,
+            modelID: modelID,
+            status: text.isEmpty ? .noSpeech : .success,
+            segmentCount: segmentCount
+        )
+    }
+}
+
 public struct FileTranscriptionError: LocalizedError, Sendable {
     public let failure: TranscriptionFailure
     public var errorDescription: String? { failure.message }

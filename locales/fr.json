@@ -405,6 +405,8 @@
   "dialog.file_copy": "Copier dans le presse-papiers",
   "dialog.file_unsupported": "Choisissez un fichier audio ou vidéo pris en charge.",
   "dialog.file_cancelled": "La transcription du fichier a été annulée.",
+  "dialog.file_cancelling": "Annulation de la transcription du fichier...",
+  "dialog.file_busy": "Attendez la fin de l’annulation de la transcription en cours.",
   "dialog.file_runtime_unavailable": "Le service de transcription est indisponible.",
   "dialog.file_error_accessibility": "Erreur de transcription du fichier",
   "dialog.file_stage_preparing": "Préparation du fichier...",

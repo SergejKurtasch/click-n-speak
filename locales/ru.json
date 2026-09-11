@@ -407,6 +407,8 @@
   "dialog.file_copy": "Скопировать",
   "dialog.file_unsupported": "Выберите поддерживаемый аудио- или видеофайл.",
   "dialog.file_cancelled": "Расшифровка файла отменена.",
+  "dialog.file_cancelling": "Отмена расшифровки файла...",
+  "dialog.file_busy": "Дождитесь завершения отмены текущей расшифровки.",
   "dialog.file_runtime_unavailable": "Сервис распознавания недоступен.",
   "dialog.file_error_accessibility": "Ошибка расшифровки файла",
   "dialog.file_stage_preparing": "Подготовка файла...",

@@ -327,7 +327,8 @@ actor FakeTranscriber: Transcribing {
 actor SuspendingFileTranscriber: Transcribing {
     private(set) var fileRequestCount = 0
     private(set) var fileRequests: [FileTranscriptionRequest] = []
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var progressCallbacks: [@Sendable (FileTranscriptionProgress) -> Void] = []
 
     func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
         .empty
@@ -339,7 +340,8 @@ actor SuspendingFileTranscriber: Transcribing {
     ) async -> FileTranscriptionResult {
         fileRequestCount += 1
         fileRequests.append(request)
-        await withCheckedContinuation { continuation = $0 }
+        progressCallbacks.append(progress)
+        await withCheckedContinuation { continuations.append($0) }
         return FileTranscriptionResult(text: "file text", status: .success)
     }
 
@@ -348,8 +350,61 @@ actor SuspendingFileTranscriber: Transcribing {
     }
 
     func finish() {
-        continuation?.resume()
-        continuation = nil
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume()
+    }
+
+    func emitProgress(_ update: FileTranscriptionProgress, call index: Int) {
+        progressCallbacks[index](update)
+    }
+}
+
+actor SuspendingFileAiEditor: AiEditing {
+    nonisolated let isReady = true
+    private(set) var cancellationCount = 0
+    private var started = false
+
+    func refine(
+        text: String,
+        languages: [String]?,
+        knownTerms: [String]?,
+        misrecognitions: [(String, String)]?
+    ) async -> RefineResult {
+        RefineResult(text: text, status: .unchanged)
+    }
+
+    func refineFileText(
+        text: String,
+        languages: [String]?,
+        knownTerms: [String]?,
+        misrecognitions: [(String, String)]?
+    ) async -> RefineResult {
+        started = true
+        do {
+            try await Task.sleep(for: .seconds(30))
+            return RefineResult(text: "late refined text", status: .ok)
+        } catch is CancellationError {
+            cancellationCount += 1
+            return RefineResult(text: text, status: .skipped)
+        } catch {
+            return RefineResult(text: text, status: .error)
+        }
+    }
+
+    func waitUntilStarted() async {
+        while !started { await Task.yield() }
+    }
+}
+
+actor FileProgressRecorder {
+    private(set) var updates: [FileTranscriptionProgress] = []
+
+    func append(_ update: FileTranscriptionProgress) {
+        updates.append(update)
+    }
+
+    func waitForCount(_ count: Int) async {
+        while updates.count < count { await Task.yield() }
     }
 }
 

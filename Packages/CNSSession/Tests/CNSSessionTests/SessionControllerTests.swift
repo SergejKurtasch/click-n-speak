@@ -709,6 +709,82 @@ struct SessionControllerTests {
         await controller.shutdown()
     }
 
+    @Test("Cancelling during file refinement reaches the editor and preserves decoded text")
+    func cancellingFileRefinementPreservesDecodedText() async {
+        let transcriber = SuspendingFileTranscriber()
+        let editor = SuspendingFileAiEditor()
+        var config = Self.makeConfig()
+        config.raw["ai_editor_enabled"] = .bool(true)
+        let controller = SessionController(
+            config: config,
+            transcriber: transcriber,
+            aiEditor: editor,
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+        let job = Task {
+            await controller.transcribeFile(
+                url: URL(fileURLWithPath: "refining.wav"),
+                refine: true
+            )
+        }
+        await transcriber.waitUntilStarted()
+        await transcriber.finish()
+        await editor.waitUntilStarted()
+
+        job.cancel()
+        let result = await job.value
+
+        #expect(result.status == .cancelled)
+        #expect(result.text == "file text")
+        #expect(await editor.cancellationCount == 1)
+        #expect(controller.state == .idle)
+        await controller.shutdown()
+    }
+
+    @Test("Provider completion stays intermediate until optional file refinement finishes")
+    func fileProgressCompletesAfterRefinement() async {
+        let transcriber = SuspendingFileTranscriber()
+        let editor = FakeAiEditor()
+        let progress = FileProgressRecorder()
+        var config = Self.makeConfig()
+        config.raw["ai_editor_enabled"] = .bool(true)
+        let controller = SessionController(
+            config: config,
+            transcriber: transcriber,
+            aiEditor: editor,
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+        let job = Task {
+            await controller.transcribeFile(
+                url: URL(fileURLWithPath: "progress.wav"),
+                refine: true
+            ) { update in
+                Task { await progress.append(update) }
+            }
+        }
+        await transcriber.waitUntilStarted()
+
+        await transcriber.emitProgress(
+            .init(stage: .completed, completedUnits: 1, totalUnits: 1),
+            call: 0
+        )
+        await settle()
+        #expect(await progress.updates.allSatisfy { $0.stage != .completed })
+
+        await transcriber.finish()
+        _ = await job.value
+        await progress.waitForCount(2)
+        let stages = await progress.updates.map(\.stage)
+        #expect(stages == [.refining, .completed])
+        await controller.shutdown()
+    }
+
     @Test("A file job keeps its starting prompt and languages across config changes")
     func fileJobUsesConfigurationSnapshot() async {
         let transcriber = SuspendingFileTranscriber()

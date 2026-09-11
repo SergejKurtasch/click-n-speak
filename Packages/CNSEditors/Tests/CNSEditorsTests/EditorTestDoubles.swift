@@ -14,11 +14,13 @@ actor ScriptedLocalGenerator: LocalTextGenerating {
         case output(String)
         case failure
         case delayed(String, TimeInterval)
+        case waitForCancellation
     }
 
     private var behaviors: [Behavior]
     private(set) var callCount = 0
     private(set) var stopCount = 0
+    private(set) var cancellationCount = 0
     private(set) var prompts: [String] = []
 
     init(_ behaviors: [Behavior]) { self.behaviors = behaviors }
@@ -40,6 +42,14 @@ actor ScriptedLocalGenerator: LocalTextGenerating {
                     continuation.resume(returning: output)
                 }
             }
+        case .waitForCancellation:
+            do {
+                try await Task.sleep(for: .seconds(30))
+                return text
+            } catch is CancellationError {
+                cancellationCount += 1
+                throw CancellationError()
+            }
         }
     }
 
@@ -50,17 +60,25 @@ final class ScriptedEditorHTTPClient: EditorHTTPClient, @unchecked Sendable {
     private let lock = NSLock()
     private var responses: [EditorHTTPResponse]
     private let delay: TimeInterval
+    private let waitForCancellation: Bool
     private var requestsStorage: [URLRequest] = []
     private var stopCountStorage = 0
+    private var cancellationCountStorage = 0
 
-    init(responses: [EditorHTTPResponse], delay: TimeInterval = 0) {
+    init(
+        responses: [EditorHTTPResponse],
+        delay: TimeInterval = 0,
+        waitForCancellation: Bool = false
+    ) {
         self.responses = responses
         self.delay = delay
+        self.waitForCancellation = waitForCancellation
     }
 
     var requests: [URLRequest] { lock.withLock { requestsStorage } }
     var callCount: Int { lock.withLock { requestsStorage.count } }
     var stopCount: Int { lock.withLock { stopCountStorage } }
+    var cancellationCount: Int { lock.withLock { cancellationCountStorage } }
 
     func send(_ request: URLRequest) async throws -> EditorHTTPResponse {
         let response = lock.withLock { () -> EditorHTTPResponse in
@@ -68,6 +86,14 @@ final class ScriptedEditorHTTPClient: EditorHTTPClient, @unchecked Sendable {
             return responses.isEmpty
                 ? EditorHTTPResponse.success(text: "unchanged")
                 : responses.removeFirst()
+        }
+        if waitForCancellation {
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch is CancellationError {
+                lock.withLock { cancellationCountStorage += 1 }
+                throw CancellationError()
+            }
         }
         guard delay > 0 else { return response }
         return await withCheckedContinuation { continuation in

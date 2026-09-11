@@ -11,10 +11,21 @@ public typealias FileTranscriptionAction = (
 ) async -> FileTranscriptionResult
 
 @MainActor
-public final class FileDropPanel: NSWindow, RefreshablePanel {
-    private let i18n: I18n
+public final class FileTranscriptionViewModel: ObservableObject {
+    public let i18n: I18n
+
+    @Published public var transcriptionResult = ""
+    @Published public var refine = false
+    @Published public private(set) var isProcessing = false
+    @Published public private(set) var isCancelling = false
+    @Published public private(set) var errorMessage: String?
+    @Published public private(set) var successMessage: String?
+    @Published public private(set) var progress = FileTranscriptionProgress(stage: .preparing)
+    public private(set) var jobID: UUID?
+
     private let onTranscribe: FileTranscriptionAction
     private let onCancel: () -> Void
+    private var activeTask: Task<Void, Never>?
 
     public init(
         i18n: I18n,
@@ -24,6 +35,106 @@ public final class FileDropPanel: NSWindow, RefreshablePanel {
         self.i18n = i18n
         self.onTranscribe = onTranscribe
         self.onCancel = onCancel
+    }
+
+    @discardableResult
+    public func start(_ url: URL) -> Bool {
+        guard activeTask == nil, jobID == nil else {
+            errorMessage = i18n.t("dialog.file_busy")
+            return false
+        }
+        guard MediaFormatCapabilities.supports(url) else {
+            errorMessage = i18n.t("dialog.file_unsupported")
+            return false
+        }
+
+        let currentID = UUID()
+        let shouldRefine = refine
+        jobID = currentID
+        isProcessing = true
+        isCancelling = false
+        errorMessage = nil
+        successMessage = nil
+        transcriptionResult = ""
+        progress = .init(stage: .preparing)
+
+        activeTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await onTranscribe(url, shouldRefine) { [weak self] update in
+                Task { @MainActor [weak self] in
+                    self?.receiveProgress(update, jobID: currentID)
+                }
+            }
+            receiveResult(result, jobID: currentID)
+        }
+        return true
+    }
+
+    public func cancel() {
+        guard isProcessing, !isCancelling, activeTask != nil else { return }
+        isCancelling = true
+        errorMessage = nil
+        activeTask?.cancel()
+        onCancel()
+    }
+
+    func receiveProgress(_ update: FileTranscriptionProgress, jobID callbackID: UUID) {
+        guard callbackID == jobID, isProcessing, !isCancelling else { return }
+        // A provider may finish STT before optional refinement. The terminal
+        // result, not an intermediate provider callback, completes the UI job.
+        guard update.stage != .completed else { return }
+        if progress.stage == .refining, update.stage != .refining { return }
+        progress = update
+    }
+
+    func receiveResult(_ result: FileTranscriptionResult, jobID callbackID: UUID) {
+        guard callbackID == jobID else { return }
+        var result = result
+        if isCancelling { result.status = .cancelled }
+        if !result.text.isEmpty { transcriptionResult = result.text }
+
+        switch result.status {
+        case .success:
+            progress = .init(stage: .completed, completedUnits: 1, totalUnits: 1)
+        case .noSpeech:
+            errorMessage = i18n.t("notify.file_no_speech_body")
+        case .cancelled:
+            errorMessage = i18n.t("dialog.file_cancelled")
+        case let .failed(failure):
+            errorMessage = UIErrorLocalization.transcription(failure, i18n: i18n)
+        }
+        isProcessing = false
+        isCancelling = false
+        activeTask = nil
+        jobID = nil
+    }
+
+    func recordSaveSuccess() {
+        successMessage = i18n.t("dialog.file_save_success")
+        errorMessage = nil
+    }
+
+    func recordSaveFailure() {
+        successMessage = nil
+        errorMessage = i18n.t("ui.error_persistence")
+    }
+}
+
+@MainActor
+public final class FileDropPanel: NSWindow, RefreshablePanel {
+    private let viewModel: FileTranscriptionViewModel
+
+    public init(
+        i18n: I18n,
+        onTranscribe: @escaping FileTranscriptionAction,
+        onCancel: @escaping () -> Void = {}
+    ) {
+        let viewModel = FileTranscriptionViewModel(
+            i18n: i18n,
+            onTranscribe: onTranscribe,
+            onCancel: onCancel
+        )
+        self.viewModel = viewModel
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 500, height: 440),
             styleMask: [.titled, .closable, .resizable],
@@ -33,57 +144,45 @@ public final class FileDropPanel: NSWindow, RefreshablePanel {
         title = i18n.t("dialog.file_drop_title")
         minSize = NSSize(width: 440, height: 360)
         isReleasedWhenClosed = false
-        refreshForPresentation()
+        contentViewController = NSHostingController(rootView: FileDropView(viewModel: viewModel))
         center()
     }
 
-    public func refreshForPresentation() {
-        contentViewController = NSHostingController(rootView: FileDropView(
-            i18n: i18n,
-            onTranscribe: onTranscribe,
-            onCancel: onCancel
-        ))
-    }
+    public func refreshForPresentation() {}
 
+    var viewModelForTesting: FileTranscriptionViewModel { viewModel }
 }
 
 struct FileDropView: View {
-    let i18n: I18n
-    let onTranscribe: FileTranscriptionAction
-    let onCancel: () -> Void
+    @ObservedObject var viewModel: FileTranscriptionViewModel
 
     @State private var isTargeted = false
-    @State private var transcriptionResult = ""
-    @State private var isProcessing = false
-    @State private var errorMessage: String?
-    @State private var successMessage: String?
-    @State private var progress = FileTranscriptionProgress(stage: .preparing)
-    @State private var activeTask: Task<Void, Never>?
-    @State private var refine = false
+
+    private var i18n: I18n { viewModel.i18n }
 
     var body: some View {
         VStack(spacing: 14) {
-            if isProcessing {
+            if viewModel.isProcessing {
                 processingView
             } else {
                 dropTarget
             }
 
-            Toggle(i18n.t("dialog.file_refine"), isOn: $refine)
-                .disabled(isProcessing)
+            Toggle(i18n.t("dialog.file_refine"), isOn: $viewModel.refine)
+                .disabled(viewModel.isProcessing)
 
-            if !transcriptionResult.isEmpty {
+            if !viewModel.transcriptionResult.isEmpty {
                 resultView
             }
 
-            if let errorMessage {
+            if let errorMessage = viewModel.errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                     .font(.callout)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel(i18n.t("dialog.file_error_accessibility"))
             }
-            if let successMessage {
+            if let successMessage = viewModel.successMessage {
                 Label(successMessage, systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.callout)
@@ -92,22 +191,22 @@ struct FileDropView: View {
         }
         .padding(20)
         .frame(minWidth: 440, minHeight: 360)
-        .onDisappear { cancel() }
     }
 
     private var processingView: some View {
         VStack(spacing: 12) {
             ProgressView(value: progressFraction)
                 .progressViewStyle(.linear)
-            Text(stageLabel)
+            Text(viewModel.isCancelling ? i18n.t("dialog.file_cancelling") : stageLabel)
                 .font(.headline)
-            if let total = progress.totalUnits, total > 0 {
-                Text("\(min(progress.completedUnits, total)) / \(total)")
+            if let total = viewModel.progress.totalUnits, total > 0 {
+                Text("\(min(viewModel.progress.completedUnits, total)) / \(total)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            Button(i18n.t("btn.cancel"), role: .cancel) { cancel() }
+            Button(i18n.t("btn.cancel"), role: .cancel) { viewModel.cancel() }
                 .keyboardShortcut(.cancelAction)
+                .disabled(viewModel.isCancelling)
                 .accessibilityIdentifier("file-transcription.cancel")
         }
         .frame(maxWidth: .infinity, minHeight: 150)
@@ -142,7 +241,7 @@ struct FileDropView: View {
             guard let provider = providers.first else { return false }
             provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
                 guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-                Task { @MainActor in start(url) }
+                Task { @MainActor in viewModel.start(url) }
             }
             return true
         }
@@ -152,7 +251,7 @@ struct FileDropView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(i18n.t("dialog.file_result"))
                 .font(.headline)
-            TextEditor(text: $transcriptionResult)
+            TextEditor(text: $viewModel.transcriptionResult)
                 .font(.body)
                 .frame(minHeight: 120)
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
@@ -161,7 +260,7 @@ struct FileDropView: View {
                 Button(i18n.t("dialog.file_copy")) {
                     let pasteboard = NSPasteboard.general
                     pasteboard.clearContents()
-                    pasteboard.setString(transcriptionResult, forType: .string)
+                    pasteboard.setString(viewModel.transcriptionResult, forType: .string)
                 }
                 .accessibilityIdentifier("file-transcription.copy")
                 Button(i18n.t("dialog.file_save")) { saveResult() }
@@ -171,12 +270,12 @@ struct FileDropView: View {
     }
 
     private var progressFraction: Double? {
-        guard let total = progress.totalUnits, total > 0 else { return nil }
-        return min(1, Double(progress.completedUnits) / Double(total))
+        guard let total = viewModel.progress.totalUnits, total > 0 else { return nil }
+        return min(1, Double(viewModel.progress.completedUnits) / Double(total))
     }
 
     private var stageLabel: String {
-        i18n.t("dialog.file_stage_\(progress.stage.rawValue)")
+        i18n.t("dialog.file_stage_\(viewModel.progress.stage.rawValue)")
     }
 
     private func browse() {
@@ -188,50 +287,7 @@ struct FileDropView: View {
             UTType(filenameExtension: $0)
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        start(url)
-    }
-
-    private func start(_ url: URL) {
-        guard Self.isSupported(url) else {
-            errorMessage = i18n.t("dialog.file_unsupported")
-            return
-        }
-        activeTask?.cancel()
-        isProcessing = true
-        errorMessage = nil
-        successMessage = nil
-        transcriptionResult = ""
-        progress = .init(stage: .preparing)
-        activeTask = Task {
-            let result = await onTranscribe(url, refine) { update in
-                Task { @MainActor in progress = update }
-            }
-            guard !Task.isCancelled else {
-                isProcessing = false
-                return
-            }
-            switch result.status {
-            case .success:
-                transcriptionResult = result.text
-            case .noSpeech:
-                errorMessage = i18n.t("notify.file_no_speech_body")
-            case .cancelled:
-                errorMessage = i18n.t("dialog.file_cancelled")
-            case let .failed(failure):
-                errorMessage = UIErrorLocalization.transcription(failure, i18n: i18n)
-            }
-            isProcessing = false
-            activeTask = nil
-        }
-    }
-
-    private func cancel() {
-        guard isProcessing else { return }
-        activeTask?.cancel()
-        activeTask = nil
-        onCancel()
-        isProcessing = false
-        errorMessage = i18n.t("dialog.file_cancelled")
+        _ = viewModel.start(url)
     }
 
     private func saveResult() {
@@ -240,12 +296,10 @@ struct FileDropView: View {
         panel.nameFieldStringValue = i18n.t("dialog.file_default_name")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try transcriptionResult.write(to: url, atomically: true, encoding: .utf8)
-            successMessage = i18n.t("dialog.file_save_success")
-            errorMessage = nil
+            try viewModel.transcriptionResult.write(to: url, atomically: true, encoding: .utf8)
+            viewModel.recordSaveSuccess()
         } catch {
-            successMessage = nil
-            errorMessage = i18n.t("ui.error_persistence")
+            viewModel.recordSaveFailure()
         }
     }
 

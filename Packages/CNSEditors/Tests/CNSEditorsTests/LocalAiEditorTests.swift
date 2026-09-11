@@ -187,4 +187,29 @@ struct LocalAiEditorTests {
         #expect(prompts.first?.contains("Fix punctuation and capitalisation") == true)
         try? FileManager.default.removeItem(at: directory)
     }
+
+    @Test("Cancelling active file refinement reaches the local generator")
+    func activeFileCancellationReachesGenerator() async throws {
+        let generator = ScriptedLocalGenerator([.waitForCancellation])
+        let (editor, directory) = try makeEditor(generator: generator)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await editor.prepare()
+        let task = Task {
+            await editor.refineFileText(
+                text: longEditorInput,
+                languages: ["en"],
+                knownTerms: nil,
+                misrecognitions: nil
+            )
+        }
+        while await generator.callCount == 0 { await Task.yield() }
+
+        task.cancel()
+        let result = await task.value
+        while await generator.cancellationCount == 0 { await Task.yield() }
+
+        #expect(result.text == longEditorInput)
+        #expect(result.status == .timeout)
+        #expect(await generator.cancellationCount == 1)
+    }
 }

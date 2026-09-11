@@ -150,7 +150,8 @@ public final class SessionController {
     private var activeSessionRuntimeDescriptor: RuntimeDescriptor = .unavailable
     private var activeSessionPromptHash = ""
     private var lastTranscriptionError: String?
-    private var fileJobActive = false
+    private var fileJobID: UUID?
+    private var fileJobActive: Bool { fileJobID != nil }
     private var stopRequestedUptime: TimeInterval?
 
     private var chunkContinuation: AsyncStream<SessionChunk>.Continuation?
@@ -1386,14 +1387,17 @@ public final class SessionController {
         }
         let fileConfig = config
         let fileRuntime = runtimeDescriptorProvider()
-        fileJobActive = true
+        let currentID = UUID()
+        fileJobID = currentID
         transition(to: .fileProcessing, reason: "file_transcription_start")
         defer {
-            fileTask = nil
-            fileJobActive = false
-            if state == .fileProcessing {
-                transition(to: .idle, reason: "file_transcription_finished")
-                runDeferredReloadIfIdle()
+            if fileJobID == currentID {
+                fileTask = nil
+                fileJobID = nil
+                if state == .fileProcessing {
+                    transition(to: .idle, reason: "file_transcription_finished")
+                    runDeferredReloadIfIdle()
+                }
             }
         }
         let task = Task { [weak self] in
@@ -1405,6 +1409,7 @@ public final class SessionController {
                 refine: refine,
                 config: fileConfig,
                 runtime: fileRuntime,
+                jobID: currentID,
                 progress: progress
             )
         }
@@ -1422,6 +1427,7 @@ public final class SessionController {
         refine: Bool,
         config fileConfig: Config,
         runtime fileRuntime: RuntimeDescriptor,
+        jobID: UUID,
         progress: @escaping @Sendable (FileTranscriptionProgress) -> Void
     ) async -> FileTranscriptionResult {
         let request = FileTranscriptionRequest(
@@ -1430,15 +1436,27 @@ public final class SessionController {
             allowedLanguages: allowedLanguages(for: fileConfig),
             refine: refine
         )
-        var result = await transcriber.transcribeFile(request, progress: progress)
-        guard !isShuttingDown, !Task.isCancelled else {
-            return FileTranscriptionResult(text: "", status: .cancelled)
+        let guardedProgress: @Sendable (FileTranscriptionProgress) -> Void = { [weak self] update in
+            Task { @MainActor [weak self] in
+                guard self?.fileJobID == jobID else { return }
+                if refine, update.stage == .completed { return }
+                progress(update)
+            }
+        }
+        var result = await transcriber.transcribeFile(request, progress: guardedProgress)
+        guard !isShuttingDown, !Task.isCancelled, fileJobID == jobID else {
+            result.status = .cancelled
+            return result
         }
         guard case .success = result.status else { return result }
 
         let languages = allowedLanguages(for: fileConfig)
         var refineStatus: RefineStatus?
         if refine, let aiEditor {
+            guard fileJobID == jobID else {
+                result.status = .cancelled
+                return result
+            }
             progress(.init(stage: .refining, completedUnits: 0, totalUnits: 1))
             let known = VocabProvider.collectKnownTerms(
                 config: .object(fileConfig.raw),
@@ -1455,8 +1473,9 @@ public final class SessionController {
                 knownTerms: known,
                 misrecognitions: misrecognitions
             )
-            guard !isShuttingDown, !Task.isCancelled else {
-                return FileTranscriptionResult(text: "", status: .cancelled)
+            guard !isShuttingDown, !Task.isCancelled, fileJobID == jobID else {
+                result.status = .cancelled
+                return result
             }
             refineStatus = refined.status
             if refined.status == .ok { result.text = refined.text }
@@ -1471,6 +1490,10 @@ public final class SessionController {
                 languages: languages.isEmpty ? nil : languages
             )
             result.text = VocabProvider.applyReplacements(result.text, pairs: pairs)
+        }
+        guard fileJobID == jobID else {
+            result.status = .cancelled
+            return result
         }
         progress(.init(stage: .completed, completedUnits: 1, totalUnits: 1))
         return result

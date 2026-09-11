@@ -33,7 +33,6 @@ public final class MenuBarController: NSObject {
         Bool,
         @escaping @Sendable (FileTranscriptionProgress) -> Void
     ) async -> FileTranscriptionResult)?
-    public var onCancelFileTranscription: (() -> Void)?
     public var onSetupRequested: (() -> Void)?
     public var onCredentialsChanged: ((String) -> Void)?
     public var onModelDownloadCompleted: ((String) -> Void)?
@@ -1305,7 +1304,7 @@ public final class MenuBarController: NSObject {
                     ))
                 }
                 return await action(url, refine, progress)
-            }, onCancel: { [weak self] in self?.onCancelFileTranscription?() })
+            })
         }
         fileDropPanel?.presentPanel()
     }

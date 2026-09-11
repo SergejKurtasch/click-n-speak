@@ -133,4 +133,36 @@ struct GeminiEditorTests {
         #expect(file.callCount == 1)
         #expect(file.requests.first?.timeoutInterval == 0.5)
     }
+
+    @Test("Cancelling active file refinement reaches the HTTP client")
+    func activeFileCancellationReachesHTTPClient() async {
+        let client = ScriptedEditorHTTPClient(
+            responses: [.success(text: longEditorInput + ".")],
+            waitForCancellation: true
+        )
+        let editor = GeminiEditor(
+            modelName: "gemini-test",
+            apiKey: "key",
+            realtimeClient: client,
+            fileClient: client,
+            fileTimeout: 5
+        )
+        let task = Task {
+            await editor.refineFileText(
+                text: longEditorInput,
+                languages: ["en"],
+                knownTerms: nil,
+                misrecognitions: nil
+            )
+        }
+        while client.callCount == 0 { await Task.yield() }
+
+        task.cancel()
+        let result = await task.value
+        while client.cancellationCount == 0 { await Task.yield() }
+
+        #expect(result.text == longEditorInput)
+        #expect(result.status == .timeout)
+        #expect(client.cancellationCount == 1)
+    }
 }

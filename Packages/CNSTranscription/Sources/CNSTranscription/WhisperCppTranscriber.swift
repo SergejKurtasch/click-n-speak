@@ -133,8 +133,7 @@ public actor WhisperCppTranscriber: Transcribing {
             return .failed(.init(kind: .fileDecode, message: "The audio track could not be decoded"))
         }
 
-        var parts: [String] = []
-        var detectedLanguage = ""
+        var transcript = FileTranscriptAccumulator(backend: "local", modelID: modelID)
         var segmentIndex = 0
         do {
             progress(.init(
@@ -164,19 +163,21 @@ public actor WhisperCppTranscriber: Transcribing {
                 switch result.outcome {
                 case .success:
                     let cleaned = HallucinationFilter().filter(result.text, isFinal: next == nil)
-                    if !cleaned.isEmpty { parts.append(cleaned) }
-                    if !result.detectedLanguage.isEmpty { detectedLanguage = result.detectedLanguage }
+                    transcript.append(text: cleaned, detectedLanguage: result.detectedLanguage)
                 case .noSpeech, .guarded:
                     break
                 case .aborted:
                     reader.cancel()
-                    return FileTranscriptionResult(text: "", status: .cancelled, segmentCount: segmentIndex)
+                    return transcript.result(status: .cancelled, segmentCount: segmentIndex)
                 case .timedOut:
                     reader.cancel()
-                    return .failed(.init(kind: .decode, message: "Local transcription timed out"))
+                    return transcript.result(
+                        status: .failed(.init(kind: .decode, message: "Local transcription timed out")),
+                        segmentCount: segmentIndex
+                    )
                 case let .failed(failure):
                     reader.cancel()
-                    return .failed(failure)
+                    return transcript.result(status: .failed(failure), segmentCount: segmentIndex)
                 }
                 segmentIndex += 1
                 current = next
@@ -184,22 +185,17 @@ public actor WhisperCppTranscriber: Transcribing {
         } catch is CancellationError {
             abortInFlight()
             reader.cancel()
-            return FileTranscriptionResult(text: "", status: .cancelled, segmentCount: segmentIndex)
+            return transcript.result(status: .cancelled, segmentCount: segmentIndex)
         } catch {
             reader.cancel()
-            return .failed(.init(kind: .fileDecode, message: "The media file could not be decoded"))
+            return transcript.result(
+                status: .failed(.init(kind: .fileDecode, message: "The media file could not be decoded")),
+                segmentCount: segmentIndex
+            )
         }
 
-        let text = FileTranscriptAssembler.join(parts)
         progress(.init(stage: .completed, completedUnits: segmentIndex, totalUnits: segmentIndex))
-        return FileTranscriptionResult(
-            text: text,
-            detectedLanguage: detectedLanguage,
-            backend: "local",
-            modelID: modelID,
-            status: text.isEmpty ? .noSpeech : .success,
-            segmentCount: segmentIndex
-        )
+        return transcript.completed(segmentCount: segmentIndex)
     }
 
     /// Language-mismatch retry, ported from `WhisperTranscriber.transcribe`.
