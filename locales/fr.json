@@ -376,7 +376,7 @@
   "notify.terms_removed_inactive": "{n} termes inactifs supprimés.",
   "dialog.file_drop_title": "Transcrire un fichier audio",
   "dialog.file_drop_hint": "Déposez le fichier audio ici",
-  "dialog.file_drop_formats": "wav · mp3 · m4a · aiff · flac · ogg",
+  "dialog.file_drop_formats": "{formats}",
   "dialog.whisper_terms_title": "Termes Whisper — {lang}",
   "dialog.whisper_terms_hint": "Termes inclus dans le prompt initial de Whisper pour cette langue. Séparez par des virgules ou des sauts de ligne. Les termes inactifs restent listés ici mais ne sont pas transmis à Whisper tant qu'ils ne sont pas à nouveau utilisés.",
   "dialog.suggestions_body_detailed": "{total} termes trouvés apparaissant fréquemment dans vos dictées.\n{preview}\n\nLes ajouter améliorera la reconnaissance de Whisper.",

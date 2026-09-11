@@ -128,7 +128,7 @@ struct FileDropView: View {
                     .foregroundStyle(isTargeted ? Color.accentColor : Color.secondary)
                 Text(i18n.t("dialog.file_drop_hint"))
                     .font(.headline)
-                Text(i18n.t("dialog.file_drop_formats"))
+                Text(Self.formatDescription(i18n: i18n))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button(i18n.t("dialog.file_browse")) { browse() }
@@ -249,12 +249,15 @@ struct FileDropView: View {
         }
     }
 
-    static let supportedExtensions = [
-        "wav", "wave", "mp3", "m4a", "aac", "flac", "ogg", "opus", "caf",
-        "aif", "aiff", "mp4", "mov", "m4v"
-    ]
+    static let supportedExtensions = MediaFormatCapabilities.supportedExtensions
 
     static func isSupported(_ url: URL) -> Bool {
-        supportedExtensions.contains(url.pathExtension.lowercased())
+        MediaFormatCapabilities.supports(url)
+    }
+
+    static func formatDescription(i18n: I18n) -> String {
+        i18n.t("dialog.file_drop_formats", [
+            "formats": MediaFormatCapabilities.displayExtensions.joined(separator: " · ")
+        ])
     }
 }

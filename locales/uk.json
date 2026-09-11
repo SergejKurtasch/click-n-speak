@@ -378,7 +378,7 @@
   "notify.terms_removed_inactive": "{n} неактивних термінів видалено.",
   "dialog.file_drop_title": "Розпізнати аудіофайл",
   "dialog.file_drop_hint": "Перетягніть аудіофайл сюди",
-  "dialog.file_drop_formats": "wav · mp3 · m4a · aiff · flac · ogg",
+  "dialog.file_drop_formats": "{formats}",
   "dialog.whisper_terms_title": "Терміни Whisper — {lang}",
   "dialog.whisper_terms_hint": "Терміни, додані до початкової підказки Whisper для цієї мови. Розділяйте комами або переносами. Неактивні терміни видно тут, але не передаються Whisper, поки їх не використають знову.",
   "dialog.suggestions_body_detailed": "Знайдено {total} термінів, що часто зустрічаються у ваших диктовках.\n{preview}\n\nДодавання їх покращить розпізнавання Whisper.",

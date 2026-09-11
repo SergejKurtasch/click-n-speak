@@ -376,7 +376,7 @@
   "notify.terms_removed_inactive": "{n} inactive terms deleted.",
   "dialog.file_drop_title": "Transcribe Audio File",
   "dialog.file_drop_hint": "Drop audio file here",
-  "dialog.file_drop_formats": "wav · mp3 · m4a · aiff · flac · ogg",
+  "dialog.file_drop_formats": "{formats}",
   "dialog.whisper_terms_title": "Whisper prompt terms — {lang}",
   "dialog.whisper_terms_hint": "Terms merged into the Whisper initial prompt for this language. Separate with commas or new lines. Inactive terms stay listed here but are omitted from Whisper until used again.",
   "dialog.suggestions_body_detailed": "Found {total} terms frequently appearing in your dictations.\n{preview}\n\nAdding them will improve Whisper recognition.",

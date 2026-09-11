@@ -105,8 +105,11 @@ public actor CloudSTTTranscriber: Transcribing {
         do {
             let handle = try FileHandle(forReadingFrom: request.url)
             defer { try? handle.close() }
-            let header = try handle.read(upToCount: 16) ?? Data()
+            let header = try handle.read(upToCount: 64) ?? Data()
             guard let detected = FileMediaType.detect(url: request.url, header: header) else {
+                return .failed(.init(kind: .unsupportedMedia, message: "This media type is not supported"))
+            }
+            guard MediaFormatCapabilities.policy(for: detected) != .unsupported else {
                 return .failed(.init(kind: .unsupportedMedia, message: "This media type is not supported"))
             }
             mediaType = detected
@@ -116,7 +119,9 @@ public actor CloudSTTTranscriber: Transcribing {
 
         let size = (try? request.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max
         let isVideo = [.mp4, .mov, .m4v].contains(mediaType)
-        if !isVideo, size <= maxInlineFileBytes {
+        if !isVideo,
+           MediaFormatCapabilities.supportsDirectProviderUpload(mediaType),
+           size <= maxInlineFileBytes {
             return await transcribeInlineFile(request, mediaType: mediaType, progress: progress)
         }
         return await transcribeSegmentedFile(request, progress: progress)

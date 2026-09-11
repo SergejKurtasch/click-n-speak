@@ -376,7 +376,7 @@
   "notify.terms_removed_inactive": "{n} inaktive Begriffe gelöscht.",
   "dialog.file_drop_title": "Audiodatei transkribieren",
   "dialog.file_drop_hint": "Audiodatei hier ablegen",
-  "dialog.file_drop_formats": "wav · mp3 · m4a · aiff · flac · ogg",
+  "dialog.file_drop_formats": "{formats}",
   "dialog.whisper_terms_title": "Whisper-Begriffe — {lang}",
   "dialog.whisper_terms_hint": "Begriffe in der Whisper-Eingabeaufforderung für diese Sprache. Mit Kommas oder Zeilenumbrüchen trennen. Inaktive Begriffe bleiben hier sichtbar, werden aber erst wieder an Whisper übergeben, wenn sie erneut verwendet werden.",
   "dialog.suggestions_body_detailed": "{total} Begriffe gefunden, die häufig in deinen Diktaten vorkommen.\n{preview}\n\nDas Hinzufügen verbessert die Whisper-Erkennung.",

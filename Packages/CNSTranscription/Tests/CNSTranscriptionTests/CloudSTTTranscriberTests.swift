@@ -223,6 +223,63 @@ final class CloudSTTTranscriberTests: XCTestCase {
         XCTAssertTrue(body.contains("filename=\"fixture.mp3\""))
     }
 
+    func testRawAACIsDecodedAndUploadedAsWAVInsteadOfRelabeledBytes() async throws {
+        let file = ScriptedHTTPClient([.response(200, try json(["text": "decoded"]))])
+        let transcriber = makeTranscriber(.openai, realtime: ScriptedHTTPClient([]), file: file)
+        let source = fixtureURL("signal.aac")
+        let original = try Data(contentsOf: source)
+
+        let result = await transcriber.transcribeFile(.init(url: source)) { _ in }
+
+        XCTAssertEqual(result.text, "decoded")
+        XCTAssertEqual(result.segmentCount, 1)
+        XCTAssertEqual(try Data(contentsOf: source), original)
+        let capturedRequest = await file.request(at: 0)
+        let body = capturedRequest.httpBody ?? Data()
+        let bodyText = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(bodyText.contains("Content-Type: audio/wav"))
+        XCTAssertTrue(bodyText.contains("filename=\"segment-1.wav\""))
+        XCTAssertNotNil(body.range(of: Data("RIFF".utf8)))
+    }
+
+    func testSupportedFixtureMatrixReachesProviderAsBoundedWAVSegments() async throws {
+        let fixtureNames = [
+            "signal-16k-mono.wav",
+            "signal-44k-mono.wav",
+            "signal-48k-stereo.wav",
+            "signal-48k-stereo.caf",
+            "signal.m4a",
+            "signal.aac"
+        ]
+        let file = ScriptedHTTPClient(try fixtureNames.map { name in
+            .response(200, try json(["text": name]))
+        })
+        let transcriber = makeTranscriber(
+            .openai,
+            realtime: ScriptedHTTPClient([]),
+            file: file,
+            maxInlineFileBytes: 1
+        )
+
+        for name in fixtureNames {
+            let source = fixtureURL(name)
+            let original = try Data(contentsOf: source)
+            let result = await transcriber.transcribeFile(.init(url: source)) { _ in }
+            XCTAssertEqual(result.text, name)
+            XCTAssertEqual(result.segmentCount, 1)
+            XCTAssertEqual(try Data(contentsOf: source), original)
+        }
+
+        let requestCount = await file.requestCount
+        XCTAssertEqual(requestCount, fixtureNames.count)
+        for index in fixtureNames.indices {
+            let request = await file.request(at: index)
+            let body = request.httpBody ?? Data()
+            XCTAssertNotNil(body.range(of: Data("Content-Type: audio/wav".utf8)))
+            XCTAssertNotNil(body.range(of: Data("RIFF".utf8)))
+        }
+    }
+
     func testMIMETypeDetectionCoversSupportedContainers() {
         XCTAssertEqual(FileMediaType.detect(
             url: URL(fileURLWithPath: "fixture.bin"),
@@ -234,6 +291,57 @@ final class CloudSTTTranscriberTests: XCTestCase {
         ), .mp3)
         XCTAssertEqual(FileMediaType.detect(url: URL(fileURLWithPath: "fixture.m4a")), .m4a)
         XCTAssertEqual(FileMediaType.detect(url: URL(fileURLWithPath: "fixture.mov")), .mov)
+    }
+
+    func testMediaDetectionUsesContainerBytesBeforeExtension() {
+        XCTAssertEqual(FileMediaType.detect(
+            url: URL(fileURLWithPath: "fixture.mp3"),
+            header: Data("RIFF0000WAVE".utf8)
+        ), .wav)
+        XCTAssertEqual(FileMediaType.detect(
+            url: URL(fileURLWithPath: "fixture.bin"),
+            header: Data("caff\u{0}\u{1}\u{0}\u{0}".utf8)
+        ), .caf)
+        XCTAssertEqual(FileMediaType.detect(
+            url: URL(fileURLWithPath: "fixture.bin"),
+            header: Data("OggSfixture".utf8)
+        ), .ogg)
+        XCTAssertEqual(FileMediaType.detect(
+            url: URL(fileURLWithPath: "fixture.bin"),
+            header: Data([0xFF, 0xF1, 0x50, 0x80, 0x00, 0x1F, 0xFC])
+        ), .aac)
+        XCTAssertNil(FileMediaType.detect(
+            url: URL(fileURLWithPath: "fixture.wav"),
+            header: Data("not audio bytes".utf8)
+        ))
+        XCTAssertNil(FileMediaType.detect(
+            url: URL(fileURLWithPath: "empty.wav"),
+            header: Data()
+        ))
+        XCTAssertEqual(FileMediaType.detect(
+            url: URL(fileURLWithPath: "mislabeled.mp4"),
+            header: try? Data(contentsOf: fixtureURL("signal.m4a")).prefix(64)
+        ), .m4a)
+        XCTAssertEqual(FileMediaType.detect(
+            url: URL(fileURLWithPath: "mislabeled.m4a"),
+            header: Data([0, 0, 0, 20]) + Data("ftypqt  ".utf8)
+        ), .mov)
+        XCTAssertEqual(FileMediaType.detect(
+            url: URL(fileURLWithPath: "mislabeled.ogg"),
+            header: try? Data(contentsOf: fixtureURL("signal.opus")).prefix(64)
+        ), .opus)
+    }
+
+    func testMediaCapabilityCatalogMatchesDecodePolicies() {
+        XCTAssertEqual(MediaFormatCapabilities.policy(for: .wav), .nativeDecode)
+        XCTAssertEqual(MediaFormatCapabilities.policy(for: .caf), .nativeDecode)
+        XCTAssertEqual(MediaFormatCapabilities.policy(for: .aac), .coreAudioConversion)
+        XCTAssertEqual(MediaFormatCapabilities.policy(for: .ogg), .unsupported)
+        XCTAssertEqual(MediaFormatCapabilities.policy(for: .opus), .unsupported)
+        XCTAssertTrue(MediaFormatCapabilities.supportedExtensions.contains("caf"))
+        XCTAssertTrue(MediaFormatCapabilities.supportedExtensions.contains("aac"))
+        XCTAssertFalse(MediaFormatCapabilities.supportedExtensions.contains("ogg"))
+        XCTAssertFalse(MediaFormatCapabilities.supportedExtensions.contains("opus"))
     }
 
     func testWAVEncodingHasCanonicalHeaderAndClampsSamples() {
@@ -334,5 +442,11 @@ final class CloudSTTTranscriberTests: XCTestCase {
         try data.write(to: url, options: .atomic)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
         return url
+    }
+
+    private func fixtureURL(_ name: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/Media/\(name)")
     }
 }

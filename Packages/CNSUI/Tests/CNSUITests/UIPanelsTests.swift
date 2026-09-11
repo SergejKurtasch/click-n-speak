@@ -267,10 +267,18 @@ final class UIPanelsTests: XCTestCase {
     }
 
     func testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific() {
-        for ext in ["wav", "mp3", "flac", "ogg", "opus", "caf", "mp4"] {
+        for ext in MediaFormatCapabilities.supportedExtensions {
             XCTAssertTrue(FileDropView.isSupported(URL(fileURLWithPath: "/tmp/fixture.\(ext)")))
         }
+        XCTAssertFalse(FileDropView.isSupported(URL(fileURLWithPath: "/tmp/fixture.ogg")))
+        XCTAssertFalse(FileDropView.isSupported(URL(fileURLWithPath: "/tmp/fixture.opus")))
         XCTAssertFalse(FileDropView.isSupported(URL(fileURLWithPath: "/tmp/fixture.txt")))
+        let description = FileDropView.formatDescription(i18n: i18n())
+        for ext in MediaFormatCapabilities.displayExtensions {
+            XCTAssertTrue(description.contains(ext))
+        }
+        XCTAssertFalse(description.lowercased().contains("ogg"))
+        XCTAssertFalse(description.lowercased().contains("opus"))
         XCTAssertTrue(MenuBarController.isCredentialFormatValid("sk-12345678901234567890", provider: "openai"))
         XCTAssertFalse(MenuBarController.isCredentialFormatValid("AIza12345678901234567890", provider: "openai"))
         XCTAssertTrue(MenuBarController.isCredentialFormatValid("AIza12345678901234567890", provider: "gemini"))
