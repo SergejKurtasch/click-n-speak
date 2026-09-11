@@ -3,18 +3,18 @@ import Foundation
 import Testing
 @testable import CNSCore
 
-private func testDigest(_ data: Data) -> String {
+func testDigest(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
-private func testPaths() -> Paths {
+func testPaths() -> Paths {
     Paths(mode: .dev, environment: [
         "CNS_DATA_DIR": FileManager.default.temporaryDirectory
             .appendingPathComponent("cns-model-test-\(UUID().uuidString)").path,
     ])
 }
 
-private func singleFileModel(
+func singleFileModel(
     data: Data,
     checksum: String? = nil,
     expectedSize: Int64? = nil,
@@ -39,6 +39,103 @@ private func singleFileModel(
         sourceRevision: "fixture-revision",
         artifacts: [artifact]
     )
+}
+
+@Suite("Model transfer response policy")
+struct ModelTransferPolicyTests {
+    @Test("Only a real resume rejection permits one fresh restart")
+    func resumeRestartBoundary() {
+        let policy = ModelTransferPolicy(attempt: 1, maxAttempts: 3)
+        #expect(policy.responseAction(
+            statusCode: 200,
+            offset: 5,
+            contentRange: nil,
+            responseLength: 18,
+            expectedSize: 18,
+            didRestartFresh: false
+        ) == .restartFresh)
+        #expect(policy.responseAction(
+            statusCode: 200,
+            offset: 0,
+            contentRange: nil,
+            responseLength: 18,
+            expectedSize: 18,
+            didRestartFresh: true
+        ) == .accept)
+        #expect(policy.responseAction(
+            statusCode: 206,
+            offset: 0,
+            contentRange: "bytes 0-17/18",
+            responseLength: 18,
+            expectedSize: 18,
+            didRestartFresh: true
+        ) == .fail)
+    }
+
+    @Test("Transient HTTP failures retry at most three attempts with bounded delay")
+    func retryBoundary() {
+        #expect(ModelTransferPolicy(attempt: 1, maxAttempts: 3)
+            .failureOrBoundedRetry(500) == .retry(after: 1))
+        #expect(ModelTransferPolicy(attempt: 2, maxAttempts: 3)
+            .failureOrBoundedRetry(429) == .retry(after: 2))
+        #expect(ModelTransferPolicy(attempt: 3, maxAttempts: 3)
+            .failureOrBoundedRetry(503) == .fail)
+        #expect(ModelTransferPolicy(attempt: 1, maxAttempts: 3, retryAfter: 90)
+            .failureOrBoundedRetry(429) == .retry(after: 30))
+        for status in [401, 403, 404, 416] {
+            #expect(ModelTransferPolicy(attempt: 1, maxAttempts: 3)
+                .failureOrBoundedRetry(status) == .fail)
+        }
+    }
+
+    @Test("Content range validation covers every bound and length")
+    func contentRangeValidation() {
+        let policy = ModelTransferPolicy(attempt: 1, maxAttempts: 3)
+        #expect(policy.responseAction(
+            statusCode: 206,
+            offset: 5,
+            contentRange: "bytes 5-17/18",
+            responseLength: 13,
+            expectedSize: 18,
+            didRestartFresh: false
+        ) == .accept)
+        for range in ["bytes 4-17/18", "bytes 5-4/18", "bytes 5-16/18", "bytes 5-17/19", "garbage"] {
+            #expect(policy.responseAction(
+                statusCode: 206,
+                offset: 5,
+                contentRange: range,
+                responseLength: 13,
+                expectedSize: 18,
+                didRestartFresh: false
+            ) == .fail)
+        }
+        for length: Int64? in [0, 12, 14] {
+            #expect(policy.responseAction(
+                statusCode: 206,
+                offset: 5,
+                contentRange: "bytes 5-17/18",
+                responseLength: length,
+                expectedSize: 18,
+                didRestartFresh: false
+            ) == .fail)
+        }
+        #expect(policy.responseAction(
+            statusCode: 200,
+            offset: 0,
+            contentRange: nil,
+            responseLength: nil,
+            expectedSize: 18,
+            didRestartFresh: false
+        ) == .accept)
+        #expect(policy.responseAction(
+            statusCode: 200,
+            offset: 0,
+            contentRange: nil,
+            responseLength: -1,
+            expectedSize: 18,
+            didRestartFresh: false
+        ) == .fail)
+    }
 }
 
 @Suite("ModelRegistry")

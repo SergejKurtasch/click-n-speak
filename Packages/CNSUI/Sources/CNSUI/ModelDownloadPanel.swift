@@ -25,6 +25,7 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
     private let log: (String) -> Void
     private var generation = 0
     private var terminalState = false
+    private var validationInProgress = false
 
     // MARK: - Init
 
@@ -48,6 +49,7 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         self.onCancel = onCancel
         self.onRetry = onRetry
         terminalState = false
+        validationInProgress = false
         buildPanelIfNeeded()
 
         titleLabel?.stringValue = i18n.t("download.progress_title", ["label": modelName])
@@ -57,6 +59,7 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         progressBar?.startAnimation(nil)
         cancelButton?.title = i18n.t("btn.cancel")
         cancelButton?.isEnabled = true
+        panel?.standardWindowButton(.closeButton)?.isEnabled = true
 
         panel?.center()
         panel?.makeKeyAndOrderFront(nil)
@@ -101,15 +104,30 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         statusLabel?.stringValue = parts.joined(separator: "  —  ")
     }
 
+    /// Model integrity validation cannot be interrupted safely, so the panel
+    /// makes that transition explicit and disables cancellation until it ends.
+    public func showValidating(generation expectedGeneration: Int? = nil) {
+        guard expectedGeneration == nil || expectedGeneration == generation else { return }
+        validationInProgress = true
+        statusLabel?.stringValue = i18n.t("menu.model_validating")
+        progressBar?.isIndeterminate = true
+        progressBar?.startAnimation(nil)
+        cancelButton?.isEnabled = false
+        panel?.standardWindowButton(.closeButton)?.isEnabled = false
+    }
+
     /// Flash a "Done" message and auto-close after a short delay.
     public func showCompleted(generation expectedGeneration: Int? = nil) {
         guard expectedGeneration == nil || expectedGeneration == generation else { return }
         let currentGeneration = generation
         terminalState = true
+        validationInProgress = false
         onRetry = nil
         statusLabel?.stringValue = "✓ \(i18n.t("download.complete"))"
         progressBar?.doubleValue = progressBar?.maxValue ?? 100
         cancelButton?.title = i18n.t("btn.close")
+        cancelButton?.isEnabled = true
+        panel?.standardWindowButton(.closeButton)?.isEnabled = true
 
         Task {
             try? await Task.sleep(for: .seconds(1.5))
@@ -122,8 +140,11 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
     public func showError(_ message: String, generation expectedGeneration: Int? = nil) {
         guard expectedGeneration == nil || expectedGeneration == generation else { return }
         terminalState = true
+        validationInProgress = false
         statusLabel?.stringValue = "✗ \(i18n.t("download.failed", ["message": message]))"
         cancelButton?.title = i18n.t(onRetry == nil ? "btn.close" : "btn.retry")
+        cancelButton?.isEnabled = true
+        panel?.standardWindowButton(.closeButton)?.isEnabled = true
     }
 
     /// Show cancelled state and auto-close.
@@ -131,6 +152,7 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         guard expectedGeneration == nil || expectedGeneration == generation else { return }
         let currentGeneration = generation
         terminalState = true
+        validationInProgress = false
         onRetry = nil
         statusLabel?.stringValue = i18n.t("download.cancelled")
         cancelButton?.isEnabled = false
@@ -153,6 +175,7 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         onCancel = nil
         onRetry = nil
         terminalState = false
+        validationInProgress = false
     }
 
     /// Whether the panel is currently visible.
@@ -172,6 +195,8 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
     var statusForTesting: String? { statusLabel?.stringValue }
     var generationForTesting: Int { generation }
     var hidesOnDeactivateForTesting: Bool? { panel?.hidesOnDeactivate }
+    var cancelEnabledForTesting: Bool? { cancelButton?.isEnabled }
+    var closeEnabledForTesting: Bool? { panel?.standardWindowButton(.closeButton)?.isEnabled }
 
     // MARK: - Panel construction
 
@@ -271,6 +296,7 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
     }
 
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !validationInProgress else { return false }
         if !terminalState { onCancel?() }
         close()
         return false

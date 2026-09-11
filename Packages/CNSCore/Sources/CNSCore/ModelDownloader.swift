@@ -19,19 +19,117 @@ public struct RemoteArtifactMetadata: Sendable, Equatable {
     }
 }
 
+public enum ModelResponseAction: Sendable, Equatable {
+    case accept
+    case restartFresh
+    case retry(after: TimeInterval)
+    case fail
+}
+
+public struct ModelTransferPolicy: Sendable, Equatable {
+    public let attempt: Int
+    public let maxAttempts: Int
+    public let retryAfter: TimeInterval?
+
+    public init(attempt: Int, maxAttempts: Int = 3, retryAfter: TimeInterval? = nil) {
+        self.attempt = max(1, attempt)
+        self.maxAttempts = max(1, maxAttempts)
+        self.retryAfter = retryAfter
+    }
+
+    public func responseAction(
+        statusCode: Int,
+        offset: Int64,
+        contentRange: String?,
+        responseLength: Int64?,
+        expectedSize: Int64,
+        didRestartFresh: Bool
+    ) -> ModelResponseAction {
+        if offset > 0, !didRestartFresh, statusCode == 200 {
+            return .restartFresh
+        }
+        guard (200..<300).contains(statusCode) else {
+            return failureOrBoundedRetry(statusCode)
+        }
+        guard expectedSize > 0 else { return .fail }
+        if offset == 0 {
+            guard statusCode == 200,
+                  responseLength == nil || responseLength == expectedSize else {
+                return .fail
+            }
+            return .accept
+        }
+        guard statusCode == 206,
+              let range = Self.parseContentRange(contentRange),
+              range.start == offset,
+              range.end >= range.start,
+              range.end == expectedSize - 1,
+              range.total == expectedSize else {
+            return .fail
+        }
+        let expectedResponseLength = range.end - range.start + 1
+        guard responseLength == nil || responseLength == expectedResponseLength else {
+            return .fail
+        }
+        return .accept
+    }
+
+    public func failureOrBoundedRetry(_ statusCode: Int) -> ModelResponseAction {
+        let transient = [429, 500, 502, 503, 504].contains(statusCode)
+        guard transient, attempt < maxAttempts else { return .fail }
+        let exponent = min(attempt - 1, 4)
+        let backoff = TimeInterval(1 << exponent)
+        let requested = max(backoff, retryAfter ?? 0)
+        return .retry(after: min(30, requested))
+    }
+
+    func failureOrBoundedRetry(_ error: URLError) -> ModelResponseAction {
+        let transient: Set<URLError.Code> = [
+            .cannotConnectToHost,
+            .cannotFindHost,
+            .dnsLookupFailed,
+            .networkConnectionLost,
+            .notConnectedToInternet,
+            .resourceUnavailable,
+            .timedOut
+        ]
+        guard transient.contains(error.code), attempt < maxAttempts else { return .fail }
+        let exponent = min(attempt - 1, 4)
+        return .retry(after: TimeInterval(1 << exponent))
+    }
+
+    private static func parseContentRange(_ value: String?) -> (start: Int64, end: Int64, total: Int64)? {
+        guard let value else { return nil }
+        let components = value.lowercased().split(separator: " ", omittingEmptySubsequences: true)
+        guard components.count == 2, components[0] == "bytes" else { return nil }
+        let rangeAndTotal = components[1].split(separator: "/", omittingEmptySubsequences: false)
+        guard rangeAndTotal.count == 2,
+              let total = Int64(rangeAndTotal[1]) else { return nil }
+        let bounds = rangeAndTotal[0].split(separator: "-", omittingEmptySubsequences: false)
+        guard bounds.count == 2,
+              let start = Int64(bounds[0]),
+              let end = Int64(bounds[1]) else { return nil }
+        return (start, end, total)
+    }
+}
+
 public protocol ArtifactMetadataInspecting: Sendable {
     func metadata(for url: URL) async throws -> RemoteArtifactMetadata
 }
 
 public struct URLSessionArtifactMetadataInspector: ArtifactMetadataInspecting {
-    public init() {}
+    private let session: URLSession
+
+    public init(session: URLSession = .shared) {
+        self.session = session
+    }
 
     public func metadata(for url: URL) async throws -> RemoteArtifactMetadata {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 30
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard data.count <= 64 * 1_024,
               let http = response as? HTTPURLResponse,
               (200..<400).contains(http.statusCode) else {
@@ -95,16 +193,14 @@ enum ModelResumePolicy {
         expectedSize: Int64,
         responseLength: Int64?
     ) -> Bool {
-        if offset == 0 {
-            guard statusCode == 200 || statusCode == 206 else { return false }
-        } else {
-            guard statusCode == 206,
-                  contentRange?.lowercased().hasPrefix("bytes \(offset)-") == true else {
-                return false
-            }
-        }
-        guard let responseLength, responseLength >= 0 else { return true }
-        return responseLength == expectedSize - offset
+        ModelTransferPolicy(attempt: 1).responseAction(
+            statusCode: statusCode,
+            offset: offset,
+            contentRange: contentRange,
+            responseLength: responseLength,
+            expectedSize: expectedSize,
+            didRestartFresh: false
+        ) == .accept
     }
 }
 
@@ -143,6 +239,8 @@ public final class ModelDownloader: NSObject {
     private let paths: Paths
     private let metadataInspector: any ArtifactMetadataInspecting
     private let diskCapacity: @Sendable (URL) -> Int64
+    private let sessionConfiguration: @Sendable () -> URLSessionConfiguration
+    private let retrySleep: @Sendable (TimeInterval) async throws -> Void
     private let log: (String) -> Void
 
     private var dataTask: URLSessionDataTask?
@@ -155,6 +253,7 @@ public final class ModelDownloader: NSObject {
     private var stagingURL: URL?
     private var completedArtifactBytes: Int64 = 0
     private var generation = 0
+    private var transferGeneration = 0
     private var lastProgressCallbackDate: Date = .distantPast
     private var speedSamples: [(date: Date, bytes: Int64)] = []
 
@@ -162,11 +261,19 @@ public final class ModelDownloader: NSObject {
         paths: Paths,
         metadataInspector: any ArtifactMetadataInspecting = URLSessionArtifactMetadataInspector(),
         diskCapacity: @escaping @Sendable (URL) -> Int64 = ModelManager.availableDiskCapacity,
+        sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = {
+            .default
+        },
+        retrySleep: @escaping @Sendable (TimeInterval) async throws -> Void = { delay in
+            try await Task.sleep(for: .seconds(delay))
+        },
         log: @escaping (String) -> Void = { _ in }
     ) {
         self.paths = paths
         self.metadataInspector = metadataInspector
         self.diskCapacity = diskCapacity
+        self.sessionConfiguration = sessionConfiguration
+        self.retrySleep = retrySleep
         self.log = log
         super.init()
     }
@@ -223,11 +330,14 @@ public final class ModelDownloader: NSObject {
         removeResumeFiles(model: activeModel)
     }
 
-    fileprivate func handleProgress(
+    func handleProgress(
         artifactBytes: Int64,
-        generation callbackGeneration: Int
+        generation callbackGeneration: Int,
+        transferGeneration callbackTransferGeneration: Int
     ) {
-        guard callbackGeneration == generation, state == .downloading else { return }
+        guard callbackGeneration == generation,
+              callbackTransferGeneration == transferGeneration,
+              state == .downloading else { return }
         downloadedBytes = completedArtifactBytes + artifactBytes
         let now = Date()
         speedSamples.append((now, downloadedBytes))
@@ -244,11 +354,19 @@ public final class ModelDownloader: NSObject {
         }
     }
 
+    #if DEBUG
+    var callbackIdentityForTesting: (generation: Int, transferGeneration: Int) {
+        (generation, transferGeneration)
+    }
+    #endif
+
     fileprivate func handleFinishedDownload(
         transferURL: URL,
-        generation callbackGeneration: Int
+        generation callbackGeneration: Int,
+        transferGeneration callbackTransferGeneration: Int
     ) {
         guard callbackGeneration == generation,
+              callbackTransferGeneration == transferGeneration,
               state == .downloading,
               let model = activeModel,
               let artifact = currentArtifact,
@@ -290,9 +408,12 @@ public final class ModelDownloader: NSObject {
 
     fileprivate func handleRejectedResume(
         remote: RemoteArtifactMetadata,
-        generation callbackGeneration: Int
+        generation callbackGeneration: Int,
+        transferGeneration callbackTransferGeneration: Int,
+        attempt: Int
     ) {
         guard callbackGeneration == generation,
+              callbackTransferGeneration == transferGeneration,
               state == .downloading,
               let model = activeModel,
               let artifact = currentArtifact else { return }
@@ -304,12 +425,56 @@ public final class ModelDownloader: NSObject {
             model: model,
             remote: remote,
             generation: callbackGeneration,
-            forceFresh: true
+            forceFresh: true,
+            attempt: attempt,
+            didRestartFresh: true
         )
     }
 
-    fileprivate func handleError(_ error: Error, generation callbackGeneration: Int) {
-        guard callbackGeneration == generation else { return }
+    fileprivate func handleRetry(
+        remote: RemoteArtifactMetadata,
+        generation callbackGeneration: Int,
+        transferGeneration callbackTransferGeneration: Int,
+        attempt: Int,
+        didRestartFresh: Bool,
+        delay: TimeInterval
+    ) {
+        guard callbackGeneration == generation,
+              callbackTransferGeneration == transferGeneration,
+              state == .downloading,
+              let model = activeModel,
+              let artifact = currentArtifact else { return }
+        invalidateTransferSession()
+        preparationTask?.cancel()
+        preparationTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await retrySleep(delay)
+                try Task.checkCancellation()
+                guard callbackGeneration == generation, state == .downloading else { return }
+                beginTransfer(
+                    artifact: artifact,
+                    model: model,
+                    remote: remote,
+                    generation: callbackGeneration,
+                    attempt: attempt + 1,
+                    didRestartFresh: didRestartFresh
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                applyError(error.localizedDescription, generation: callbackGeneration)
+            }
+        }
+    }
+
+    fileprivate func handleError(
+        _ error: Error,
+        generation callbackGeneration: Int,
+        transferGeneration callbackTransferGeneration: Int
+    ) {
+        guard callbackGeneration == generation,
+              callbackTransferGeneration == transferGeneration else { return }
         let urlError = error as? URLError
         if urlError?.code == .cancelled { return }
         applyError(error.localizedDescription, generation: callbackGeneration)
@@ -358,9 +523,13 @@ public final class ModelDownloader: NSObject {
         model: ModelInfo,
         remote: RemoteArtifactMetadata,
         generation currentGeneration: Int,
-        forceFresh: Bool = false
+        forceFresh: Bool = false,
+        attempt: Int = 1,
+        didRestartFresh: Bool = false
     ) {
         guard currentGeneration == generation, state == .downloading else { return }
+        transferGeneration += 1
+        let currentTransferGeneration = transferGeneration
         let saved = readResumeMetadata(model: model)
         let transferURL = transferDataURL(model: model)
         var existingBytes = Int64(
@@ -371,7 +540,11 @@ public final class ModelDownloader: NSObject {
         } == true && existingBytes > 0 && existingBytes <= artifact.expectedSize
 
         if safeResume, existingBytes == artifact.expectedSize {
-            handleFinishedDownload(transferURL: transferURL, generation: currentGeneration)
+            handleFinishedDownload(
+                transferURL: transferURL,
+                generation: currentGeneration,
+                transferGeneration: currentTransferGeneration
+            )
             return
         }
         if !safeResume {
@@ -419,12 +592,15 @@ public final class ModelDownloader: NSObject {
                 transferURL: transferURL,
                 offset: existingBytes,
                 expectedSize: artifact.expectedSize,
-                remote: remote
+                remote: remote,
+                attempt: attempt,
+                didRestartFresh: didRestartFresh,
+                transferGeneration: currentTransferGeneration
             )
             let queue = OperationQueue()
             queue.name = "click-n-speak.model-download"
             queue.maxConcurrentOperationCount = 1
-            let configuration = URLSessionConfiguration.default
+            let configuration = sessionConfiguration()
             configuration.timeoutIntervalForResource = 4 * 3600
             configuration.timeoutIntervalForRequest = 60
             configuration.waitsForConnectivity = true
@@ -526,7 +702,8 @@ public final class ModelDownloader: NSObject {
     }
 
     private func applyError(_ message: String, generation currentGeneration: Int) {
-        guard currentGeneration == generation else { return }
+        guard currentGeneration == generation,
+              state == .downloading || state == .validating else { return }
         log("ModelDownloader: error — \(message)")
         state = .failed(message)
         dataTask?.cancel()
@@ -535,6 +712,7 @@ public final class ModelDownloader: NSObject {
     }
 
     private func invalidateTransferSession() {
+        transferGeneration += 1
         dataTask = nil
         session?.invalidateAndCancel()
         session = nil
@@ -590,6 +768,9 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate,
     private let offset: Int64
     private let expectedSize: Int64
     private let remote: RemoteArtifactMetadata
+    private let attempt: Int
+    private let didRestartFresh: Bool
+    private let transferGeneration: Int
     private var receivedBytes: Int64 = 0
     private var fileHandle: FileHandle?
     private var resumeRejected = false
@@ -601,7 +782,10 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate,
         transferURL: URL,
         offset: Int64,
         expectedSize: Int64,
-        remote: RemoteArtifactMetadata
+        remote: RemoteArtifactMetadata,
+        attempt: Int,
+        didRestartFresh: Bool,
+        transferGeneration: Int
     ) {
         self.downloader = downloader
         self.generation = generation
@@ -609,6 +793,9 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate,
         self.offset = offset
         self.expectedSize = expectedSize
         self.remote = remote
+        self.attempt = attempt
+        self.didRestartFresh = didRestartFresh
+        self.transferGeneration = transferGeneration
     }
 
     nonisolated func urlSession(
@@ -624,19 +811,57 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate,
         }
         let contentRange = http.value(forHTTPHeaderField: "Content-Range")
         let length = http.expectedContentLength >= 0 ? http.expectedContentLength : nil
-        guard ModelResumePolicy.responseAllowsResume(
+        let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
+        let action = ModelTransferPolicy(
+            attempt: attempt,
+            retryAfter: retryAfter
+        ).responseAction(
             statusCode: http.statusCode,
-            contentRange: contentRange,
             offset: offset,
+            contentRange: contentRange,
+            responseLength: length,
             expectedSize: expectedSize,
-            responseLength: length
-        ) else {
+            didRestartFresh: didRestartFresh
+        )
+        switch action {
+        case .restartFresh:
             resumeRejected = true
             completionHandler(.cancel)
             guard let downloader else { return }
             Task { @MainActor in
-                downloader.handleRejectedResume(remote: remote, generation: generation)
+                downloader.handleRejectedResume(
+                    remote: remote,
+                    generation: generation,
+                    transferGeneration: transferGeneration,
+                    attempt: attempt
+                )
             }
+            return
+        case let .retry(delay):
+            failureReported = true
+            completionHandler(.cancel)
+            guard let downloader else { return }
+            Task { @MainActor in
+                downloader.handleRetry(
+                    remote: remote,
+                    generation: generation,
+                    transferGeneration: transferGeneration,
+                    attempt: attempt,
+                    didRestartFresh: didRestartFresh,
+                    delay: delay
+                )
+            }
+            return
+        case .fail:
+            completionHandler(.cancel)
+            reportFailure(URLError(.badServerResponse))
+            return
+        case .accept:
+            break
+        }
+        if !responseValidatorMatches(http) {
+            completionHandler(.cancel)
+            reportFailure(URLError(.badServerResponse))
             return
         }
         do {
@@ -661,13 +886,20 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate,
     ) {
         guard !resumeRejected, !failureReported, let fileHandle else { return }
         do {
+            let remaining = expectedSize - offset - receivedBytes
+            guard remaining >= 0, Int64(data.count) <= remaining else {
+                dataTask.cancel()
+                reportFailure(URLError(.dataLengthExceedsMaximum))
+                return
+            }
             try fileHandle.write(contentsOf: data)
             receivedBytes += Int64(data.count)
             guard let downloader else { return }
             Task { @MainActor in
                 downloader.handleProgress(
                     artifactBytes: offset + receivedBytes,
-                    generation: generation
+                    generation: generation,
+                    transferGeneration: transferGeneration
                 )
             }
         } catch {
@@ -686,16 +918,49 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate,
         guard !resumeRejected, !failureReported else { return }
         if let error {
             let urlError = error as? URLError
-            if urlError?.code != .cancelled { reportFailure(error) }
+            if urlError?.code == .cancelled { return }
+            if let urlError,
+               case let .retry(delay) = ModelTransferPolicy(attempt: attempt)
+                .failureOrBoundedRetry(urlError),
+               let downloader {
+                failureReported = true
+                Task { @MainActor in
+                    downloader.handleRetry(
+                        remote: remote,
+                        generation: generation,
+                        transferGeneration: transferGeneration,
+                        attempt: attempt,
+                        didRestartFresh: didRestartFresh,
+                        delay: delay
+                    )
+                }
+            } else {
+                reportFailure(error)
+            }
             return
         }
         guard let downloader else { return }
         Task { @MainActor in
             downloader.handleFinishedDownload(
                 transferURL: transferURL,
-                generation: generation
+                generation: generation,
+                transferGeneration: transferGeneration
             )
         }
+    }
+
+    private nonisolated func responseValidatorMatches(_ response: HTTPURLResponse) -> Bool {
+        if let expected = remote.etag,
+           let actual = response.value(forHTTPHeaderField: "ETag"),
+           expected != actual {
+            return false
+        }
+        if let expected = remote.lastModified,
+           let actual = response.value(forHTTPHeaderField: "Last-Modified"),
+           expected != actual {
+            return false
+        }
+        return true
     }
 
     private nonisolated func reportFailure(_ error: Error) {
@@ -703,7 +968,11 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate,
         failureReported = true
         guard let downloader else { return }
         Task { @MainActor in
-            downloader.handleError(error, generation: generation)
+            downloader.handleError(
+                error,
+                generation: generation,
+                transferGeneration: transferGeneration
+            )
         }
     }
 }

@@ -1505,6 +1505,7 @@ public final class MenuBarController: NSObject {
             )
         }
         downloader.onValidationStarted = { [weak self] in
+            self?.downloadPanel.showValidating(generation: downloadGeneration)
             self?.onDownloadStateChanged?(
                 MenuDownloadSnapshot(phase: .validating, modelID: model.id)
             )
