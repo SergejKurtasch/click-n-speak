@@ -110,15 +110,37 @@ public struct RecoverableAppSwap: Sendable {
         }
     }
 
-    public func rollback(target: URL, backup: URL) throws {
+    public func rollback(target: URL, backup: URL, failedCandidate: URL) throws {
+        if !files.fileExists(at: backup) {
+            guard files.fileExists(at: target), files.fileExists(at: failedCandidate) else {
+                throw AppSwapError.rollbackFailed
+            }
+            return
+        }
+
+        var candidateWasMoved = false
         do {
             if files.fileExists(at: target) {
-                try files.removeItem(at: target)
+                guard !files.fileExists(at: failedCandidate) else {
+                    throw AppSwapError.rollbackFailed
+                }
+                try files.moveItem(at: target, to: failedCandidate)
+                candidateWasMoved = true
             }
-            guard files.fileExists(at: backup) else { throw AppSwapError.rollbackFailed }
             try files.moveItem(at: backup, to: target)
         } catch {
+            if candidateWasMoved,
+               !files.fileExists(at: target),
+               files.fileExists(at: failedCandidate) {
+                try? files.moveItem(at: failedCandidate, to: target)
+            }
             throw AppSwapError.rollbackFailed
+        }
+    }
+
+    public func discardFailedCandidate(at failedCandidate: URL) throws {
+        if files.fileExists(at: failedCandidate) {
+            try files.removeItem(at: failedCandidate)
         }
     }
 

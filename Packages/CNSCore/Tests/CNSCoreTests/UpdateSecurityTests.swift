@@ -141,19 +141,90 @@ final class RecoverableAppSwapTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let swap = RecoverableAppSwap()
         try swap.install(staged: fixture.staged, target: fixture.target, backup: fixture.backup)
-        try swap.rollback(target: fixture.target, backup: fixture.backup)
+        try swap.rollback(
+            target: fixture.target,
+            backup: fixture.backup,
+            failedCandidate: fixture.failedCandidate
+        )
         XCTAssertEqual(try String(contentsOf: fixture.target, encoding: .utf8), "old")
+        XCTAssertEqual(try String(contentsOf: fixture.failedCandidate, encoding: .utf8), "new")
     }
 
-    private func makeSwapFixture() throws -> (root: URL, staged: URL, target: URL, backup: URL) {
+    func testRollbackWithoutBackupLeavesTargetUntouched() throws {
+        let fixture = try makeSwapFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let swap = RecoverableAppSwap()
+
+        XCTAssertThrowsError(
+            try swap.rollback(
+                target: fixture.target,
+                backup: fixture.backup,
+                failedCandidate: fixture.failedCandidate
+            )
+        )
+        XCTAssertEqual(try String(contentsOf: fixture.target, encoding: .utf8), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.failedCandidate.path))
+    }
+
+    func testRollbackRestoreFailureReturnsCandidateToTarget() throws {
+        let fixture = try makeSwapFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try RecoverableAppSwap().install(
+            staged: fixture.staged,
+            target: fixture.target,
+            backup: fixture.backup
+        )
+        let swap = RecoverableAppSwap(files: FaultingFileOperator(failOnMove: 2))
+
+        XCTAssertThrowsError(
+            try swap.rollback(
+                target: fixture.target,
+                backup: fixture.backup,
+                failedCandidate: fixture.failedCandidate
+            )
+        )
+        XCTAssertEqual(try String(contentsOf: fixture.target, encoding: .utf8), "new")
+        XCTAssertEqual(try String(contentsOf: fixture.backup, encoding: .utf8), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.failedCandidate.path))
+    }
+
+    func testRollbackResumesAfterCandidateWasAlreadyMovedAside() throws {
+        let fixture = try makeSwapFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try RecoverableAppSwap().install(
+            staged: fixture.staged,
+            target: fixture.target,
+            backup: fixture.backup
+        )
+        try FileManager.default.moveItem(at: fixture.target, to: fixture.failedCandidate)
+
+        try RecoverableAppSwap().rollback(
+            target: fixture.target,
+            backup: fixture.backup,
+            failedCandidate: fixture.failedCandidate
+        )
+
+        XCTAssertEqual(try String(contentsOf: fixture.target, encoding: .utf8), "old")
+        XCTAssertEqual(try String(contentsOf: fixture.failedCandidate, encoding: .utf8), "new")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+    }
+
+    private func makeSwapFixture() throws -> (
+        root: URL,
+        staged: URL,
+        target: URL,
+        backup: URL,
+        failedCandidate: URL
+    ) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("swap-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let staged = root.appendingPathComponent("staged.app")
         let target = root.appendingPathComponent("target.app")
         let backup = root.appendingPathComponent("backup.app")
+        let failedCandidate = root.appendingPathComponent("failed-candidate.app")
         try "new".write(to: staged, atomically: true, encoding: .utf8)
         try "old".write(to: target, atomically: true, encoding: .utf8)
-        return (root, staged, target, backup)
+        return (root, staged, target, backup, failedCandidate)
     }
 }
 

@@ -1,12 +1,9 @@
-import AppKit
 import CNSCore
-import Darwin
 import Foundation
 
 private enum HelperError: Error {
     case invalidArguments
     case unsafePath
-    case launchFailed
 }
 
 private func value(after flag: String, arguments: [String]) -> String? {
@@ -14,21 +11,6 @@ private func value(after flag: String, arguments: [String]) -> String? {
         return nil
     }
     return arguments[index + 1]
-}
-
-private func launch(_ application: URL, token: String? = nil, ack: URL? = nil) throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    var arguments = ["-n", application.path]
-    if let token, let ack {
-        arguments += ["--args", "--update-validation-token", token, "--update-ack-path", ack.path]
-    }
-    process.arguments = arguments
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else { throw HelperError.launchFailed }
 }
 
 private func write(
@@ -39,14 +21,26 @@ private func write(
     try? data.write(to: url, options: [.atomic])
 }
 
-private func run() throws {
+private func waitForAcknowledgement(token: String, at ack: URL) async throws {
+    for _ in 0..<600 {
+        if let data = try? Data(contentsOf: ack),
+           String(data: data, encoding: .utf8) == token {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(100))
+    }
+    throw UpdateLifecycleError.acknowledgementTimedOut
+}
+
+private func run() async throws {
     let arguments = ProcessInfo.processInfo.arguments
     guard let pidText = value(after: "--parent-pid", arguments: arguments),
-          let parentPID = pid_t(pidText), parentPID > 1,
+          let parentPID = Int32(pidText), parentPID > 1,
           let stagedPath = value(after: "--staged", arguments: arguments),
           let targetPath = value(after: "--target", arguments: arguments),
           let backupPath = value(after: "--backup", arguments: arguments),
           let token = value(after: "--token", arguments: arguments),
+          UUID(uuidString: token) != nil,
           let ackPath = value(after: "--ack", arguments: arguments),
           let recordPath = value(after: "--record", arguments: arguments) else {
         throw HelperError.invalidArguments
@@ -69,10 +63,12 @@ private func run() throws {
         throw HelperError.unsafePath
     }
 
-    for _ in 0..<300 where kill(parentPID, 0) == 0 {
-        Thread.sleep(forTimeInterval: 0.1)
-    }
-    let swap = RecoverableAppSwap()
+    let processes = SystemUpdateProcessOperator()
+    let lifecycle = UpdateProcessLifecycle(processes: processes)
+    let failedCandidate = installParent.appendingPathComponent(
+        ".click-n-speak-failed-\(token).app",
+        isDirectory: true
+    )
     var record = UpdateSwapTransactionRecord(
         token: token,
         targetPath: target.path,
@@ -80,43 +76,49 @@ private func run() throws {
         phase: .prepared
     )
     write(record, to: recordURL)
-    try swap.install(staged: staged, target: target, backup: backup)
+    try await lifecycle.installAfterParentExit(
+        parentPID: parentPID,
+        timeout: 30,
+        staged: staged,
+        target: target,
+        backup: backup
+    )
     record.phase = .installed
     write(record, to: recordURL)
 
+    var replacementPID: Int32?
     do {
-        try launch(target, token: token, ack: ack)
-        var acknowledged = false
-        for _ in 0..<600 {
-            if let data = try? Data(contentsOf: ack),
-               String(data: data, encoding: .utf8) == token {
-                acknowledged = true
-                break
-            }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        guard acknowledged else { throw HelperError.launchFailed }
-        try swap.finalize(backup: backup)
-        record.phase = .acknowledged
-        write(record, to: recordURL)
-        try? FileManager.default.removeItem(at: ack)
+        replacementPID = try await lifecycle.launch(
+            application: target,
+            arguments: ["--update-validation-token", token, "--update-ack-path", ack.path]
+        )
+        try await waitForAcknowledgement(token: token, at: ack)
     } catch {
-        for application in NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.sergej.clicknspeak"
-        ) {
-            application.terminate()
-        }
-        try swap.rollback(target: target, backup: backup)
+        _ = try await lifecycle.restorePreviousApplication(
+            replacementPID: replacementPID,
+            exitTimeout: 10,
+            target: target,
+            backup: backup,
+            failedCandidate: failedCandidate
+        )
         record.phase = .rolledBack
         write(record, to: recordURL)
-        try? launch(target)
         throw error
     }
+
+    try lifecycle.finalizeSuccessfulUpdate(backup: backup)
+    record.phase = .acknowledged
+    write(record, to: recordURL)
+    try? FileManager.default.removeItem(at: ack)
 }
 
-do {
-    try run()
-} catch {
-    FileHandle.standardError.write(Data("Click-n-speak update helper failed\n".utf8))
-    exit(EXIT_FAILURE)
+Task {
+    do {
+        try await run()
+        exit(EXIT_SUCCESS)
+    } catch {
+        FileHandle.standardError.write(Data("Click-n-speak update helper failed\n".utf8))
+        exit(EXIT_FAILURE)
+    }
 }
+dispatchMain()
