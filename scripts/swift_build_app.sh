@@ -11,6 +11,7 @@ PRODUCTION_RELEASE="${CNS_PRODUCTION_RELEASE:-0}"
 SIGNING_IDENTITY="${CNS_CODESIGN_IDENTITY:-${APPLE_DEVELOPER_ID:-}}"
 EXPECTED_TEAM_ID="${APPLE_TEAM_ID:-}"
 RESET_TCC_AFTER_BUILD="${CNS_RESET_TCC_AFTER_BUILD:-1}"
+GIT_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
 if [ "$CONFIG" != "debug" ] && [ "$CONFIG" != "release" ]; then
     echo "Usage: $0 [debug|release]" >&2
@@ -48,6 +49,7 @@ install -m 0755 "$MAIN_BINARY" "$APP/Contents/MacOS/ClickNSpeak"
 install -m 0755 "$HELPER_BINARY" "$APP/Contents/MacOS/CNSUpdateHelper"
 install -m 0644 "$MLX_METALLIB_CACHE" "$APP/Contents/MacOS/mlx.metallib"
 install -m 0644 "$APP_PACKAGE/Info.plist" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CNSGitRevision string $GIT_REVISION" "$APP/Contents/Info.plist"
 cp -R "$REPO_ROOT/locales" "$APP/Contents/Resources/locales"
 cp -R "$REPO_ROOT/assets/icons" "$APP/Contents/Resources/icons"
 if [ -f "$REPO_ROOT/assets/CnS.png" ]; then

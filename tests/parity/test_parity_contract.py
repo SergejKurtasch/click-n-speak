@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import plistlib
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -82,6 +84,32 @@ def test_automated_scenarios_have_dedicated_test_targets_and_regression_coverage
         for item in automated
         for regression_id in item["regression_ids"]
     } == {f"R{number:02d}" for number in range(1, 16)}
+    expected_targets = {
+        "R01": ["ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig","ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#validBackupRestoresSafely"],
+        "R02": ["Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage"],
+        "R03": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#fileJobBlocksHotkey","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#injectingBlocksHotkey"],
+        "R04": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#silentAppendPreservesPopup"],
+        "R05": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendPreservesDatasetSource","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendAfterUserEditPreservesProvenance"],
+        "R06": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#partialFailureIsVisible"],
+        "R07": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownBlocksNewActivities","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownCannotReopenPopup"],
+        "R08": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#preparationCannotCommitIntoRecording"],
+        "R09": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents"],
+        "R10": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#languageChangeRebuildsPrompt"],
+        "R11": ["Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific"],
+        "R12": ["Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal"],
+        "R13": ["Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation"],
+        "R14": ["Packages/CNSInput/Tests/CNSInputTests/SystemTextDeliveryTests.swift#missingTargetPreservesText"],
+        "R15": ["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames","tests/parity/test_parity_contract.py#test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts"],
+    }
+    regression_scenarios = {
+        item["regression_ids"][0]: item
+        for item in automated
+        if item["regression_ids"]
+    }
+    assert set(regression_scenarios) == set(expected_targets)
+    for regression_id, targets in expected_targets.items():
+        assert regression_scenarios[regression_id]["id"].startswith(f"regression.{regression_id}.")
+        assert regression_scenarios[regression_id]["test_targets"] == targets
 
 
 def test_python_migrates_every_supported_schema_without_unknown_key_loss() -> None:
@@ -151,7 +179,7 @@ def test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts(tmp_pat
     evidence_artifact = tmp_path / "manual-result.json"
     app.write_bytes(b"app-candidate")
     dmg.write_bytes(b"dmg-candidate")
-    evidence_artifact.write_text('{"result":"passed"}\n', encoding="utf-8")
+    evidence_artifact.write_text('{"status":"passed"}\n', encoding="utf-8")
     candidate = build_candidate_identity(
         git_revision="f6337d7",
         version="1.1.0",
@@ -171,7 +199,7 @@ def test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts(tmp_pat
                     "manual.fixture": {
                         "status": "passed",
                         "operator": "release-operator",
-                        "completed_at": "2026-09-12T10:00:00Z",
+                        "completed_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
                         "artifact": {
                             "path": str(evidence_artifact),
                             "sha256": hashlib.sha256(evidence_artifact.read_bytes()).hexdigest(),
@@ -207,7 +235,7 @@ def test_passed_manual_evidence_rejects_unverified_candidate_or_artifact(
     artifact = tmp_path / "result.json"
     app.write_bytes(b"app")
     dmg.write_bytes(b"dmg")
-    artifact.write_text("verified\n", encoding="utf-8")
+    artifact.write_text('{"status":"passed"}\n', encoding="utf-8")
     candidate = build_candidate_identity(
         git_revision="f6337d7",
         version="1.1.0",
@@ -240,7 +268,7 @@ def test_passed_manual_evidence_rejects_unverified_candidate_or_artifact(
                     "manual.fixture": {
                         "status": "passed",
                         "operator": "release-operator",
-                        "completed_at": "2026-09-12T10:00:00Z",
+                        "completed_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
                         "artifact": {"path": str(artifact_path), "sha256": artifact_sha},
                     }
                 },
@@ -283,7 +311,7 @@ def test_model_gate_missing_prerequisite_is_distinct_from_failed_and_passed() ->
     failed = GateResult("stt_model", "failed", 1.0, "model.log", "golden suite failed")
     passed = GateResult("stt_model", "passed", 1.0, "model.log")
 
-    assert scenario_result(scenario, {"stt_model": missing}, {})["status"] == "skipped"
+    assert scenario_result(scenario, {"stt_model": missing}, {})["status"] == "missing_prerequisite"
     assert scenario_result(scenario, {"stt_model": failed}, {})["status"] == "failed"
     assert scenario_result(scenario, {"stt_model": passed}, {})["status"] == "passed"
 
@@ -308,6 +336,236 @@ def test_automated_result_carries_the_verified_candidate_identity() -> None:
     )
 
     assert result["candidate"] == candidate
+
+
+def test_candidate_identity_rejects_non_commit_revision(tmp_path: Path) -> None:
+    app = tmp_path / "candidate.app"
+    dmg = tmp_path / "candidate.dmg"
+    app.write_bytes(b"app")
+    dmg.write_bytes(b"dmg")
+
+    with pytest.raises(ValueError, match="revision"):
+        build_candidate_identity(
+            git_revision="not-a-git-revision",
+            version="1.1.0",
+            app_path=app,
+            dmg_path=dmg,
+            model_revisions={"whisper": "abc123"},
+            os_version="macOS 15",
+            hardware="Apple M4",
+        )
+
+
+def test_candidate_identity_records_exact_model_artifact(tmp_path: Path) -> None:
+    app = tmp_path / "candidate.app"
+    dmg = tmp_path / "candidate.dmg"
+    model = tmp_path / "model"
+    app.write_bytes(b"app")
+    dmg.write_bytes(b"dmg")
+    model.mkdir()
+    (model / "weights.bin").write_bytes(b"first")
+
+    candidate = build_candidate_identity(
+        git_revision="f6337d7",
+        version="1.1.0",
+        app_path=app,
+        dmg_path=dmg,
+        model_revisions={"whisper": "abc123"},
+        model_artifacts={"whisper": model},
+        os_version="macOS 15",
+        hardware="Apple M4",
+    )
+
+    assert candidate["model_artifacts"]["whisper"]["sha256"]
+    (model / "weights.bin").write_bytes(b"second")
+    from swift_acceptance import verify_candidate_artifacts
+
+    with pytest.raises(ValueError, match="model"):
+        verify_candidate_artifacts(candidate)
+
+
+def test_candidate_dmg_must_contain_the_exact_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from swift_acceptance import verify_dmg_application
+
+    app = tmp_path / "candidate.app"
+    app.mkdir()
+    (app / "executable").write_bytes(b"expected")
+    dmg = tmp_path / "candidate.dmg"
+    dmg.write_bytes(b"disk image fixture")
+    candidate = build_candidate_identity(
+        git_revision="f6337d7",
+        version="1.1.0",
+        app_path=app,
+        dmg_path=dmg,
+        model_revisions={"whisper": "abc123"},
+        os_version="macOS 15",
+        hardware="Apple M4",
+    )
+    mount_path = tmp_path / "mount"
+    mount_path.mkdir()
+    monkeypatch.setattr("swift_acceptance.tempfile.mkdtemp", lambda **_kwargs: str(mount_path))
+    monkeypatch.setattr("swift_acceptance.subprocess.run", Mock(return_value=Mock(returncode=0)))
+
+    with pytest.raises(ValueError, match="does not contain"):
+        verify_dmg_application(candidate)
+
+
+def test_release_manifest_rejects_a_different_source_revision(tmp_path: Path) -> None:
+    from swift_acceptance import _validate_release_manifest
+
+    app = tmp_path / "candidate.app"
+    info = app / "Contents" / "Info.plist"
+    info.parent.mkdir(parents=True)
+    info.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "1.1.0", "CNSGitRevision": "f6337d7"}))
+    dmg = tmp_path / "candidate.dmg"
+    dmg.write_bytes(b"disk image fixture")
+    candidate = build_candidate_identity(
+        git_revision="f6337d7",
+        version="1.1.0",
+        app_path=app,
+        dmg_path=dmg,
+        model_revisions={"whisper": "abc123"},
+        os_version="macOS 15",
+        hardware="Apple M4",
+    )
+    manifest = tmp_path / "release.manifest.json"
+    manifest.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "git_revision": "0e065f1",
+            "version": "1.1.0",
+            "dmg": {
+                "sha256": candidate["dmg"]["sha256"],
+                "file_name": dmg.name,
+                "size": dmg.stat().st_size,
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="revision"):
+        _validate_release_manifest(manifest, candidate)
+
+    corrected = load_json(manifest)
+    corrected["git_revision"] = candidate["git_revision"]
+    manifest.write_text(json.dumps(corrected), encoding="utf-8")
+    _validate_release_manifest(manifest, candidate)
+
+    info.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "1.1.0", "CNSGitRevision": "0e065f1"}))
+    with pytest.raises(ValueError, match="bundle git revision"):
+        _validate_release_manifest(manifest, candidate)
+
+
+def test_bundle_hash_frames_paths_and_rejects_external_symlink(tmp_path: Path) -> None:
+    from swift_acceptance import sha256_path
+
+    first = tmp_path / "first.app"
+    second = tmp_path / "second.app"
+    first.mkdir()
+    second.mkdir()
+    (first / "a").write_bytes(b"xb\0y")
+    (second / "a").write_bytes(b"x")
+    (second / "b").write_bytes(b"y")
+
+    assert sha256_path(first) != sha256_path(second)
+
+    original_hash = sha256_path(second)
+    (second / "a").chmod(0o755)
+    assert sha256_path(second) != original_hash
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "code").write_bytes(b"external")
+    (first / "Frameworks").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        sha256_path(first)
+
+
+@pytest.mark.parametrize(
+    "completed_at",
+    [
+        "not-a-date",
+        "2026-09-12T10:00:00",
+        "2000-01-01T00:00:00Z",
+        (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+    ],
+)
+def test_passed_evidence_rejects_invalid_completion_time_and_empty_result(
+    tmp_path: Path,
+    completed_at: str,
+) -> None:
+    app = tmp_path / "candidate.app"
+    dmg = tmp_path / "candidate.dmg"
+    result = tmp_path / "result.json"
+    app.write_bytes(b"app")
+    dmg.write_bytes(b"dmg")
+    result.write_text('{"status":"passed"}\n', encoding="utf-8")
+    candidate = build_candidate_identity(
+        git_revision="f6337d7",
+        version="1.1.0",
+        app_path=app,
+        dmg_path=dmg,
+        model_revisions={"whisper": "abc123"},
+        os_version="macOS 15",
+        hardware="Apple M4",
+    )
+    evidence = {
+        "schema_version": 2,
+        "candidate": candidate,
+        "results": {
+            "manual.fixture": {
+                "status": "passed",
+                "operator": "operator",
+                "completed_at": completed_at,
+                "artifact": {"path": str(result), "sha256": hashlib.sha256(result.read_bytes()).hexdigest()},
+            }
+        },
+    }
+    path = tmp_path / "evidence.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_manual_evidence(path, expected_candidate=candidate)
+
+    result.write_bytes(b"")
+    evidence["results"]["manual.fixture"]["completed_at"] = (datetime.now(UTC) + timedelta(minutes=1)).isoformat()
+    evidence["results"]["manual.fixture"]["artifact"]["sha256"] = hashlib.sha256(b"").hexdigest()
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    with pytest.raises(ValueError, match="non-empty"):
+        load_manual_evidence(path, expected_candidate=candidate)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "Packages/CNSCore/Tests/DoesNotExist.swift",
+        "tests/../../pyproject.toml",
+    ],
+)
+def test_scenario_target_rejects_missing_or_escaping_path(target: str) -> None:
+    from swift_acceptance import scenario_gate_command
+
+    with pytest.raises(ValueError):
+        scenario_gate_command(REPO_ROOT, [target])
+
+
+def test_swift_scenario_target_uses_exact_suite_filter() -> None:
+    from swift_acceptance import scenario_gate_command
+
+    command = scenario_gate_command(
+        REPO_ROOT,
+        ["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift"],
+    )
+
+    assert command[-2:] == ["--filter", "RuntimeTelemetryTests"]
+    selected = scenario_gate_command(
+        REPO_ROOT,
+        ["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames"],
+    )
+    assert selected[-2:] == ["--filter", "testTelemetryRejectsContentBearingFieldNames"]
 
 
 def test_acceptance_build_environment_preserves_tcc_and_production_switch() -> None:
@@ -339,6 +597,15 @@ def test_build_gate_records_a_separate_log_and_receives_preserved_tcc_environmen
     assert result.status == "passed"
     assert result.evidence == str(log_path)
     assert log_path.is_file()
+    assert result.evidence_sha256 == hashlib.sha256(log_path.read_bytes()).hexdigest()
+    with pytest.raises(FileExistsError):
+        run_gate(
+            name="bundle_dev",
+            command=["scripts/swift_build_app.sh", "release"],
+            repo_root=tmp_path,
+            environment=environment,
+            log_path=log_path,
+        )
     assert invocation.call_args.kwargs["env"]["CNS_PRODUCTION_RELEASE"] == "0"
     assert invocation.call_args.kwargs["env"]["CNS_RESET_TCC_AFTER_BUILD"] == "0"
     assert invocation.call_args.kwargs["env"]["ORIGINAL"] == "yes"
@@ -348,7 +615,7 @@ def test_scenario_gate_executes_every_declared_test_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    invocation = Mock(return_value=Mock(returncode=0))
+    invocation = Mock(return_value=Mock(returncode=0, stdout="1 passed\nExecuted 1 test, with 0 failures\n"))
     monkeypatch.setattr("swift_acceptance.subprocess.run", invocation)
 
     result = run_scenario_gate(
@@ -357,7 +624,7 @@ def test_scenario_gate_executes_every_declared_test_target(
             "tests/parity/test_parity_contract.py",
             "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift",
         ],
-        repo_root=tmp_path,
+        repo_root=REPO_ROOT,
         environment={"CNS_RESET_TCC_AFTER_BUILD": "0"},
         log_path=tmp_path / "gates" / "scenario-data.log",
     )
@@ -366,19 +633,45 @@ def test_scenario_gate_executes_every_declared_test_target(
     assert invocation.call_count == 2
 
 
+def test_scenario_gate_rejects_successful_process_with_zero_selected_tests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invocation = Mock(return_value=Mock(returncode=0, stdout="Executed 0 tests, with 0 failures\n"))
+    monkeypatch.setattr("swift_acceptance.subprocess.run", invocation)
+
+    result = run_scenario_gate(
+        name="scenario.empty",
+        test_targets=["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift"],
+        repo_root=REPO_ROOT,
+        environment={},
+        log_path=tmp_path / "scenario-empty.log",
+    )
+
+    assert result.status == "failed"
+    assert result.evidence_sha256 == hashlib.sha256(Path(result.evidence).read_bytes()).hexdigest()
+
+
 def test_data_copy_audit_requires_real_dataset_and_verified_backup_manifest(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="dataset"):
         audit_data_copy(tmp_path)
 
     dataset = tmp_path / "clicknspeak_dataset.jsonl"
     dataset.write_text('{"raw_whisper":"safe fixture"}\n', encoding="utf-8")
-    digest = hashlib.sha256(dataset.read_bytes()).hexdigest()
+    config = tmp_path / "config.json"
+    corrections = tmp_path / "corrections.json"
+    config.write_text("{}\n", encoding="utf-8")
+    corrections.write_text("{}\n", encoding="utf-8")
+    entries = [
+        {"name": item.name, "sha256": hashlib.sha256(item.read_bytes()).hexdigest(), "size": item.stat().st_size}
+        for item in (dataset, config, corrections)
+    ]
     (tmp_path / "backup_manifest.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "candidate_version": "1.1.0",
-                "files": [{"name": dataset.name, "sha256": digest, "size": dataset.stat().st_size}],
+                "files": entries,
             }
         ),
         encoding="utf-8",
@@ -389,6 +682,12 @@ def test_data_copy_audit_requires_real_dataset_and_verified_backup_manifest(tmp_
     assert passed is True
     assert "clicknspeak_dataset.jsonl" in detail
     assert "backup_manifest.json" in detail
+
+    truncated = dict(load_json(tmp_path / "backup_manifest.json"))
+    truncated["files"] = [entry for entry in entries if entry["name"] != "config.json"]
+    (tmp_path / "backup_manifest.json").write_text(json.dumps(truncated), encoding="utf-8")
+    with pytest.raises(ValueError, match="config.json"):
+        audit_data_copy(tmp_path)
 
 
 def test_soak_summary_uses_only_privacy_safe_structured_events(tmp_path: Path) -> None:

@@ -5,7 +5,8 @@ Use only a copied/sanitized data directory and a signed/notarized release candid
 ## Preconditions
 
 - Record candidate version, git revision, DMG SHA-256, Team ID, macOS/hardware, model revisions, and network configuration.
-- Confirm `scripts/swift_acceptance.sh --production --manual-evidence <file>` is otherwise ready to run.
+- Confirm a clean checkout at the exact candidate commit and that the prebuilt app, DMG, and release manifest are frozen. Acceptance mounts the DMG read-only and compares its app with the candidate bundle; it does not rebuild either artifact.
+- Confirm `scripts/swift_acceptance.sh --production --candidate-app <app> --candidate-dmg <dmg> --candidate-release-manifest <manifest> --candidate-model-revisions '{"whisper":"<pinned revision>","qwen":"<pinned revision>"}' --manual-evidence <file>` is otherwise ready to run. Supply the required model test paths and opt-in environment variables for the real-model gates.
 - Freeze `tests/parity/quality_thresholds.json`; do not edit it after observing candidate results.
 - Keep the Python rollback artifact and copied dataset available.
 

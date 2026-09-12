@@ -12,6 +12,10 @@
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     },
     "model_revisions": {"whisper": "REPLACE_WITH_PINNED_REVISION", "qwen": "REPLACE_WITH_PINNED_REVISION"},
+    "model_artifacts": {
+      "whisper": {"path": "/absolute/path/to/whisper-model", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+      "qwen": {"path": "/absolute/path/to/qwen-model", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}
+    },
     "os": "REPLACE_WITH_MACOS_VERSION",
     "hardware": "REPLACE_WITH_HARDWARE"
   },

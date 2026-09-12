@@ -84,12 +84,9 @@ struct ParityDataCompatibilityTests {
             #expect(swiftLoaded.schemaVersion == 10, "Python output did not load as v10 for \(fixtureID)")
             #expect(swiftLoaded.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
             if fixtureID == "schema-v10" {
-                #expect(swiftLoaded.raw["approved_auto_replacements"]?.arrayValue?.count == 1)
-                #expect(swiftLoaded.raw["rejected_replacements"]?.arrayValue?.count == 1)
-                #expect(
-                    swiftLoaded.raw["rejected_replacements"]?.arrayValue?.first?.objectValue?["to"]?.stringValue
-                        == "Qwen 2.5"
-                )
+                let expected = try #require(JSONValue.parse(data: JSONSerialization.data(withJSONObject: rawConfig)).objectValue)
+                #expect(swiftLoaded.raw["approved_auto_replacements"] == expected["approved_auto_replacements"])
+                #expect(swiftLoaded.raw["rejected_replacements"] == expected["rejected_replacements"])
             }
             let swiftSaved = temporary.appendingPathComponent("swift-saved.json")
             try swiftLoaded.saveAtomically(to: swiftSaved)
@@ -106,8 +103,9 @@ struct ParityDataCompatibilityTests {
             #expect(finalSwiftLoad.raw["parity_python_update"]?.boolValue == true)
             #expect(finalSwiftLoad.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
             if fixtureID == "schema-v10" {
-                #expect(finalSwiftLoad.raw["approved_auto_replacements"]?.arrayValue?.count == 1)
-                #expect(finalSwiftLoad.raw["rejected_replacements"]?.arrayValue?.count == 1)
+                let expected = try #require(JSONValue.parse(data: JSONSerialization.data(withJSONObject: rawConfig)).objectValue)
+                #expect(finalSwiftLoad.raw["approved_auto_replacements"] == expected["approved_auto_replacements"])
+                #expect(finalSwiftLoad.raw["rejected_replacements"] == expected["rejected_replacements"])
             }
         }
     }
@@ -142,8 +140,8 @@ struct ParityDataCompatibilityTests {
             #expect(reloaded.raw["parity_python_update"]?.boolValue == true)
             #expect(reloaded.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
             if fixtureID == "schema-v10" {
-                #expect(reloaded.raw["approved_auto_replacements"]?.arrayValue?.count == 1)
-                #expect(reloaded.raw["rejected_replacements"]?.arrayValue?.count == 1)
+                #expect(reloaded.raw["approved_auto_replacements"] == object["approved_auto_replacements"])
+                #expect(reloaded.raw["rejected_replacements"] == object["rejected_replacements"])
             }
         }
     }

@@ -38,6 +38,7 @@ ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLI
     exit 1
 }
 /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST" >/dev/null
+/usr/libexec/PlistBuddy -c 'Print :CNSGitRevision' "$PLIST" >/dev/null
 /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST" >/dev/null
 ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST")"
 [ "$ICON_NAME" = "icon" ] || {
