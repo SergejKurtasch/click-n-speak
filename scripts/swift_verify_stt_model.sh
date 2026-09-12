@@ -3,8 +3,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-[ -n "${CNS_WHISPER_MODEL:-}" ] && [ -d "$CNS_WHISPER_MODEL" ] || {
-    echo "CNS_WHISPER_MODEL must name an existing model directory" >&2
+[ -n "${CNS_WHISPER_MODEL:-}" ] && [ -f "$CNS_WHISPER_MODEL" ] || {
+    echo "CNS_WHISPER_MODEL must name an existing model file" >&2
     exit 2
 }
 GOLDEN_DIR="${CNS_STT_GOLDEN_DIR:-$REPO_ROOT/spikes/stt-bakeoff/golden}"

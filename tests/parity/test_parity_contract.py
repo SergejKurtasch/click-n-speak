@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import plistlib
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -382,6 +383,22 @@ def test_candidate_identity_records_exact_model_artifact(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="model"):
         verify_candidate_artifacts(candidate)
+
+
+def test_stt_model_gate_accepts_a_model_file_before_corpus_validation(tmp_path: Path) -> None:
+    model = tmp_path / "ggml-model.bin"
+    model.write_bytes(b"synthetic model path")
+    missing_corpus = tmp_path / "missing-corpus"
+    completed = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/swift_verify_stt_model.sh")],
+        env={"PATH": "/usr/bin:/bin", "CNS_WHISPER_MODEL": str(model), "CNS_STT_GOLDEN_DIR": str(missing_corpus)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "CNS_STT_GOLDEN_DIR" in completed.stderr
 
 
 def test_candidate_dmg_must_contain_the_exact_app(

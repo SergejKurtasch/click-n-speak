@@ -301,7 +301,7 @@ def candidate_from_arguments(args: argparse.Namespace, repo_root: Path) -> dict[
     model_artifacts = {
         name: (Path(value) if Path(value).is_absolute() else repo_root / value)
         for name, value in model_paths.items()
-        if value and (Path(value) if Path(value).is_absolute() else repo_root / value).is_dir()
+        if value and (Path(value) if Path(value).is_absolute() else repo_root / value).exists()
     }
     app_path = args.candidate_app if args.candidate_app.is_absolute() else repo_root / args.candidate_app
     dmg_path = args.candidate_dmg if args.candidate_dmg.is_absolute() else repo_root / args.candidate_dmg
@@ -920,7 +920,7 @@ def main() -> int:
     qwen_path = repo_root / qwen_model if qwen_model else repo_root / "__missing_qwen_model__"
     model_requested = (
         environment.get("CNS_RUN_MODEL_TESTS") == "1"
-        and whisper_path.is_dir()
+        and whisper_path.is_file()
         and (golden_path / "manifest.jsonl").is_file()
         and (golden_path / "audio_16k").is_dir()
     )
