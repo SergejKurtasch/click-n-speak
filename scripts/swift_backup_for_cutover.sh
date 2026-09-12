@@ -81,7 +81,7 @@ done < <(find "$SOURCE_DIRECTORY" -maxdepth 1 -type f -name 'initial_prompt_*.tx
 
 if [ -n "$DATASET_FILE" ]; then
     [ -f "$DATASET_FILE" ] || { echo "Dataset file does not exist." >&2; exit 2; }
-    cp -p "$DATASET_FILE" "$DESTINATION/dataset.jsonl"
+    cp -p "$DATASET_FILE" "$DESTINATION/clicknspeak_dataset.jsonl"
 fi
 
 HASH_LINES="$(mktemp "${TMPDIR:-/tmp}/click-n-speak-backup-hashes.XXXXXX")"

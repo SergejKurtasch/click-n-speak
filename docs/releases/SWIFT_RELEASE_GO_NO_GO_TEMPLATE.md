@@ -5,13 +5,18 @@
 - Version:
 - Git revision:
 - Architecture:
+- macOS / hardware:
 - DMG filename:
 - DMG SHA-256:
+- App bundle SHA-256:
+- Whisper model revision:
+- Qwen model revision:
 - Bundle ID: `com.sergej.clicknspeak`
 - Apple Team ID:
 - Signing identity:
 - Notarization submission/evidence:
 - Acceptance summary:
+- Manual evidence schema v2 (operator, completed_at, artifact path + SHA-256):
 
 ## Automated gates
 

@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import platform
 import subprocess
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+import tomllib
 
 LOGGER = logging.getLogger("swift_acceptance")
 VALID_STATUSES = {"passed", "failed", "skipped"}
 VALID_CLASSIFICATIONS = {"automated", "manual", "hybrid"}
+EVIDENCE_SCHEMA_VERSION = 2
+BACKUP_MANIFEST_NAME = "backup_manifest.json"
+DATASET_COPY_NAME = "clicknspeak_dataset.jsonl"
 
 
 @dataclass(frozen=True)
@@ -24,6 +31,177 @@ class GateResult:
     duration_seconds: float
     evidence: str
     detail: str | None = None
+    candidate: dict[str, Any] | None = None
+
+
+def sha256_path(path: Path) -> str:
+    """Return a deterministic SHA-256 for a file or an application bundle."""
+    if not path.exists():
+        raise ValueError(f"Artifact does not exist: {path}")
+    digest = hashlib.sha256()
+    if path.is_file():
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    if not path.is_dir():
+        raise ValueError(f"Artifact is neither a file nor a directory: {path}")
+    files = sorted(item for item in path.rglob("*") if item.is_file())
+    if not files:
+        raise ValueError(f"Artifact directory is empty: {path}")
+    for item in files:
+        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        with item.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def artifact_identity(path: Path) -> dict[str, str]:
+    resolved = path.expanduser().resolve()
+    return {"path": str(resolved), "sha256": sha256_path(resolved)}
+
+
+def build_candidate_identity(
+    *,
+    git_revision: str,
+    version: str,
+    app_path: Path,
+    dmg_path: Path,
+    model_revisions: Mapping[str, str],
+    os_version: str,
+    hardware: str,
+) -> dict[str, Any]:
+    """Create the immutable candidate identifiers shared by every gate."""
+    if not git_revision or not version or not os_version or not hardware:
+        raise ValueError("Candidate identifiers must be non-empty")
+    if not model_revisions or not all(
+        isinstance(name, str) and name and isinstance(value, str) and value
+        for name, value in model_revisions.items()
+    ):
+        raise ValueError("Model revisions must be a non-empty string mapping")
+    return {
+        "git_revision": git_revision,
+        "version": version,
+        "app": artifact_identity(app_path),
+        "dmg": artifact_identity(dmg_path),
+        "model_revisions": dict(sorted(model_revisions.items())),
+        "os": os_version,
+        "hardware": hardware,
+    }
+
+
+def validate_candidate_identity(candidate: Mapping[str, Any]) -> None:
+    required = {"git_revision", "version", "app", "dmg", "model_revisions", "os", "hardware"}
+    if set(candidate) != required:
+        raise ValueError("Candidate identity has unsupported or missing fields")
+    for name in ("git_revision", "version", "os", "hardware"):
+        if not isinstance(candidate[name], str) or not candidate[name]:
+            raise ValueError(f"Candidate {name} must be a non-empty string")
+    revisions = candidate["model_revisions"]
+    if not isinstance(revisions, dict) or not all(
+        isinstance(name, str) and name and isinstance(value, str) and value
+        for name, value in revisions.items()
+    ):
+        raise ValueError("Candidate model_revisions must be a string mapping")
+    for name in ("app", "dmg"):
+        artifact = candidate[name]
+        if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256"}:
+            raise ValueError(f"Candidate {name} artifact is invalid")
+        if not isinstance(artifact["path"], str) or not artifact["path"]:
+            raise ValueError(f"Candidate {name} artifact path is invalid")
+        if not isinstance(artifact["sha256"], str) or len(artifact["sha256"]) != 64:
+            raise ValueError(f"Candidate {name} SHA-256 is invalid")
+
+
+def verify_artifact(artifact: Mapping[str, Any], *, label: str) -> Path:
+    if set(artifact) != {"path", "sha256"}:
+        raise ValueError(f"{label} must contain path and sha256")
+    path_value = artifact.get("path")
+    expected_checksum = artifact.get("sha256")
+    if not isinstance(path_value, str) or not path_value:
+        raise ValueError(f"{label} path is invalid")
+    if not isinstance(expected_checksum, str) or len(expected_checksum) != 64:
+        raise ValueError(f"{label} checksum is invalid")
+    path = Path(path_value).expanduser().resolve()
+    if sha256_path(path) != expected_checksum:
+        raise ValueError(f"{label} checksum does not match: {path}")
+    return path
+
+
+def build_gate_environment(*, production: bool, base: Mapping[str, str] | None = None) -> dict[str, str]:
+    environment = dict(os.environ if base is None else base)
+    environment["CNS_PRODUCTION_RELEASE"] = "1" if production else "0"
+    environment["CNS_RESET_TCC_AFTER_BUILD"] = "0"
+    return environment
+
+
+def missing_prerequisite_gate(name: str, detail: str) -> GateResult:
+    return GateResult(name, "missing_prerequisite", 0.0, "", detail)
+
+
+def gate_log_path(output_path: Path, gate_name: str) -> Path:
+    safe_name = gate_name.replace("/", "_")
+    return output_path.parent / "gates" / f"{safe_name}.log"
+
+
+def scenario_gate_command(repo_root: Path, test_targets: Sequence[str]) -> list[str]:
+    target = test_targets[0]
+    if target.startswith("tests/"):
+        return [str(repo_root / "venv" / "bin" / "python"), "-m", "pytest", "-q", target]
+    parts = Path(target).parts
+    if len(parts) >= 2 and parts[0] == "Packages":
+        package = repo_root / parts[0] / parts[1]
+    elif parts and parts[0] == "ClickNSpeak":
+        package = repo_root / "ClickNSpeak"
+    else:
+        raise ValueError(f"Unsupported scenario test target: {target}")
+    return ["swift", "test", "--disable-index-store", "--package-path", str(package)]
+
+
+def current_git_revision(repo_root: Path) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    revision = completed.stdout.strip()
+    if completed.returncode != 0 or not revision:
+        raise ValueError("Could not determine the current git revision")
+    return revision
+
+
+def project_version(repo_root: Path) -> str:
+    with (repo_root / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle).get("project")
+    if not isinstance(project, dict) or not isinstance(project.get("version"), str):
+        raise ValueError("Could not determine the project version")
+    return project["version"]
+
+
+def candidate_from_arguments(args: argparse.Namespace, repo_root: Path) -> dict[str, Any]:
+    if args.candidate_dmg is None:
+        raise ValueError("Acceptance requires --candidate-dmg for the checked candidate")
+    try:
+        model_revisions = json.loads(args.candidate_model_revisions)
+    except json.JSONDecodeError as error:
+        raise ValueError("--candidate-model-revisions must be a JSON object") from error
+    if not isinstance(model_revisions, dict):
+        raise ValueError("--candidate-model-revisions must be a JSON object")
+    app_path = args.candidate_app if args.candidate_app.is_absolute() else repo_root / args.candidate_app
+    dmg_path = args.candidate_dmg if args.candidate_dmg.is_absolute() else repo_root / args.candidate_dmg
+    return build_candidate_identity(
+        git_revision=current_git_revision(repo_root),
+        version=args.candidate_version or project_version(repo_root),
+        app_path=app_path,
+        dmg_path=dmg_path,
+        model_revisions=model_revisions,
+        os_version=args.candidate_os or platform.mac_ver()[0] or platform.platform(),
+        hardware=args.candidate_hardware or platform.machine(),
+    )
 
 
 def load_json_object(path: Path) -> dict[str, Any]:
@@ -74,6 +252,20 @@ def validate_scenario_manifest(payload: Mapping[str, Any]) -> list[dict[str, Any
             raise ValueError(f"release_critical must be Boolean for {scenario_id}")
         if not isinstance(raw["fixture_ids"], list):
             raise ValueError(f"fixture_ids must be a list for {scenario_id}")
+        if raw["classification"] == "automated":
+            targets = raw.get("test_targets")
+            regression_ids = raw.get("regression_ids")
+            if not isinstance(targets, list) or not targets:
+                raise ValueError(f"test_targets must be a non-empty list for {scenario_id}")
+            if not all(isinstance(target, str) and target for target in targets):
+                raise ValueError(f"test_targets must contain non-empty strings for {scenario_id}")
+            if not isinstance(regression_ids, list) or not all(
+                isinstance(regression_id, str) and regression_id.startswith("R")
+                for regression_id in regression_ids
+            ):
+                raise ValueError(f"regression_ids must contain R-prefixed IDs for {scenario_id}")
+            if raw["evidence_gate"] == "swift_fast":
+                raise ValueError(f"Automated scenario {scenario_id} cannot use only the fast prerequisite")
         required = raw["required"]
         if not isinstance(required, dict) or set(required) != {
             "signed_app",
@@ -86,12 +278,26 @@ def validate_scenario_manifest(payload: Mapping[str, Any]) -> list[dict[str, Any
     return validated
 
 
-def load_manual_evidence(path: Path | None) -> dict[str, dict[str, Any]]:
+def load_manual_evidence(
+    path: Path | None,
+    *,
+    expected_candidate: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
     if path is None:
         return {}
     payload = load_json_object(path)
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
         raise ValueError("Unsupported manual evidence schema")
+    candidate = payload.get("candidate")
+    if not isinstance(candidate, dict):
+        raise ValueError("Manual evidence must contain a candidate identity")
+    validate_candidate_identity(candidate)
+    if expected_candidate is not None:
+        validate_candidate_identity(expected_candidate)
+        if candidate != expected_candidate:
+            raise ValueError("Manual evidence belongs to a different candidate")
+        verify_artifact(expected_candidate["app"], label="Candidate app")
+        verify_artifact(expected_candidate["dmg"], label="Candidate DMG")
     raw_results = payload.get("results")
     if not isinstance(raw_results, dict):
         raise ValueError("Manual evidence must contain a results object")
@@ -99,10 +305,22 @@ def load_manual_evidence(path: Path | None) -> dict[str, dict[str, Any]]:
     for scenario_id, result in raw_results.items():
         if not isinstance(result, dict) or result.get("status") not in VALID_STATUSES:
             raise ValueError(f"Invalid manual evidence for {scenario_id}")
-        evidence = result.get("evidence")
-        if result["status"] == "passed" and (not isinstance(evidence, str) or not evidence):
-            raise ValueError(f"Passed manual evidence needs a location: {scenario_id}")
-        results[str(scenario_id)] = result
+        if result["status"] == "passed":
+            operator = result.get("operator")
+            completed_at = result.get("completed_at")
+            artifact = result.get("artifact")
+            if not isinstance(operator, str) or not operator:
+                raise ValueError(f"Passed manual evidence needs an operator: {scenario_id}")
+            if not isinstance(completed_at, str) or not completed_at:
+                raise ValueError(f"Passed manual evidence needs completion time: {scenario_id}")
+            if not isinstance(artifact, dict):
+                raise ValueError(f"Passed manual evidence needs an artifact: {scenario_id}")
+            artifact_path = verify_artifact(artifact, label=f"Manual evidence artifact for {scenario_id}")
+            stored = dict(result)
+            stored["evidence"] = str(artifact_path)
+            results[str(scenario_id)] = stored
+        else:
+            results[str(scenario_id)] = dict(result)
     return results
 
 
@@ -121,6 +339,40 @@ def validate_data_copy(path: Path, repo_root: Path) -> Path:
 def audit_data_copy(path: Path) -> tuple[bool, str]:
     """Read only known persistence files and reject malformed structured data."""
     checked: list[str] = []
+    dataset = path / DATASET_COPY_NAME
+    if not dataset.is_file():
+        raise ValueError(f"Data copy requires {DATASET_COPY_NAME}")
+    dataset_rows = 0
+    with dataset.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if line.strip():
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError(f"{DATASET_COPY_NAME}:{line_number} is not a JSON object")
+                dataset_rows += 1
+    if dataset_rows == 0:
+        raise ValueError(f"Data copy {DATASET_COPY_NAME} is empty")
+    checked.append(DATASET_COPY_NAME)
+
+    manifest_path = path / BACKUP_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise ValueError(f"Data copy requires {BACKUP_MANIFEST_NAME}")
+    manifest = load_json_object(manifest_path)
+    files = manifest.get("files")
+    if manifest.get("schema_version") != 1 or not isinstance(files, list) or not files:
+        raise ValueError(f"{BACKUP_MANIFEST_NAME} is malformed")
+    dataset_entry = next(
+        (item for item in files if isinstance(item, dict) and item.get("name") == DATASET_COPY_NAME),
+        None,
+    )
+    if not isinstance(dataset_entry, dict):
+        raise ValueError(f"{BACKUP_MANIFEST_NAME} does not inventory {DATASET_COPY_NAME}")
+    if dataset_entry.get("sha256") != sha256_path(dataset):
+        raise ValueError(f"{BACKUP_MANIFEST_NAME} checksum does not match {DATASET_COPY_NAME}")
+    if dataset_entry.get("size") != dataset.stat().st_size:
+        raise ValueError(f"{BACKUP_MANIFEST_NAME} size does not match {DATASET_COPY_NAME}")
+    checked.append(BACKUP_MANIFEST_NAME)
+
     config = path / "config.json"
     if config.exists():
         load_json_object(config)
@@ -129,7 +381,7 @@ def audit_data_copy(path: Path) -> tuple[bool, str]:
     if corrections.exists():
         load_json_object(corrections)
         checked.append("corrections.json")
-    for name in ("metrics_history.jsonl", "dataset.jsonl"):
+    for name in ("metrics_history.jsonl",):
         candidate = path / name
         if not candidate.exists():
             continue
@@ -149,31 +401,72 @@ def run_gate(
     command: Sequence[str],
     repo_root: Path,
     environment: Mapping[str, str],
+    log_path: Path,
 ) -> GateResult:
     started = time.monotonic()
     LOGGER.info("Running gate %s", name)
-    completed = subprocess.run(
-        list(command),
-        cwd=repo_root,
-        env=dict(environment),
-        check=False,
-    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        completed = subprocess.run(
+            list(command),
+            cwd=repo_root,
+            env=dict(environment),
+            check=False,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
     duration = time.monotonic() - started
     if completed.returncode == 0:
-        return GateResult(name, "passed", duration, name)
+        return GateResult(name, "passed", duration, str(log_path))
     return GateResult(
         name,
         "failed",
         duration,
-        name,
+        str(log_path),
         f"command exited with status {completed.returncode}",
     )
+
+
+def run_scenario_gate(
+    *,
+    name: str,
+    test_targets: Sequence[str],
+    repo_root: Path,
+    environment: Mapping[str, str],
+    log_path: Path,
+) -> GateResult:
+    """Run every declared scenario target so a fast prerequisite cannot imply coverage."""
+    started = time.monotonic()
+    LOGGER.info("Running scenario gate %s", name)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        for target in test_targets:
+            command = scenario_gate_command(repo_root, [target])
+            completed = subprocess.run(
+                command,
+                cwd=repo_root,
+                env=dict(environment),
+                check=False,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+            if completed.returncode != 0:
+                duration = time.monotonic() - started
+                return GateResult(
+                    name,
+                    "failed",
+                    duration,
+                    str(log_path),
+                    f"target {target} exited with status {completed.returncode}",
+                )
+    return GateResult(name, "passed", time.monotonic() - started, str(log_path))
 
 
 def scenario_result(
     scenario: Mapping[str, Any],
     gates: Mapping[str, GateResult],
     manual: Mapping[str, Mapping[str, Any]],
+    candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     scenario_id = str(scenario["id"])
     classification = str(scenario["classification"])
@@ -182,7 +475,7 @@ def scenario_result(
     manual_result = manual.get(scenario_id)
 
     if classification == "automated":
-        status = gate.status if gate else "skipped"
+        status = gate.status if gate and gate.status in VALID_STATUSES else "skipped"
         evidence = gate.evidence if gate else str(scenario["evidence_location"])
         detail = gate.detail if gate else "automated gate was not selected"
     elif classification == "manual":
@@ -207,7 +500,7 @@ def scenario_result(
             evidence = str(scenario["evidence_location"])
             detail = "hybrid scenario still needs automated or manual evidence"
 
-    return {
+    result = {
         "id": scenario_id,
         "area": scenario["area"],
         "classification": classification,
@@ -217,6 +510,9 @@ def scenario_result(
         "detail": detail,
         "intentional_deviation": scenario["intentional_deviation"],
     }
+    if classification == "automated" and candidate is not None:
+        result["candidate"] = dict(candidate)
+    return result
 
 
 def write_summary(path: Path, summary: Mapping[str, Any]) -> None:
@@ -259,6 +555,28 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Require production signing inputs for the bundle gate.",
     )
+    parser.add_argument(
+        "--candidate-app",
+        type=Path,
+        default=Path("dist/swift/Click-n-speak.app"),
+        help="Built application bundle whose checksum is recorded in acceptance evidence.",
+    )
+    parser.add_argument(
+        "--candidate-dmg",
+        type=Path,
+        help="DMG artifact whose checksum is recorded in acceptance evidence.",
+    )
+    parser.add_argument(
+        "--candidate-version",
+        help="Release version; defaults to pyproject.toml.",
+    )
+    parser.add_argument(
+        "--candidate-model-revisions",
+        default="{}",
+        help="JSON mapping of each shipped model to its immutable revision.",
+    )
+    parser.add_argument("--candidate-os", help="Observed macOS version for this candidate.")
+    parser.add_argument("--candidate-hardware", help="Observed hardware for this candidate.")
     return parser.parse_args()
 
 
@@ -286,8 +604,7 @@ def main() -> int:
         LOGGER.info("Validated %d parity scenarios", len(scenarios))
         return 0
 
-    environment = os.environ.copy()
-    environment["CNS_PRODUCTION_RELEASE"] = "1" if args.production else "0"
+    environment = build_gate_environment(production=args.production)
     if args.production and (
         not environment.get("CNS_CODESIGN_IDENTITY") or not environment.get("APPLE_TEAM_ID")
     ):
@@ -295,11 +612,15 @@ def main() -> int:
         return 2
 
     gates: dict[str, GateResult] = {}
+    fast_environment = dict(environment)
+    fast_environment["CNS_RUN_MODEL_TESTS"] = "0"
+    fast_environment["CNS_RUN_EDITOR_MODEL_TESTS"] = "0"
     gates["swift_fast"] = run_gate(
         name="swift_fast",
         command=[str(repo_root / "scripts" / "swift_verify.sh")],
         repo_root=repo_root,
-        environment=environment,
+        environment=fast_environment,
+        log_path=gate_log_path(output_path, "swift_fast"),
     )
     model_requested = environment.get("CNS_RUN_MODEL_TESTS") == "1" and bool(
         environment.get("CNS_WHISPER_MODEL")
@@ -307,20 +628,38 @@ def main() -> int:
     editor_requested = environment.get("CNS_RUN_EDITOR_MODEL_TESTS") == "1" and bool(
         environment.get("CNS_QWEN_MODEL_DIR")
     )
-    gates["stt_model"] = GateResult(
-        "stt_model",
-        "passed" if model_requested and gates["swift_fast"].status == "passed" else "skipped",
-        0.0,
-        "swift_fast:model-gated-stt",
-        None if model_requested else "CNS_RUN_MODEL_TESTS/CNS_WHISPER_MODEL not supplied",
-    )
-    gates["editor_model"] = GateResult(
-        "editor_model",
-        "passed" if editor_requested and gates["swift_fast"].status == "passed" else "skipped",
-        0.0,
-        "swift_fast:model-gated-editor",
-        None if editor_requested else "CNS_RUN_EDITOR_MODEL_TESTS/CNS_QWEN_MODEL_DIR not supplied",
-    )
+    if not model_requested:
+        gates["stt_model"] = missing_prerequisite_gate(
+            "stt_model", "CNS_RUN_MODEL_TESTS=1 and CNS_WHISPER_MODEL are required"
+        )
+    elif gates["swift_fast"].status != "passed":
+        gates["stt_model"] = GateResult(
+            "stt_model", "failed", 0.0, "", "swift_fast prerequisite failed"
+        )
+    else:
+        gates["stt_model"] = run_gate(
+            name="stt_model",
+            command=[str(repo_root / "scripts" / "swift_verify.sh")],
+            repo_root=repo_root,
+            environment=environment,
+            log_path=gate_log_path(output_path, "stt_model"),
+        )
+    if not editor_requested:
+        gates["editor_model"] = missing_prerequisite_gate(
+            "editor_model", "CNS_RUN_EDITOR_MODEL_TESTS=1 and CNS_QWEN_MODEL_DIR are required"
+        )
+    elif gates["swift_fast"].status != "passed":
+        gates["editor_model"] = GateResult(
+            "editor_model", "failed", 0.0, "", "swift_fast prerequisite failed"
+        )
+    else:
+        gates["editor_model"] = run_gate(
+            name="editor_model",
+            command=[str(repo_root / "scripts" / "swift_verify.sh")],
+            repo_root=repo_root,
+            environment=environment,
+            log_path=gate_log_path(output_path, "editor_model"),
+        )
 
     python_executable = repo_root / "venv" / "bin" / "python"
     if python_executable.is_file():
@@ -335,6 +674,7 @@ def main() -> int:
             ],
             repo_root=repo_root,
             environment=environment,
+            log_path=gate_log_path(output_path, "data_compat"),
         )
     else:
         gates["data_compat"] = GateResult(
@@ -346,7 +686,65 @@ def main() -> int:
         command=[str(repo_root / "scripts" / "swift_build_app.sh"), "release"],
         repo_root=repo_root,
         environment=environment,
+        log_path=gate_log_path(output_path, "bundle_dev"),
     )
+
+    candidate: dict[str, Any] | None = None
+    if gates["bundle_dev"].status == "passed":
+        try:
+            candidate = candidate_from_arguments(args, repo_root)
+            gates["candidate_artifacts"] = GateResult(
+                "candidate_artifacts",
+                "passed",
+                0.0,
+                str(args.candidate_app),
+                "verified app and DMG candidate checksums",
+                candidate,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            gates["candidate_artifacts"] = GateResult(
+                "candidate_artifacts", "failed", 0.0, "", str(error)
+            )
+    else:
+        gates["candidate_artifacts"] = GateResult(
+            "candidate_artifacts", "failed", 0.0, "", "bundle_dev prerequisite failed"
+        )
+
+    if candidate is not None:
+        gates = {name: replace(gate, candidate=candidate) for name, gate in gates.items()}
+        if evidence_path is not None:
+            try:
+                manual = load_manual_evidence(evidence_path, expected_candidate=candidate)
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                manual = {}
+                gates["manual_evidence"] = GateResult(
+                    "manual_evidence",
+                    "failed",
+                    0.0,
+                    str(evidence_path),
+                    str(error),
+                    candidate,
+                )
+
+    for scenario in scenarios:
+        gate_name = str(scenario["evidence_gate"])
+        if scenario["classification"] != "automated" or not gate_name.startswith("scenario."):
+            continue
+        if gates["swift_fast"].status != "passed":
+            gates[gate_name] = GateResult(
+                gate_name, "failed", 0.0, "", "swift_fast prerequisite failed"
+            )
+            continue
+        try:
+            gates[gate_name] = run_scenario_gate(
+                name=gate_name,
+                test_targets=scenario["test_targets"],
+                repo_root=repo_root,
+                environment=environment,
+                log_path=gate_log_path(output_path, gate_name),
+            )
+        except ValueError as error:
+            gates[gate_name] = GateResult(gate_name, "failed", 0.0, "", str(error))
 
     if args.data_copy is not None:
         started = time.monotonic()
@@ -369,7 +767,9 @@ def main() -> int:
                 str(error),
             )
 
-    scenario_results = [scenario_result(item, gates, manual) for item in scenarios]
+    if candidate is not None:
+        gates = {name: replace(gate, candidate=candidate) for name, gate in gates.items()}
+    scenario_results = [scenario_result(item, gates, manual, candidate) for item in scenarios]
     counts = {
         status: sum(result["status"] == status for result in scenario_results)
         for status in sorted(VALID_STATUSES)
@@ -388,8 +788,8 @@ def main() -> int:
     strict_incomplete = bool(critical_skips) and not args.automated_only
     decision = "go" if not critical_failures and not gate_failures and not critical_skips else "no-go"
     summary = {
-        "schema_version": 1,
-        "candidate": "swift",
+        "schema_version": 2,
+        "candidate": candidate,
         "generated_at_epoch_seconds": int(time.time()),
         "mode": "automated-only" if args.automated_only else "full-acceptance",
         "production_signing_required": args.production,

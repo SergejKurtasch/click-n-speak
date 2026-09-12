@@ -4,7 +4,9 @@ Do not execute this runbook until the versioned go/no-go report has a written **
 
 ## 1. Freeze and identify artifacts
 
-Record the final git revision, version, architecture, Team ID, notarization submission, DMG filename, post-staple SHA-256, and manifest SHA-256. Confirm the release manifest and GitHub release assets are byte-consistent before changing the public channel.
+Record the final git revision, version, macOS/hardware, pinned model revisions, Team ID, notarization submission, DMG filename, post-staple DMG SHA-256, app-bundle SHA-256, and manifest SHA-256. Manual evidence uses schema v2 and must name this exact candidate plus the operator, completion time, evidence artifact path, and artifact SHA-256. Confirm the release manifest and GitHub release assets are byte-consistent before changing the public channel.
+
+Run acceptance against copies and the already-built candidate artifacts; do not target or replace an installed production application. The build gate receives `CNS_RESET_TCC_AFTER_BUILD=0` explicitly, so acceptance does not reset TCC.
 
 Retain these rollback inputs:
 
