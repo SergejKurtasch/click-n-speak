@@ -189,6 +189,7 @@ public protocol DictionaryCoordinating: AnyObject {
     var correctionsURL: URL { get }
     func recordConfirmation(_ confirmation: DictionaryConfirmation) async -> ConfirmationPersistenceResult
     func addManualTerm(_ term: String, language: String) -> Bool
+    func addManualTermValidated(_ term: String, language: String) throws -> Bool
 }
 
 public enum DictionaryCoordinatorError: LocalizedError {
@@ -442,19 +443,28 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
     }
 
     @discardableResult
-    public func addManualTerm(_ term: String, language: String) -> Bool {
+    public func addManualTermValidated(_ term: String, language: String) throws -> Bool {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard TermParsing.isValidTerm(trimmed) else { throw DictionaryCoordinatorError.invalidTerm }
         var candidate = snapshot
         guard UserTerms.add(
             to: &candidate,
             lang: language,
-            term: term,
+            term: trimmed,
             source: .manual,
             now: ISOTimestamp.now(clock())
         ) else { return false }
+        try commit(candidate, promptLanguages: [LanguageCode.normalize(language)], invalidations: [.terms])
+        return true
+    }
+
+    public func addManualTerm(_ term: String, language: String) -> Bool {
         do {
-            try commit(candidate, promptLanguages: [LanguageCode.normalize(language)], invalidations: [.terms])
-            return true
+            return try addManualTermValidated(term, language: language)
         } catch {
+            if let err = error as? DictionaryCoordinatorError, err == .invalidTerm {
+                return false
+            }
             log("Add-to-dictionary persistence failed: \(error.localizedDescription)")
             return false
         }

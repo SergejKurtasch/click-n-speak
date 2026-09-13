@@ -494,5 +494,12 @@
   "notify.hotkey_failed_body": "Could not register Option+Space. Is another app using it?",
   "wizard.permissions_already_granted_title": "Permissions Already Granted",
   "wizard.permissions_already_granted_body": "All required system permissions are already granted.",
-  "menu.ai_disabled": "Disabled"
+  "menu.ai_disabled": "Disabled",
+  "terms.conflict_changed": "Term changed elsewhere",
+  "terms.conflict_deleted": "Term deleted elsewhere",
+  "terms.add_as_new": "Add as new",
+  "terms.load_saved": "Load saved",
+  "terms.discard": "Discard",
+  "stats.loading": "Loading statistics...",
+  "stats.failed": "Failed to load statistics."
 }

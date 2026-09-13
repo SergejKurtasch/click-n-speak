@@ -23,7 +23,7 @@ public final class TermsPanel: NSWindow, RefreshablePanel {
         center()
     }
 
-    public func refresh() { viewModel.load(resetDrafts: true) }
+    public func refresh() { viewModel.load() }
     public func refreshForPresentation() { refresh() }
     var termCountForTesting: Int { viewModel.terms.count }
 
@@ -102,13 +102,24 @@ private struct TermsView: View {
                         Text("\(item.useCount)").frame(width: 45)
                         Text(viewModel.dateLabel(item.addedAt)).frame(width: 86)
                         Text(viewModel.dateLabel(item.lastSeen)).frame(width: 86)
-                        if item.inactive {
-                            Button(viewModel.i18n.t("terms.reactivate")) { viewModel.reactivate(item) }
+                        if let draft = viewModel.drafts.draft(for: item.id), draft.hasConflict {
+                            if draft.remote == nil {
+                                Text(viewModel.i18n.t("terms.conflict_deleted")).foregroundStyle(.red).font(.caption)
+                                Button(viewModel.i18n.t("terms.add_as_new")) { viewModel.addAsNew(item, text: draft.text) }
+                            } else {
+                                Text(viewModel.i18n.t("terms.conflict_changed")).foregroundStyle(.orange).font(.caption)
+                                Button(viewModel.i18n.t("btn.save")) { viewModel.forceSave(item, text: draft.text, oldTerm: draft.remote!) }
+                            }
+                            Button(viewModel.i18n.t("terms.load_saved")) { viewModel.discardDraft(for: item) }
                         } else {
-                            Button(viewModel.i18n.t("btn.save")) { viewModel.save(item) }
-                        }
-                        Button(viewModel.i18n.t("btn.delete"), role: .destructive) {
-                            viewModel.delete(item)
+                            if item.inactive {
+                                Button(viewModel.i18n.t("terms.reactivate")) { viewModel.reactivate(item) }
+                            } else {
+                                Button(viewModel.i18n.t("btn.save")) { viewModel.save(item) }
+                            }
+                            Button(viewModel.i18n.t("btn.delete"), role: .destructive) {
+                                viewModel.delete(item)
+                            }
                         }
                     }
                     .accessibilityElement(children: .contain)
@@ -138,19 +149,21 @@ private final class TermsViewModel: ObservableObject {
     @Published var newTerm = ""
     @Published var newTermLanguage: String
     private let coordinator: DictionaryCoordinator
-    private var drafts: [String: String] = [:]
+    @Published var drafts = TermDraftStore()
 
     init(coordinator: DictionaryCoordinator, i18n: I18n) {
         self.coordinator = coordinator
         self.i18n = i18n
         self.newTermLanguage = coordinator.snapshot.primaryLanguage
-        load(resetDrafts: true)
+        load()
     }
 
-    func load(resetDrafts: Bool = false) {
+    func load() {
         terms = coordinator.terms()
-        if resetDrafts { drafts.removeAll() }
-        for item in terms { drafts[item.id] = drafts[item.id] ?? item.term }
+        var currentValues = [String: String]()
+        for item in terms { currentValues[item.id] = item.term }
+        drafts.reconcile(currentValues)
+        
         if !configuredLanguages.contains(newTermLanguage) {
             newTermLanguage = coordinator.snapshot.primaryLanguage
         }
@@ -177,23 +190,88 @@ private final class TermsViewModel: ObservableObject {
 
     func binding(for item: DictionaryTerm) -> Binding<String> {
         Binding(
-            get: { self.drafts[item.id] ?? item.term },
-            set: { self.drafts[item.id] = $0 }
+            get: { self.drafts.draft(for: item.id)?.text ?? item.term },
+            set: { self.drafts.setText($0, for: item.id) }
         )
     }
 
     func save(_ item: DictionaryTerm) {
-        let replacement = drafts[item.id] ?? item.term
-        guard replacement != item.term else { return }
-        perform { try coordinator.editTerm(language: item.language, oldTerm: item.term, newTerm: replacement) }
+        guard let draft = drafts.draft(for: item.id) else { return }
+        if draft.hasConflict {
+            if draft.remote == nil {
+                errorMessage = i18n.t("terms.conflict_deleted")
+            } else {
+                errorMessage = i18n.t("terms.conflict_changed")
+            }
+            return
+        }
+        let replacement = draft.text
+        guard replacement != draft.baseline else { return }
+        do {
+            try coordinator.editTerm(language: item.language, oldTerm: draft.baseline, newTerm: replacement)
+            errorMessage = nil
+            drafts.reset(for: item.id)
+            load()
+        } catch {
+            errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
+        }
+    }
+    
+    func forceSave(_ item: DictionaryTerm, text: String, oldTerm: String) {
+        do {
+            try coordinator.editTerm(language: item.language, oldTerm: oldTerm, newTerm: text)
+            errorMessage = nil
+            drafts.reset(for: item.id)
+            load()
+        } catch {
+            errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
+        }
+    }
+    
+    func addAsNew(_ item: DictionaryTerm, text: String) {
+        do {
+            let success = try coordinator.addManualTermValidated(text, language: item.language)
+            if success {
+                errorMessage = nil
+                drafts.reset(for: item.id)
+                load()
+            } else {
+                errorMessage = i18n.t("ui.error_duplicate_term")
+            }
+        } catch {
+            errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
+        }
+    }
+    
+    func discardDraft(for item: DictionaryTerm) {
+        drafts.acceptRemote(for: item.id)
+        errorMessage = nil
+        // If it was deleted, acceptRemote removes it from drafts.
+        // We should trigger objectWillChange manually if needed, but @Published drafts should do it if we change it to object? 
+        // Wait, `drafts` is a struct, so assigning to it triggers @Published if it's published. 
+        // We should make `drafts` @Published.
     }
 
     func delete(_ item: DictionaryTerm) {
-        perform { try coordinator.deleteTerm(language: item.language, term: item.term) }
+        do {
+            try coordinator.deleteTerm(language: item.language, term: item.term)
+            errorMessage = nil
+            drafts.reset(for: item.id) // Will be removed in load()
+            load()
+        } catch {
+            errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
+        }
     }
 
     func reactivate(_ item: DictionaryTerm) {
-        perform { try coordinator.reactivateTerm(language: item.language, term: item.term) }
+        do {
+            try coordinator.reactivateTerm(language: item.language, term: item.term)
+            errorMessage = nil
+            drafts.reset(for: item.id)
+            load()
+        } catch {
+            errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
+        }
     }
 
     func addTerm() {
@@ -208,12 +286,18 @@ private final class TermsViewModel: ObservableObject {
         }
         newTerm = ""
         errorMessage = nil
-        load(resetDrafts: true)
+        load()
     }
 
     func revert() {
         let language = languageFilter == "all" ? coordinator.snapshot.primaryLanguage : languageFilter
-        perform { try coordinator.revert(language: language) }
+        do {
+            try coordinator.revert(language: language)
+            errorMessage = nil
+            load()
+        } catch {
+            errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
+        }
     }
 
     func sourceLabel(_ source: String) -> String { i18n.t("terms.source_\(source)") }
@@ -227,9 +311,15 @@ private final class TermsViewModel: ObservableObject {
         do {
             try operation()
             errorMessage = nil
-            load(resetDrafts: true)
+            load()
         } catch {
             errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
         }
     }
+}
+
+extension TermsPanel {
+    var termsForTesting: [DictionaryTerm] { viewModel.terms }
+    func draftTextForTesting(id: String) -> String? { viewModel.drafts.draft(for: id)?.text }
+    func setDraftTextForTesting(_ text: String, id: String) { viewModel.drafts.setText(text, for: id) }
 }

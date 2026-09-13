@@ -27,7 +27,7 @@ public final class ReplacementsPanel: NSWindow, RefreshablePanel {
 
     public func refreshForPresentation() {
         viewModel.isRejectedExpanded = false
-        viewModel.load(resetDrafts: true)
+        viewModel.load()
     }
 
     var replacementCountForTesting: Int {
@@ -226,15 +226,11 @@ private final class ReplacementsViewModel: ObservableObject {
     init(coordinator: DictionaryCoordinator, i18n: I18n) {
         self.coordinator = coordinator
         self.i18n = i18n
-        load(resetDrafts: true)
+        load()
     }
 
-    func load(resetDrafts: Bool = false) {
+    func load() {
         sections = coordinator.replacementSections()
-        if resetDrafts {
-            fromDrafts.removeAll()
-            toDrafts.removeAll()
-        }
         for row in sections.active where row.source == "manual" {
             if fromDrafts[row.id] == nil { fromDrafts[row.id] = row.from }
             if toDrafts[row.id] == nil { toDrafts[row.id] = row.to }
@@ -285,7 +281,11 @@ private final class ReplacementsViewModel: ObservableObject {
         let replacements = sections.active.filter { $0.source == "manual" }.map { current in
             current.id == row.id ? edited : (current.from, current.to)
         }
-        perform { try coordinator.saveManualReplacements(replacements) }
+        perform { 
+            try coordinator.saveManualReplacements(replacements)
+            fromDrafts.removeValue(forKey: row.id)
+            toDrafts.removeValue(forKey: row.id)
+        }
     }
 
     func approve(_ row: ReplacementRow) {
@@ -328,7 +328,7 @@ private final class ReplacementsViewModel: ObservableObject {
         do {
             try operation()
             errorMessage = nil
-            load(resetDrafts: true)
+            load()
         } catch {
             errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
         }

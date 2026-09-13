@@ -69,7 +69,7 @@ public final class MenuBarController: NSObject {
     /// Download progress panel.
     private lazy var downloadPanel = ModelDownloadPanel(i18n: i18n, log: log)
     private var appUpdateTask: Task<Void, Never>?
-    private var statisticsTask: Task<Void, Never>?
+    private var statisticsPanel: StatisticsPanel?
 
     /// - Parameter installStatusItem: when false, no `NSStatusItem` is created,
     ///   so the menu tree can be built and inspected headlessly in tests.
@@ -1203,98 +1203,38 @@ public final class MenuBarController: NSObject {
         replacementsPanel?.presentPanel()
     }
     @objc private func onStatistics() {
-        if let dictionaryCoordinator {
-            statisticsTask?.cancel()
-            statisticsTask = Task { [weak self, weak dictionaryCoordinator] in
-                guard let self, let dictionaryCoordinator else { return }
-                do {
-                    let metrics = try await dictionaryCoordinator.computeMetricsForPresentation()
-                    try Task.checkCancellation()
-                    self.presentStatistics(metrics)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    self.log("Metrics computation failed: \(error.localizedDescription)")
-                    self.presentStatistics(JSONObject())
+        if statisticsPanel == nil {
+            statisticsPanel = StatisticsPanel(
+                i18n: i18n,
+                openHistory: { [weak self] in
+                    guard let self = self else { return }
+                    self.openEnsuringFile(self.paths.metricsHistoryFile, defaultContents: "")
+                },
+                fetchMetrics: { [weak self] _ in
+                    if let coordinator = self?.dictionaryCoordinator {
+                        return try await coordinator.computeMetricsForPresentation()
+                    }
+                    guard let self = self else { throw DictionaryCoordinatorError.noSnapshot }
+                    return Metrics.computeMetrics(
+                        datasetUrl: self.paths.datasetFile,
+                        correctionsUrl: self.paths.correctionsFile,
+                        config: self.config.raw
+                    )
                 }
-                self.statisticsTask = nil
-            }
-            return
-        } else {
-            presentStatistics(Metrics.computeMetrics(
-                datasetUrl: paths.datasetFile,
-                correctionsUrl: paths.correctionsFile,
-                config: config.raw
-            ))
-        }
-    }
-
-    private func presentStatistics(_ metrics: JSONObject) {
-        func percentage(_ value: Double?) -> String {
-            value.map { String(format: "%.1f%%", $0 * 100) } ?? t("stats.not_available")
-        }
-        func trend(_ value: JSONValue?, positiveGood: Bool) -> String {
-            guard let delta = value?.objectValue?["delta"]?.doubleValue else {
-                return t("stats.not_available")
-            }
-            let arrow = delta > 0 ? "↑" : delta < 0 ? "↓" : "→"
-            let qualityKey: String
-            if abs(delta) < 0.000_000_001 {
-                qualityKey = "stats.trend_neutral"
-            } else if (delta > 0) == positiveGood {
-                qualityKey = "stats.trend_good"
-            } else {
-                qualityKey = "stats.trend_bad"
-            }
-            return String(format: "%@ %+.1fpp (%@)", arrow, delta * 100, t(qualityKey))
-        }
-
-        let editScore = percentage(metrics["edit_score_avg"]?.doubleValue)
-        let activeTerms = metrics["active_terms_count"]?.intValue ?? 0
-        let manualTerms = metrics["manual_terms_count"]?.intValue ?? 0
-        let automaticTerms = metrics["auto_terms_count"]?.intValue ?? 0
-        let correctionTerms = metrics["correction_terms_count"]?.intValue ?? 0
-        let dictHitRate = percentage(metrics["hit_rate"]?.doubleValue)
-        let windowSize = metrics["window_size"]?.intValue ?? 100
-        let accepted = metrics["accepted_total"]?.intValue ?? 0
-        let rejected = metrics["rejected_total"]?.intValue ?? 0
-        let promptUsed = metrics["prompt_tokens_used"]?.intValue ?? 0
-        let promptMaximum = metrics["prompt_tokens_max"]?.intValue ?? 0
-        let inactive = metrics["inactive_terms_count"]?.intValue ?? 0
-
-        var lines = [
-            t("stats.performance_header", ["n": String(windowSize)]),
-            "",
-            "\(t("stats.edit_label")): \(editScore)   \(trend(metrics["edit_score_trend"], positiveGood: false))",
-            "\(t("stats.hit_rate_label")): \(dictHitRate)   \(trend(metrics["hit_rate_trend"], positiveGood: true))",
-            "\(t("stats.active_terms_label")): \(activeTerms) (\(manualTerms) \(t("terms.source_manual")) / \(automaticTerms) \(t("terms.source_auto")) / \(correctionTerms) \(t("terms.source_correction")))",
-            "\(t("stats.acceptance_rate_label")): \(percentage(metrics["acceptance_rate"]?.doubleValue)) (\(t("stats.accepted_rejected", ["accepted": String(accepted), "rejected": String(rejected)])))",
-            "\(t("stats.prompt_util_label")): \(percentage(metrics["prompt_utilisation"]?.doubleValue)) (\(promptUsed)/\(promptMaximum))",
-            "",
-            t("stats.inactive_clean", ["n": String(inactive)]),
-        ]
-        let failedPairs = metrics["failed_pairs"]?.arrayValue?.prefix(5) ?? []
-        if !failedPairs.isEmpty {
-            lines.append("")
-            lines.append(t("stats.failed_pairs_header"))
-            for value in failedPairs {
-                guard let pair = value.objectValue else { continue }
-                let source = pair["from"]?.stringValue ?? ""
-                let target = pair["to"]?.stringValue ?? ""
-                let count = pair["count"]?.intValue ?? 0
-                lines.append("  \"\(source)\" → \"\(target)\" (\(count)×)")
+            )
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: statisticsPanel,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.statisticsPanel = nil
+                }
             }
         }
-
-        let alert = NSAlert()
-        alert.messageText = t("stats.title")
-        alert.informativeText = lines.joined(separator: "\n")
-        alert.addButton(withTitle: t("btn.ok"))
-        alert.addButton(withTitle: t("stats.btn_history"))
+        statisticsPanel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertSecondButtonReturn {
-            NSWorkspace.shared.open(paths.metricsHistoryFile)
-        }
+        statisticsPanel?.refresh()
     }
 
     @objc private func onTranscribeFile() {

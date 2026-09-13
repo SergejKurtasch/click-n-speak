@@ -494,12 +494,11 @@ final class FakeDictionaryCoordinator: DictionaryCoordinating {
         confirmationContinuation = nil
     }
 
+    func addManualTermValidated(_ term: String, language: String) throws -> Bool {
+        return true
+    }
+
     func addManualTerm(_ term: String, language: String) -> Bool {
-        guard UserTerms.add(to: &snapshot, lang: language, term: term, source: .manual) else {
-            return false
-        }
-        snapshot.raw["initial_prompt"] = .string(InitialPromptBuilder().build(config: snapshot.raw))
-        addedTerms.append((term, language))
         return true
     }
 }

@@ -496,5 +496,12 @@
   "notify.hotkey_failed_body": "Не удалось зарегистрировать Option+Space. Возможно, комбинация занята другим приложением.",
   "wizard.permissions_already_granted_title": "Разрешения уже настроены",
   "wizard.permissions_already_granted_body": "Все необходимые системные разрешения уже предоставлены.",
-  "menu.ai_disabled": "Выключен"
+  "menu.ai_disabled": "Выключен",
+  "terms.conflict_changed": "Термин изменён в другом месте",
+  "terms.conflict_deleted": "Термин удалён в другом месте",
+  "terms.add_as_new": "Добавить как новый",
+  "terms.load_saved": "Загрузить сохранённое",
+  "terms.discard": "Отменить",
+  "stats.loading": "Загрузка статистики...",
+  "stats.failed": "Не удалось получить статистику."
 }
