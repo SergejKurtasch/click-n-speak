@@ -448,12 +448,14 @@ final class AppUpdaterStagingTests: XCTestCase {
             diskCapacity: { _ in 10_000_000_000 },
             currentVersion: { "1.0.0" }
         )
-        let candidate = try await updater.downloadAndStage(
+        let handle = try await updater.downloadAndStage(
             update: fixtureUpdate(data: data),
+            operationID: UUID(),
             progress: { _ in }
         )
-        XCTAssertTrue(candidate.path.hasPrefix(paths.updatesDirectory.path + "/"))
-        XCTAssertFalse(candidate.path.hasPrefix("/Applications/"))
+        let contents = try FileManager.default.contentsOfDirectory(atPath: paths.updatesDirectory.path)
+        let stagingFolders = contents.filter { $0.hasPrefix("staging-") }
+        XCTAssertEqual(stagingFolders.count, 1)
     }
 
     func testChecksumFailureCleansAbandonedStaging() async throws {
@@ -469,7 +471,7 @@ final class AppUpdaterStagingTests: XCTestCase {
         )
         let update = fixtureUpdate(data: data, checksum: String(repeating: "0", count: 64))
         do {
-            _ = try await updater.downloadAndStage(update: update, progress: { _ in })
+            _ = try await updater.downloadAndStage(update: update, operationID: UUID(), progress: { _ in })
             XCTFail("Expected checksum mismatch")
         } catch let error as AppUpdaterError {
             XCTAssertEqual(error, .archiveChecksumMismatch)
@@ -490,7 +492,7 @@ final class AppUpdaterStagingTests: XCTestCase {
             diskCapacity: { _ in 10_000_000_000 }
         )
         do {
-            _ = try await updater.downloadAndStage(update: fixtureUpdate(data: data), progress: { _ in })
+            _ = try await updater.downloadAndStage(update: fixtureUpdate(data: data), operationID: UUID(), progress: { _ in })
             XCTFail("Expected cancellation")
         } catch is CancellationError {}
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: paths.updatesDirectory.path)) ?? []

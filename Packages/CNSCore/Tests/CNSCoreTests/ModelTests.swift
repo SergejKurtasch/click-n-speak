@@ -273,17 +273,13 @@ struct ModelManagerTests {
         try validGGML.write(to: paths.modelFile(for: model))
 
         let token = try ModelArtifactAccessRegistry.shared.acquireUse(modelID: model.id, reason: .preparation(generation: 1))
-        #expect(throws: ModelArtifactAccessError.inUse(modelID: model.id)) {
+        #expect(throws: ModelArtifactAccessError.inUse(modelID: model.id, reasons: [.preparation(generation: 1)])) {
             try ModelManager.delete(model, paths: paths)
         }
         #expect(FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
         
         ModelArtifactAccessRegistry.shared.releaseUse(token)
         try ModelManager.delete(model, paths: paths)
-        #expect(!FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
-    }
-        #expect(FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
-        try ModelManager.delete(model, paths: paths, )
         #expect(!FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
     }
 

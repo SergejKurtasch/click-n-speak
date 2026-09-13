@@ -161,6 +161,18 @@ public struct FileTranscriptionRequest: Sendable {
     }
 }
 
+
+public enum FileRefinementOutcome: String, Sendable, Equatable {
+    case notRequested
+    case notRun
+    case applied
+    case unchanged
+    case unavailable
+    case skipped
+    case timedOut
+    case failed
+}
+
 public enum FileTranscriptionStatus: Sendable, Equatable {
     case success
     case noSpeech
@@ -175,6 +187,7 @@ public struct FileTranscriptionResult: Sendable, Equatable {
     public var modelID: String?
     public var status: FileTranscriptionStatus
     public var segmentCount: Int
+    public var refinement: FileRefinementOutcome
 
     public init(
         text: String,
@@ -182,7 +195,8 @@ public struct FileTranscriptionResult: Sendable, Equatable {
         backend: String? = nil,
         modelID: String? = nil,
         status: FileTranscriptionStatus,
-        segmentCount: Int = 0
+        segmentCount: Int = 0,
+        refinement: FileRefinementOutcome = .notRequested
     ) {
         self.text = text
         self.detectedLanguage = detectedLanguage
@@ -190,6 +204,7 @@ public struct FileTranscriptionResult: Sendable, Equatable {
         self.modelID = modelID
         self.status = status
         self.segmentCount = segmentCount
+        self.refinement = refinement
     }
 
     public static func failed(_ failure: TranscriptionFailure) -> FileTranscriptionResult {

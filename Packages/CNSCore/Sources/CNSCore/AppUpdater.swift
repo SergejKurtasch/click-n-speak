@@ -247,6 +247,7 @@ public struct SystemDiskImageMounter: DiskImageMounting {
 }
 
 private struct StagedUpdate: Sendable {
+    let operationID: UUID
     let update: AppUpdate
     let sessionDirectory: URL
     let candidateURL: URL
@@ -265,6 +266,15 @@ public actor AppUpdater {
     private let diskCapacity: @Sendable (URL) -> Int64
     private let currentVersion: @Sendable () -> String
     private var staged: StagedUpdate?
+
+    private struct ActiveInstallation {
+        let handle: UpdateInstallationHandle
+        let process: Process
+        let preparedCandidate: URL
+        let backup: URL
+    }
+    private var activeInstallation: ActiveInstallation?
+
     private var operationGeneration = 0
 
     public init(
@@ -285,11 +295,13 @@ public actor AppUpdater {
         self.currentVersion = currentVersion
     }
 
+
     @discardableResult
     public func downloadAndStage(
         update: AppUpdate,
-        progress: @escaping @Sendable (Double) -> Void
-    ) async throws -> URL {
+        operationID: UUID,
+        progress: @escaping @Sendable (AppUpdateProgress) -> Void
+    ) async throws -> StagedUpdateHandle {
         operationGeneration += 1
         let generation = operationGeneration
         try paths.ensureUpdatesDirectory()
@@ -299,25 +311,30 @@ public actor AppUpdater {
         }
 
         let sessionDirectory = paths.updatesDirectory.appendingPathComponent(
-            "staging-\(UUID().uuidString)",
+            "staging-\(operationID.uuidString)",
             isDirectory: true
         )
         try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
         do {
             let partialArchive = sessionDirectory.appendingPathComponent("update.dmg.partial")
+            progress(AppUpdateProgress(stage: .downloading, fraction: 0))
             try await archiveDownloader.download(
                 from: update.downloadURL,
                 to: partialArchive,
                 maximumBytes: update.archiveSize,
-                progress: progress
+                progress: { fraction in progress(AppUpdateProgress(stage: .downloading, fraction: fraction)) }
             )
             try ensureCurrent(generation)
+            
+            progress(AppUpdateProgress(stage: .verifyingArchive, fraction: nil))
             let size = Int64((try partialArchive.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1)
             guard size == update.archiveSize else { throw AppUpdaterError.archiveSizeMismatch }
             guard try await ArtifactIntegrity.sha256(of: partialArchive) == update.sha256 else {
                 throw AppUpdaterError.archiveChecksumMismatch
             }
             try ensureCurrent(generation)
+            
+            progress(AppUpdateProgress(stage: .staging, fraction: nil))
             let archive = sessionDirectory.appendingPathComponent("update.dmg")
             try FileManager.default.moveItem(at: partialArchive, to: archive)
 
@@ -340,6 +357,8 @@ public actor AppUpdater {
             let candidate = sessionDirectory.appendingPathComponent("Click-n-speak.app", isDirectory: true)
             try FileManager.default.copyItem(at: sourceApplication, to: candidate)
             try ensureCurrent(generation)
+            
+            progress(AppUpdateProgress(stage: .verifyingCandidate, fraction: nil))
             try await verifier.verify(
                 candidateURL: candidate,
                 policy: CandidateVerificationPolicy(
@@ -352,12 +371,13 @@ public actor AppUpdater {
             try ensureCurrent(generation)
             try? FileManager.default.removeItem(at: archive)
             staged = StagedUpdate(
+                operationID: operationID,
                 update: update,
                 sessionDirectory: sessionDirectory,
                 candidateURL: candidate
             )
-            progress(1)
-            return candidate
+            progress(AppUpdateProgress(stage: .ready, fraction: 1.0))
+            return StagedUpdateHandle(operationID: operationID, version: update.version)
         } catch {
             try? FileManager.default.removeItem(at: sessionDirectory)
             if staged?.sessionDirectory == sessionDirectory { staged = nil }
@@ -365,31 +385,58 @@ public actor AppUpdater {
         }
     }
 
-    public func cancelAndCleanUp() {
-        operationGeneration += 1
-        if let staged {
-            try? FileManager.default.removeItem(at: staged.sessionDirectory)
+
+    public func cancelPendingInstallation(handle: UpdateInstallationHandle) async throws {
+        guard let installation = activeInstallation, installation.handle == handle else {
+            return
         }
-        staged = nil
+        
+        let process = installation.process
+        if process.isRunning {
+            process.terminate()
+        }
+        
+        // Wait for it to exit
+        while process.isRunning {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        
+        // Clean up temporary files
+        try? FileManager.default.removeItem(at: installation.preparedCandidate)
+        try? FileManager.default.removeItem(at: installation.backup)
+        
+        activeInstallation = nil
+    }
+
+    public func cancelAndCleanUp(operationID: UUID) {
+        if staged?.operationID == operationID {
+            if let staged {
+                try? FileManager.default.removeItem(at: staged.sessionDirectory)
+            }
+            staged = nil
+        }
+        // Increment generation to cancel active tasks
+        operationGeneration += 1
     }
 
     /// Copy the validated candidate beside the installed application, verify the
     /// copy again, then launch the signed helper. No hard-coded `/Applications`
     /// path is used.
-    public func swapAndRelaunch() async throws {
+    public func beginInstallation(handle: StagedUpdateHandle) async throws -> UpdateInstallationHandle {
         guard let staged,
+              staged.operationID == handle.operationID,
               FileManager.default.fileExists(atPath: staged.candidateURL.path) else {
             throw AppUpdaterError.stagedCandidateMissing
         }
         let target = Bundle.main.bundleURL.standardizedFileURL
         let parent = target.deletingLastPathComponent()
-        let transactionID = UUID().uuidString
+        let transactionID = UUID()
         let preparedCandidate = parent.appendingPathComponent(
-            ".Click-n-speak.update-\(transactionID).app",
+            ".Click-n-speak.update-\(transactionID.uuidString).app",
             isDirectory: true
         )
         let backup = parent.appendingPathComponent(
-            ".Click-n-speak.backup-\(transactionID).app",
+            ".Click-n-speak.backup-\(transactionID.uuidString).app",
             isDirectory: true
         )
         try FileManager.default.copyItem(at: staged.candidateURL, to: preparedCandidate)
@@ -404,14 +451,14 @@ public actor AppUpdater {
                 )
             )
         } catch {
-            try? FileManager.default.removeItem(at: preparedCandidate)
+            try FileManager.default.removeItem(at: preparedCandidate)
             throw error
         }
 
         let helper = Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/CNSUpdateHelper")
         guard FileManager.default.isExecutableFile(atPath: helper.path) else {
-            try? FileManager.default.removeItem(at: preparedCandidate)
+            try FileManager.default.removeItem(at: preparedCandidate)
             throw AppUpdaterError.helperMissing
         }
         let token = UUID().uuidString
@@ -425,12 +472,12 @@ public actor AppUpdater {
               let candidateExecutable = candidateBundle.executableURL,
               !candidateVersion.isEmpty,
               !candidateBuild.isEmpty else {
-            try? FileManager.default.removeItem(at: preparedCandidate)
+            try FileManager.default.removeItem(at: preparedCandidate)
             throw AppUpdaterError.candidateIdentityMissing
         }
         let candidateExecutableSHA256 = try await ArtifactIntegrity.sha256(of: candidateExecutable)
-        let ack = paths.updatesDirectory.appendingPathComponent("ack-\(transactionID)")
-        let record = paths.updatesDirectory.appendingPathComponent("transaction-\(transactionID).json")
+        let ack = paths.updatesDirectory.appendingPathComponent("ack-\(transactionID.uuidString)")
+        let record = paths.updatesDirectory.appendingPathComponent("transaction-\(transactionID.uuidString).json")
         let process = Process()
         process.executableURL = helper
         process.arguments = [
@@ -439,7 +486,7 @@ public actor AppUpdater {
             "--target", target.path,
             "--backup", backup.path,
             "--token", token,
-            "--transaction-id", transactionID,
+            "--transaction-id", transactionID.uuidString,
             "--candidate-version", candidateVersion,
             "--candidate-build", candidateBuild,
             "--candidate-sha256", staged.update.sha256,
@@ -450,8 +497,12 @@ public actor AppUpdater {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
-        await MainActor.run { NSApp.terminate(nil) }
+        
+        let outHandle = UpdateInstallationHandle(transactionID: transactionID, operationID: handle.operationID)
+        self.activeInstallation = ActiveInstallation(handle: outHandle, process: process, preparedCandidate: preparedCandidate, backup: backup)
+        return outHandle
     }
+
 
     public static func hasUpdateLaunchArguments(
         _ arguments: [String] = ProcessInfo.processInfo.arguments

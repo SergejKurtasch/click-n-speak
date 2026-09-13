@@ -6,7 +6,7 @@ import Foundation
 struct ConfigRecordingSettingsTests {
     private func config(_ values: [String: JSONValue]) throws -> Config {
         let json = JSONValue.object(JSONObject([("schema_version", .int(10))] + values.map { $0 }))
-        let data = try JSONEncoder().encode(json.serializedPythonCompatible(indent: 0))
+        let data = Data(json.serializedPythonCompatible(indent: 0).utf8)
         return try Config(validating: data)
     }
 

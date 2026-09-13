@@ -35,6 +35,7 @@ public final class MenuBarController: NSObject {
     ) async -> FileTranscriptionResult)?
     public var onSetupRequested: (() -> Void)?
     public var onRestartRequested: (() -> Void)?
+    public var onInstallRequested: ((StagedUpdateHandle) -> Void)?
     public var onCredentialsChanged: ((String) -> Void)?
 
     // Test injections
@@ -74,8 +75,27 @@ public final class MenuBarController: NSObject {
     public var modelDownloader: ModelDownloader?
 
     /// Download progress panel.
-    private lazy var downloadPanel = ModelDownloadPanel(i18n: i18n, log: log)
-    private var appUpdateTask: Task<Void, Never>?
+    private lazy var modelDownloadPanel = ModelDownloadPanel(i18n: i18n, log: log)
+    private lazy var appUpdatePanel = ModelDownloadPanel(i18n: i18n, title: i18n.t("download.app_update", ["version": ""]), log: log)
+    private lazy var appUpdateViewModel: AppUpdateViewModel = {
+        let vm = AppUpdateViewModel(updater: AppUpdater.shared, panel: appUpdatePanel)
+        vm.onReady = { [weak self] handle in
+            guard let self = self else { return }
+            let alert = NSAlert()
+            alert.messageText = self.t("dialog.update_ready_title")
+            alert.informativeText = self.t("dialog.update_ready_body")
+            alert.addButton(withTitle: self.t("btn.restart_now"))
+            alert.addButton(withTitle: self.t("btn.later"))
+            let response = self.alertRunner?(alert) ?? alert.runModal()
+            if response == .alertFirstButtonReturn {
+                self.onInstallRequested?(handle)
+            }
+        }
+        vm.onInstallRequested = { [weak self] handle in
+            self?.onInstallRequested?(handle)
+        }
+        return vm
+    }()
     private var statisticsPanel: StatisticsPanel?
 
     /// - Parameter installStatusItem: when false, no `NSStatusItem` is created,
@@ -1091,7 +1111,7 @@ public final class MenuBarController: NSObject {
     }
 
     @objc private func onShowDownloadProgress() {
-        guard downloadPanel.bringToFront() else {
+        guard modelDownloadPanel.bringToFront() else {
             log("Download progress window is not available")
             return
         }
@@ -1394,41 +1414,7 @@ public final class MenuBarController: NSObject {
     }
 
     private func startAppUpdate(update: AppUpdate) {
-        appUpdateTask?.cancel()
-        let updateGeneration = downloadPanel.show(
-            modelName: t("download.app_update", ["version": update.version])
-        ) { [weak self] in self?.appUpdateTask?.cancel() } onRetry: { [weak self] in
-            self?.startAppUpdate(update: update)
-        }
-
-        appUpdateTask = Task {
-            do {
-                let _ = try await AppUpdater.shared.downloadAndStage(update: update) { _ in }
-                try Task.checkCancellation()
-
-                self.downloadPanel.showCompleted(generation: updateGeneration)
-
-                let alert = NSAlert()
-                alert.messageText = t("dialog.update_ready_title")
-                alert.informativeText = t("dialog.update_ready_body")
-                alert.addButton(withTitle: t("btn.restart_now"))
-                alert.addButton(withTitle: t("btn.later"))
-                let response = alert.runModal()
-                if response == .alertFirstButtonReturn {
-                    try? await AppUpdater.shared.swapAndRelaunch()
-                }
-            } catch is CancellationError {
-                await AppUpdater.shared.cancelAndCleanUp()
-                self.downloadPanel.showCancelled(generation: updateGeneration)
-            } catch {
-                self.log("App update failed: \(error)")
-                self.downloadPanel.showError(
-                    self.t("dialog.update_failed_body"),
-                    generation: updateGeneration
-                )
-            }
-            self.appUpdateTask = nil
-        }
+        appUpdateViewModel.startUpdate(update: update)
     }
 
     @objc private func onToggleAutostart() {
@@ -1517,7 +1503,7 @@ public final class MenuBarController: NSObject {
             return
         }
 
-        let downloadGeneration = downloadPanel.show(
+        let downloadGeneration = modelDownloadPanel.show(
             modelName: model.displayName,
             onCancel: { [weak self] in self?.modelDownloader?.cancel() },
             onRetry: { [weak self] in self?.startDownload(model: model) }
@@ -1528,7 +1514,7 @@ public final class MenuBarController: NSObject {
 
         downloader.onProgress = { [weak self] bytes, total in
             guard let self else { return }
-            self.downloadPanel.update(
+            self.modelDownloadPanel.update(
                 downloadedBytes: bytes,
                 totalBytes: total,
                 bytesPerSecond: downloader.bytesPerSecond,
@@ -1547,14 +1533,14 @@ public final class MenuBarController: NSObject {
             )
         }
         downloader.onValidationStarted = { [weak self] in
-            self?.downloadPanel.showValidating(generation: downloadGeneration)
+            self?.modelDownloadPanel.showValidating(generation: downloadGeneration)
             self?.onDownloadStateChanged?(
                 MenuDownloadSnapshot(phase: .validating, modelID: model.id)
             )
         }
         downloader.onDone = { [weak self] in
             self?.log("Download complete: \(model.id)")
-            self?.downloadPanel.showCompleted(generation: downloadGeneration)
+            self?.modelDownloadPanel.showCompleted(generation: downloadGeneration)
             self?.onDownloadStateChanged?(
                 MenuDownloadSnapshot(phase: .completed, modelID: model.id, fractionCompleted: 1)
             )
@@ -1563,7 +1549,7 @@ public final class MenuBarController: NSObject {
         }
         downloader.onError = { [weak self] msg in
             self?.log("Download failed: \(msg)")
-            self?.downloadPanel.showError(
+            self?.modelDownloadPanel.showError(
                 self?.t("download.failed_generic") ?? "",
                 generation: downloadGeneration
             )
@@ -1573,7 +1559,7 @@ public final class MenuBarController: NSObject {
         }
         downloader.onCancelled = { [weak self] in
             self?.log("Download cancelled: \(model.id)")
-            self?.downloadPanel.showCancelled(generation: downloadGeneration)
+            self?.modelDownloadPanel.showCancelled(generation: downloadGeneration)
             self?.onDownloadStateChanged?(
                 MenuDownloadSnapshot(
                     phase: downloader.canResume ? .paused : .cancelled,

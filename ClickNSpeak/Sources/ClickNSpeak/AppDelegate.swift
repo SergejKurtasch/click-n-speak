@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appActivationObserver: NSObjectProtocol?
     private var terminationStarted = false
     private var restartTerminationRequested = false
+    private var pendingUpdateInstallation: UpdateInstallationHandle?
     private var restartPreparationTask: Task<Void, Never>?
     private var shutdownNotification: (title: String, body: String)?
     private var restartFailureStrings: (
@@ -170,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log: log
         )
         menuCtrl.onRestartRequested = { [weak self] in self?.requestRestart() }
+        menuCtrl.onInstallRequested = { [weak self] handle in self?.requestAppUpdate(handle) }
         let downloader = ModelDownloader(paths: paths, log: log)
         menuCtrl.modelDownloader = downloader
         menuController = menuCtrl
@@ -502,6 +504,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func requestAppUpdate(_ handle: StagedUpdateHandle) {
+        guard instanceGuard != nil else { return }
+        Task { await self.logger?.info("App update installation requested") }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let outHandle = try await AppUpdater.shared.beginInstallation(handle: handle)
+                self.pendingUpdateInstallation = outHandle
+                self.restartTerminationRequested = false
+                NSApp.terminate(nil)
+            } catch {
+                await self.logger?.info("Update installation failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func requestRestart() {
         guard !terminationStarted, restartPreparationTask == nil,
               !restartCoordinator.isPending else { return }
@@ -574,6 +593,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let notification = self.shutdownNotification {
                         self.notificationService?.deliver(title: notification.title, body: notification.body)
                     }
+                    if let handle = self.pendingUpdateInstallation {
+                        try? await AppUpdater.shared.cancelPendingInstallation(handle: handle)
+                        self.pendingUpdateInstallation = nil
+                    }
                     self.restartTerminationRequested = false
                     self.terminationStarted = false
                     sender.reply(toApplicationShouldTerminate: false)
@@ -584,6 +607,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 await self.logger?.info("Restart authorization failed before application exit")
                 self.presentRestartFailure(error)
+                if let handle = self.pendingUpdateInstallation {
+                    try? await AppUpdater.shared.cancelPendingInstallation(handle: handle)
+                    self.pendingUpdateInstallation = nil
+                }
                 self.restartTerminationRequested = false
                 self.terminationStarted = false
                 sender.reply(toApplicationShouldTerminate: false)

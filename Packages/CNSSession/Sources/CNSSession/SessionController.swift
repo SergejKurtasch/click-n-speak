@@ -1471,6 +1471,9 @@ public final class SessionController {
             }
         }
         var result = await transcriber.transcribeFile(request, progress: guardedProgress)
+        if refine {
+            result.refinement = .notRun
+        }
         guard !isShuttingDown, !Task.isCancelled, fileJobID == jobID else {
             result.status = .cancelled
             return result
@@ -1479,33 +1482,45 @@ public final class SessionController {
 
         let languages = allowedLanguages(for: fileConfig)
         var refineStatus: RefineStatus?
-        if refine, let aiEditor {
-            guard fileJobID == jobID else {
-                result.status = .cancelled
-                return result
+        if refine {
+            if let aiEditor = self.aiEditor {
+                guard fileJobID == jobID else {
+                    result.status = .cancelled
+                    return result
+                }
+                progress(.init(stage: .refining, completedUnits: 0, totalUnits: 1))
+                let known = VocabProvider.collectKnownTerms(
+                    config: .object(fileConfig.raw),
+                    languages: languages.isEmpty ? nil : languages
+                )
+                let misrecognitions = VocabProvider.collectEditorHints(
+                    config: .object(fileConfig.raw),
+                    languages: languages.isEmpty ? nil : languages,
+                    correctionsURL: dictionaryCoordinator?.correctionsURL
+                )
+                let refined = await aiEditor.refineFileText(
+                    text: result.text,
+                    languages: languages,
+                    knownTerms: known,
+                    misrecognitions: misrecognitions
+                )
+                guard !isShuttingDown, !Task.isCancelled, fileJobID == jobID else {
+                    result.status = .cancelled
+                    return result
+                }
+                refineStatus = refined.status
+                if refined.status == .ok { result.text = refined.text }
+                switch refined.status {
+                case .ok: result.refinement = .applied
+                case .unchanged: result.refinement = .unchanged
+                case .disabled: result.refinement = .unavailable
+                case .skipped, .memoryPressure: result.refinement = .skipped
+                case .timeout: result.refinement = .timedOut
+                case .error: result.refinement = .failed
+                }
+            } else {
+                result.refinement = .unavailable
             }
-            progress(.init(stage: .refining, completedUnits: 0, totalUnits: 1))
-            let known = VocabProvider.collectKnownTerms(
-                config: .object(fileConfig.raw),
-                languages: languages.isEmpty ? nil : languages
-            )
-            let misrecognitions = VocabProvider.collectEditorHints(
-                config: .object(fileConfig.raw),
-                languages: languages.isEmpty ? nil : languages,
-                correctionsURL: dictionaryCoordinator?.correctionsURL
-            )
-            let refined = await aiEditor.refineFileText(
-                text: result.text,
-                languages: languages,
-                knownTerms: known,
-                misrecognitions: misrecognitions
-            )
-            guard !isShuttingDown, !Task.isCancelled, fileJobID == jobID else {
-                result.status = .cancelled
-                return result
-            }
-            refineStatus = refined.status
-            if refined.status == .ok { result.text = refined.text }
         }
 
         if Self.shouldApplyDirectReplacements(

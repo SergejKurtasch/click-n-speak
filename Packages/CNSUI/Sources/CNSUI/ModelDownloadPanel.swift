@@ -29,12 +29,13 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
 
     // MARK: - Init
 
-    public init(i18n: I18n, log: @escaping (String) -> Void = { _ in }) {
+    public let windowTitle: String
+    public init(i18n: I18n, title: String? = nil, log: @escaping (String) -> Void = { _ in }) {
+        self.windowTitle = title ?? i18n.t("download.window_title")
         self.i18n = i18n
         self.log = log
         super.init()
     }
-
     // MARK: - Public API
 
     /// Show the panel and begin tracking a download.
@@ -66,7 +67,6 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         return currentGeneration
     }
-
     /// Update progress.  Called from `ModelDownloader.onProgress`.
     public func update(
         downloadedBytes: Int64,
@@ -77,13 +77,11 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
     ) {
         guard expectedGeneration == nil || expectedGeneration == generation else { return }
         guard let progressBar else { return }
-
         if let total = totalBytes, total > 0 {
             progressBar.isIndeterminate = false
             progressBar.maxValue = Double(total)
             progressBar.doubleValue = Double(downloadedBytes)
         }
-
         // Build status text: "123.4 MB / 795.0 MB  —  12.3 MB/s  —  ~45s"
         var parts: [String] = []
         let downloaded = ModelManager.formattedSize(downloadedBytes)
@@ -92,18 +90,14 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         } else {
             parts.append(downloaded)
         }
-
         if bytesPerSecond > 0 {
             parts.append("\(ModelManager.formattedSize(Int64(bytesPerSecond)))/s")
         }
-
         if let eta = estimatedTimeRemaining, eta > 0 {
             parts.append(localizedETA(eta))
         }
-
         statusLabel?.stringValue = parts.joined(separator: "  —  ")
     }
-
     /// Model integrity validation cannot be interrupted safely, so the panel
     /// makes that transition explicit and disables cancellation until it ends.
     public func showValidating(generation expectedGeneration: Int? = nil) {
@@ -115,7 +109,6 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         cancelButton?.isEnabled = false
         panel?.standardWindowButton(.closeButton)?.isEnabled = false
     }
-
     /// Flash a "Done" message and auto-close after a short delay.
     public func showCompleted(generation expectedGeneration: Int? = nil) {
         guard expectedGeneration == nil || expectedGeneration == generation else { return }
@@ -135,7 +128,6 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
             close()
         }
     }
-
     /// Show an error and let the user dismiss.
     public func showError(_ message: String, generation expectedGeneration: Int? = nil) {
         guard expectedGeneration == nil || expectedGeneration == generation else { return }
@@ -146,7 +138,6 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         cancelButton?.isEnabled = true
         panel?.standardWindowButton(.closeButton)?.isEnabled = true
     }
-
     /// Show cancelled state and auto-close.
     public func showCancelled(generation expectedGeneration: Int? = nil) {
         guard expectedGeneration == nil || expectedGeneration == generation else { return }
@@ -163,7 +154,6 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
             close()
         }
     }
-
     /// Close and dispose the panel.
     public func close() {
         panel?.orderOut(nil)
@@ -177,7 +167,6 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         terminalState = false
         validationInProgress = false
     }
-
     /// Whether the panel is currently visible.
     public var isVisible: Bool {
         panel?.isVisible ?? false
@@ -197,12 +186,10 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
     var hidesOnDeactivateForTesting: Bool? { panel?.hidesOnDeactivate }
     var cancelEnabledForTesting: Bool? { cancelButton?.isEnabled }
     var closeEnabledForTesting: Bool? { panel?.standardWindowButton(.closeButton)?.isEnabled }
-
     // MARK: - Panel construction
 
     private func buildPanelIfNeeded() {
         guard panel == nil else { return }
-
         let panelWidth: CGFloat = 400
         let panelHeight: CGFloat = 140
         let padding: CGFloat = 20
@@ -213,7 +200,7 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: true
         )
-        p.title = i18n.t("download.window_title")
+        p.title = windowTitle
         p.isFloatingPanel = true
         p.becomesKeyOnlyIfNeeded = false
         p.level = .floating
@@ -225,7 +212,7 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         // Prevent the panel from being minimized.
         p.styleMask.remove(.miniaturizable)
         p.delegate = self
-        p.setAccessibilityLabel(i18n.t("download.window_title"))
+        p.setAccessibilityLabel(windowTitle)
 
         let contentView = p.contentView!
 
@@ -283,7 +270,6 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
 
         panel = p
     }
-
     @objc private func cancelClicked() {
         if terminalState {
             let retry = onRetry
@@ -294,14 +280,12 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
             onCancel?()
         }
     }
-
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard !validationInProgress else { return false }
         if !terminalState { onCancel?() }
         close()
         return false
     }
-
     // MARK: - Helpers
 
     /// Format seconds into a compact human-readable ETA (e.g. "45s", "2m 10s").
@@ -319,7 +303,6 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
         let remainderMin = m % 60
         return "\(h)h \(remainderMin)m"
     }
-
     private func localizedETA(_ seconds: TimeInterval) -> String {
         let value = max(1, Int(seconds))
         if value < 60 {
@@ -330,5 +313,22 @@ public final class ModelDownloadPanel: NSObject, NSWindowDelegate {
             return i18n.t("download.eta_minutes", ["m": String(minutes)])
         }
         return i18n.t("download.eta_hours", ["h": String(minutes / 60)])
+    }
+
+    /// Show arbitrary progress message and optional fraction without computing ETA or speed.
+    public func update(fraction: Double?, message: String, generation expectedGeneration: Int? = nil) {
+        guard expectedGeneration == nil || expectedGeneration == generation else { return }
+        guard let bar = progressBar, let status = statusLabel else { return }
+
+        if let fraction {
+            let clamped = max(0, min(1, fraction))
+            bar.isIndeterminate = false
+            bar.doubleValue = clamped * 100
+        } else {
+            bar.isIndeterminate = true
+            bar.startAnimation(nil)
+        }
+
+        status.stringValue = message
     }
 }
