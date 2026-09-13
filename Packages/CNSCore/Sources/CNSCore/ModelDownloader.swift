@@ -237,6 +237,7 @@ public final class ModelDownloader: NSObject {
     public var onCancelled: (() -> Void)?
 
     private let paths: Paths
+    private let registry: ModelArtifactAccessRegistry
     private let metadataInspector: any ArtifactMetadataInspecting
     private let diskCapacity: @Sendable (URL) -> Int64
     private let sessionConfiguration: @Sendable () -> URLSessionConfiguration
@@ -252,6 +253,7 @@ public final class ModelDownloader: NSObject {
     private var currentArtifact: ModelArtifact?
     private var stagingURL: URL?
     private var completedArtifactBytes: Int64 = 0
+    private var accessTokens: [UUID] = []
     private var generation = 0
     private var transferGeneration = 0
     private var lastProgressCallbackDate: Date = .distantPast
@@ -259,6 +261,7 @@ public final class ModelDownloader: NSObject {
 
     public init(
         paths: Paths,
+        registry: ModelArtifactAccessRegistry = .shared,
         metadataInspector: any ArtifactMetadataInspecting = URLSessionArtifactMetadataInspector(),
         diskCapacity: @escaping @Sendable (URL) -> Int64 = ModelManager.availableDiskCapacity,
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = {
@@ -270,6 +273,7 @@ public final class ModelDownloader: NSObject {
         log: @escaping (String) -> Void = { _ in }
     ) {
         self.paths = paths
+        self.registry = registry
         self.metadataInspector = metadataInspector
         self.diskCapacity = diskCapacity
         self.sessionConfiguration = sessionConfiguration
@@ -285,6 +289,14 @@ public final class ModelDownloader: NSObject {
         }
         generation += 1
         let currentGeneration = generation
+        let taskID = UUID()
+        if let token = try? registry.acquireUse(modelID: model.id, reason: .downloading(taskID: taskID)) {
+            accessTokens.append(token)
+        } else {
+            // "If damaged model is retained by active service, safely reject replacement until released"
+            applyError("Model currently in use and cannot be replaced", generation: currentGeneration)
+            return
+        }
         activeModel = model
         state = .downloading
         downloadedBytes = 0
@@ -712,6 +724,10 @@ public final class ModelDownloader: NSObject {
     }
 
     private func invalidateTransferSession() {
+        for token in accessTokens {
+            registry.releaseUse(token)
+        }
+        accessTokens.removeAll()
         transferGeneration += 1
         dataTask = nil
         session?.invalidateAndCancel()

@@ -167,12 +167,19 @@ public enum ModelManager {
     public static func delete(
         _ model: ModelInfo,
         paths: Paths,
-        activeModelID: String? = nil
+        registry: ModelArtifactAccessRegistry = .shared
     ) throws {
-        guard model.id != activeModelID else {
-            throw ModelValidationError.activeModelDeletion(model.id)
-        }
+        let token = try registry.reserveDeletion(modelID: model.id)
+        defer { registry.finishDeletion(token) }
+
         let url = paths.modelFile(for: model)
+        
+        let modelsDir = paths.modelsDirectory.standardizedFileURL.path + "/"
+        let resolved = url.standardizedFileURL
+        guard resolved.path.hasPrefix(modelsDir) else {
+            throw ModelValidationError.unsafeArtifactPath(url.path)
+        }
+
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }

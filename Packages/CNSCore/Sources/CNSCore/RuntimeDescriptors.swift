@@ -1,18 +1,18 @@
 import Foundation
 
-public enum RuntimeServiceKind: String, Sendable, Equatable, Codable {
+public enum RuntimeServiceKind: String, Sendable, Hashable, Codable {
     case local
     case cloud
     case disabled
 }
 
-public enum RuntimeReadiness: String, Sendable, Equatable, Codable {
+public enum RuntimeReadiness: String, Sendable, Hashable, Codable {
     case ready
     case unavailable
     case disabled
 }
 
-public struct TranscriberDescriptor: Sendable, Equatable, Codable {
+public struct TranscriberDescriptor: Sendable, Hashable, Codable {
     public var backend: String
     public var modelID: String
     public var kind: RuntimeServiceKind
@@ -35,7 +35,7 @@ public struct TranscriberDescriptor: Sendable, Equatable, Codable {
     )
 }
 
-public struct AiEditorDescriptor: Sendable, Equatable, Codable {
+public struct AiEditorDescriptor: Sendable, Hashable, Codable {
     public var backend: String
     public var modelID: String?
     public var kind: RuntimeServiceKind
@@ -58,7 +58,7 @@ public struct AiEditorDescriptor: Sendable, Equatable, Codable {
     )
 }
 
-public struct RuntimeDescriptor: Sendable, Equatable, Codable {
+public struct RuntimeDescriptor: Sendable, Hashable, Codable {
     public var transcriber: TranscriberDescriptor
     public var aiEditor: AiEditorDescriptor
 

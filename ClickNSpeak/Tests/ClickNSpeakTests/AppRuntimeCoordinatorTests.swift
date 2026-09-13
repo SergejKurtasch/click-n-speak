@@ -105,7 +105,7 @@ final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
     private(set) var services: [String: RuntimeTranscriberDouble] = [:]
     private(set) var editorServices: [String: RuntimeEditorDouble] = [:]
 
-    func prepareTranscriber(config: Config) async throws -> PreparedTranscriber {
+    func prepareTranscriber(config: Config, generation: Int) async throws -> PreparedTranscriber {
         let backend = config.sttBackend
         let credentialGeneration = lock.withLock { credentialGenerations[backend, default: 0] }
         if let before = lock.withLock({ beforePreparation }) { await before(backend) }
@@ -134,7 +134,7 @@ final class RuntimeFactoryDouble: RuntimeServiceBuilding, @unchecked Sendable {
         )
     }
 
-    func prepareEditor(config: Config) async throws -> PreparedEditor {
+    func prepareEditor(config: Config, generation: Int) async throws -> PreparedEditor {
         if lock.withLock({ failEditor }) { throw RuntimePreparationError.credentialMissing(backend: "gemini") }
         guard config.aiEditorEnabled else {
             return PreparedEditor(service: nil, descriptor: .disabled)
@@ -1447,13 +1447,13 @@ struct RuntimeServiceFactoryTests {
         let local = config(backend: "local", model: ModelRegistry.defaultWhisperModelID)
 
         await #expect(throws: RuntimePreparationError.modelMissing(modelID: ModelRegistry.defaultWhisperModelID)) {
-            _ = try await factory.prepareTranscriber(config: local)
+            _ = try await factory.prepareTranscriber(config: local, generation: 1)
         }
 
         let model = ModelRegistry.whisperModel(id: ModelRegistry.defaultWhisperModelID)!
         try Data([0, 1, 2]).write(to: paths.modelFile(for: model))
         await #expect(throws: RuntimePreparationError.modelCorrupted(modelID: model.id)) {
-            _ = try await factory.prepareTranscriber(config: local)
+            _ = try await factory.prepareTranscriber(config: local, generation: 1)
         }
     }
 
@@ -1464,7 +1464,7 @@ struct RuntimeServiceFactoryTests {
         let factory = RuntimeServiceFactory(paths: paths, credentials: CredentialDouble(values: [:]))
 
         await #expect(throws: RuntimePreparationError.credentialMissing(backend: "gemini")) {
-            _ = try await factory.prepareTranscriber(config: config(backend: "gemini", model: "flash"))
+            _ = try await factory.prepareTranscriber(config: config(backend: "gemini", model: "flash"), generation: 1)
         }
     }
 
@@ -1478,7 +1478,7 @@ struct RuntimeServiceFactoryTests {
         )
 
         let prepared = try await factory.prepareTranscriber(
-            config: config(backend: "openai", model: "gpt-4o-mini-transcribe")
+            config: config(backend: "openai", model: "gpt-4o-mini-transcribe"), generation: 1
         )
 
         #expect(prepared.descriptor.backend == "openai")

@@ -43,9 +43,49 @@ struct PreparedEditor: Sendable {
     let descriptor: AiEditorDescriptor
 }
 
+
+struct AccessTokenReleasingTranscriber: Transcribing {
+    let inner: any Transcribing
+    let tokens: [UUID]
+    
+    func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult { await inner.transcribe(request) }
+    func warmup(language: String?) async { await inner.warmup(language: language) }
+    func prepare(language: String?) async throws { try await inner.prepare(language: language) }
+    func preWarm() async -> PrewarmResult { await inner.preWarm() }
+    func stop() async {
+        await inner.stop()
+        for token in tokens { ModelArtifactAccessRegistry.shared.releaseUse(token) }
+    }
+    func reload() async { await inner.reload() }
+    nonisolated func abortInFlight() { inner.abortInFlight() }
+    func tokenCount(_ text: String) async -> Int? { await inner.tokenCount(text) }
+    func transcribeFile(_ request: FileTranscriptionRequest, progress: @escaping @Sendable (FileTranscriptionProgress) -> Void) async -> FileTranscriptionResult {
+        await inner.transcribeFile(request, progress: progress)
+    }
+}
+
+struct AccessTokenReleasingEditor: AiEditing {
+    let inner: any AiEditing
+    let tokens: [UUID]
+    
+    var descriptor: AiEditorDescriptor { inner.descriptor }
+    var isReady: Bool { inner.isReady }
+    func prepare() async throws { try await inner.prepare() }
+    func refine(text: String, languages: [String]?, knownTerms: [String]?, misrecognitions: [(String, String)]?) async -> RefineResult {
+        await inner.refine(text: text, languages: languages, knownTerms: knownTerms, misrecognitions: misrecognitions)
+    }
+    func refineFileText(text: String, languages: [String]?, knownTerms: [String]?, misrecognitions: [(String, String)]?) async -> RefineResult {
+        await inner.refineFileText(text: text, languages: languages, knownTerms: knownTerms, misrecognitions: misrecognitions)
+    }
+    func stop() async {
+        await inner.stop()
+        for token in tokens { ModelArtifactAccessRegistry.shared.releaseUse(token) }
+    }
+}
+
 protocol RuntimeServiceBuilding: Sendable {
-    func prepareTranscriber(config: Config) async throws -> PreparedTranscriber
-    func prepareEditor(config: Config) async throws -> PreparedEditor
+    func prepareTranscriber(config: Config, generation: Int) async throws -> PreparedTranscriber
+    func prepareEditor(config: Config, generation: Int) async throws -> PreparedEditor
 }
 
 /// The sole production construction path for inference services. It validates
@@ -74,7 +114,8 @@ struct RuntimeServiceFactory: RuntimeServiceBuilding, Sendable {
         self.log = log
     }
 
-    func prepareTranscriber(config: Config) async throws -> PreparedTranscriber {
+    func prepareTranscriber(config: Config, generation: Int) async throws -> PreparedTranscriber {
+        let registry = ModelArtifactAccessRegistry.shared
         switch config.sttBackend {
         case "local":
             let requestedID = config.sttModelName
@@ -95,18 +136,36 @@ struct RuntimeServiceFactory: RuntimeServiceBuilding, Sendable {
                 try validateTestOverride(modelURL, modelID: model.id)
             }
 
-            let service: any Transcribing = GuardedTranscriber(
+            var token: UUID? = nil
+            if localModelOverride == nil {
+                do {
+                    token = try registry.acquireUse(modelID: model.id, reason: ModelArtifactUse.preparation(generation: generation))
+                } catch {
+                    throw RuntimePreparationError.initializationFailed(error.localizedDescription)
+                }
+            }
+            
+            let baseService: any Transcribing = GuardedTranscriber(
                 wrapping: WhisperCppTranscriber(
                     modelURL: modelURL,
                     modelID: model.id,
                     inferenceGate: inferenceGate
                 )
             )
+            let service: any Transcribing = AccessTokenReleasingTranscriber(
+                inner: baseService, 
+                tokens: token.map { [$0] } ?? []
+            )
+            
             do {
                 try await service.prepare(language: config.primaryLanguage)
             } catch {
                 await service.stop()
                 throw RuntimePreparationError.initializationFailed(error.localizedDescription)
+            }
+            
+            if let t = token {
+                registry.updateReason(t, reason: ModelArtifactUse.activeRuntime(descriptor: RuntimeDescriptor(transcriber: TranscriberDescriptor(backend: "local", modelID: model.id, kind: .local), aiEditor: .disabled)))
             }
             log("Prepared local STT runtime: \(model.id)")
             return PreparedTranscriber(
@@ -146,8 +205,9 @@ struct RuntimeServiceFactory: RuntimeServiceBuilding, Sendable {
         }
     }
 
-    func prepareEditor(config: Config) async throws -> PreparedEditor {
-        guard config.aiEditorEnabled else {
+    func prepareEditor(config: Config, generation: Int) async throws -> PreparedEditor {
+        let registry = ModelArtifactAccessRegistry.shared
+guard config.aiEditorEnabled else {
             return PreparedEditor(service: nil, descriptor: .disabled)
         }
 
@@ -168,16 +228,37 @@ struct RuntimeServiceFactory: RuntimeServiceBuilding, Sendable {
                     throw RuntimePreparationError.modelCorrupted(modelID: model.id)
                 }
             }
-            let editor = LocalAiEditor(
+            var token: UUID? = nil
+            if localEditorModelOverride == nil {
+                do {
+                    token = try registry.acquireUse(modelID: model.id, reason: ModelArtifactUse.preparation(generation: generation))
+                } catch {
+                    throw RuntimePreparationError.initializationFailed(error.localizedDescription)
+                }
+            }
+
+            let baseEditor = LocalAiEditor(
                 modelID: model.id,
                 modelDirectory: modelDirectory,
                 gate: inferenceGate
             )
+            let editor = AccessTokenReleasingEditor(
+                inner: baseEditor,
+                tokens: token.map { [$0] } ?? []
+            )
+
             do {
                 try await editor.prepare()
             } catch {
                 await editor.stop()
                 throw RuntimePreparationError.initializationFailed(error.localizedDescription)
+            }
+            
+            if let t = token {
+                registry.updateReason(t, reason: ModelArtifactUse.activeRuntime(descriptor: RuntimeDescriptor(
+                    transcriber: .unavailable,
+                    aiEditor: editor.descriptor
+                )))
             }
             guard editor.isReady else {
                 throw RuntimePreparationError.initializationFailed("Local editor is not ready")

@@ -422,12 +422,12 @@ final class AppRuntimeCoordinator {
             var initialEditorError: Error?
             do {
                 if needsTranscriber {
-                    preparedTranscriber = try await factory.prepareTranscriber(config: config)
+                    preparedTranscriber = try await factory.prepareTranscriber(config: config, generation: generation)
                     try ensureCurrent(generation)
                 }
                 if needsEditor {
                     do {
-                        preparedEditor = try await factory.prepareEditor(config: config)
+                        preparedEditor = try await factory.prepareEditor(config: config, generation: generation)
                         try ensureCurrent(generation)
                     } catch {
                         if activeRuntime == nil, preparedTranscriber != nil {
