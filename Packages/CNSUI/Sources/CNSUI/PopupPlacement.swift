@@ -22,6 +22,31 @@ public enum PopupPlacement {
         )
     }
 
+    /// Grows an already-open editor around its horizontal center without
+    /// moving its top edge unless the display's work area requires a clamp.
+    public static func originForResize(
+        oldFrame: NSRect,
+        newSize: NSSize,
+        visibleFrames: [NSRect]
+    ) -> NSPoint {
+        let proposed = NSPoint(
+            x: oldFrame.midX - newSize.width / 2,
+            y: oldFrame.maxY - newSize.height
+        )
+        guard let screen = selectedFrame(
+            for: NSPoint(x: oldFrame.midX, y: oldFrame.midY),
+            frames: visibleFrames
+        ) else {
+            return proposed
+        }
+        let maxX = max(screen.minX, screen.maxX - newSize.width)
+        let maxY = max(screen.minY, screen.maxY - newSize.height)
+        return NSPoint(
+            x: min(max(proposed.x, screen.minX), maxX),
+            y: min(max(proposed.y, screen.minY), maxY)
+        )
+    }
+
     private static func selectedFrame(for point: NSPoint, frames: [NSRect]) -> NSRect? {
         if let containing = frames.first(where: { $0.contains(point) }) { return containing }
         return frames.min { distanceSquared(from: point, to: $0) < distanceSquared(from: point, to: $1) }

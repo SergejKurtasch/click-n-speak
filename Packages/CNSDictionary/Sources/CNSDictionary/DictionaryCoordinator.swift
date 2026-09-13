@@ -190,6 +190,11 @@ public protocol DictionaryCoordinating: AnyObject {
     func recordConfirmation(_ confirmation: DictionaryConfirmation) async -> ConfirmationPersistenceResult
     func addManualTerm(_ term: String, language: String) -> Bool
     func addManualTermValidated(_ term: String, language: String) throws -> Bool
+    func canRevert(language: String?) -> Bool
+    func revert(language: String?) throws
+    func setPromptUpdateMode(_ mode: String) throws
+    func pendingSuggestions() -> [String: [TermCandidate]]
+    func runPromptAnalysis(onDemand: Bool) async throws
 }
 
 public enum DictionaryCoordinatorError: LocalizedError {
@@ -454,7 +459,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             source: .manual,
             now: ISOTimestamp.now(clock())
         ) else { return false }
-        try commit(candidate, promptLanguages: [LanguageCode.normalize(language)], invalidations: [.terms])
+        try commitTermMutation(candidate, languages: [LanguageCode.normalize(language)], invalidations: [.terms])
         return true
     }
 
@@ -503,7 +508,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         guard items.count != before else { throw DictionaryCoordinatorError.termNotFound }
         byLanguage[lang] = .array(items)
         candidate.raw["user_terms"] = .object(byLanguage)
-        try commit(candidate, promptLanguages: [lang], invalidations: [.terms])
+        try commitTermMutation(candidate, languages: [lang], invalidations: [.terms])
     }
 
     public func editTerm(language: String, oldTerm: String, newTerm: String) throws {
@@ -533,7 +538,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         }
         byLanguage[lang] = .array(items)
         candidate.raw["user_terms"] = .object(byLanguage)
-        try commit(candidate, promptLanguages: [lang], invalidations: [.terms])
+        try commitTermMutation(candidate, languages: [lang], invalidations: [.terms])
     }
 
     public func reactivateTerm(language: String, term: String) throws {
@@ -550,29 +555,70 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         items[index] = .object(object)
         byLanguage[lang] = .array(items)
         candidate.raw["user_terms"] = .object(byLanguage)
-        try commit(candidate, promptLanguages: [lang], invalidations: [.terms])
+        try commitTermMutation(candidate, languages: [lang], invalidations: [.terms])
+    }
+
+    public func canRevert(language: String? = nil) -> Bool {
+        let lang = LanguageCode.normalize(language ?? snapshot.primaryLanguage)
+        let snapshots = snapshot.raw["prompt_snapshots"]?.objectValue ?? JSONObject()
+        return snapshots.keys.contains(lang)
     }
 
     public func revert(language: String? = nil) throws {
         let lang = LanguageCode.normalize(language ?? snapshot.primaryLanguage)
         var candidate = snapshot
         var snapshots = candidate.raw["prompt_snapshots"]?.objectValue ?? JSONObject()
-        guard let previous = snapshots[lang]?.arrayValue, !previous.isEmpty else {
+        guard let previous = snapshots[lang]?.arrayValue else {
             throw DictionaryCoordinatorError.noSnapshot
         }
         var byLanguage = candidate.raw["user_terms"]?.objectValue ?? JSONObject()
         let current = byLanguage[lang]?.arrayValue ?? []
-        let normalized = previous.map { item -> JSONValue in
-            if let text = item.stringValue {
-                return makeTermItem(text, source: "manual", useCount: 0)
+        
+        var currentDict = [String: JSONValue]()
+        for item in current {
+            if let text = item.objectValue?["term"]?.stringValue {
+                currentDict[TermCanonicalizer.canonicalKey(text)] = item
+            } else if let text = item.stringValue {
+                currentDict[TermCanonicalizer.canonicalKey(text)] = item
             }
-            return item
         }
+        
+        let normalized = previous.map { item -> JSONValue in
+            var obj = item.objectValue ?? JSONObject()
+            let termText = obj["term"]?.stringValue ?? item.stringValue ?? ""
+            let key = TermCanonicalizer.canonicalKey(termText)
+            
+            if item.stringValue != nil {
+                obj["term"] = .string(termText)
+                obj["source"] = .string("manual")
+                obj["use_count"] = .int(0)
+            }
+            
+            if let currentItem = currentDict[key]?.objectValue {
+                if let newUseCount = currentItem["use_count"]?.intValue,
+                   let oldUseCount = obj["use_count"]?.intValue,
+                   newUseCount > oldUseCount {
+                    obj["use_count"] = .int(newUseCount)
+                } else if currentItem["use_count"]?.intValue != nil && obj["use_count"] == nil {
+                    obj["use_count"] = currentItem["use_count"]
+                }
+                
+                if let newLastSeen = currentItem["last_seen"]?.stringValue,
+                   let oldLastSeen = obj["last_seen"]?.stringValue,
+                   newLastSeen > oldLastSeen {
+                    obj["last_seen"] = .string(newLastSeen)
+                } else if currentItem["last_seen"]?.stringValue != nil && obj["last_seen"] == nil {
+                    obj["last_seen"] = currentItem["last_seen"]
+                }
+            }
+            return .object(obj)
+        }
+        
         snapshots[lang] = .array(current)
         byLanguage[lang] = .array(normalized)
         candidate.raw["prompt_snapshots"] = .object(snapshots)
         candidate.raw["user_terms"] = .object(byLanguage)
-        try commit(candidate, promptLanguages: [lang], invalidations: [.terms])
+        try commitTermMutation(candidate, languages: [lang], invalidations: [.terms])
     }
 
     @discardableResult
@@ -670,7 +716,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         candidate.raw["skipped_terms"] = .object(skipped)
         var invalidations: DictionaryInvalidations = [.suggestions]
         if !acceptedLanguages.isEmpty { invalidations.insert(.terms) }
-        try commit(candidate, promptLanguages: acceptedLanguages, invalidations: invalidations)
+        try commitTermMutation(candidate, languages: acceptedLanguages, invalidations: invalidations)
     }
 
     public func addAllPendingSuggestions() throws {
@@ -681,9 +727,9 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             for item in items { addCandidate(item, language: language, to: &candidate) }
         }
         candidate.raw["pending_suggestions"] = .object(JSONObject())
-        try commit(
+        try commitTermMutation(
             candidate,
-            promptLanguages: Set(pending.keys),
+            languages: Set(pending.keys),
             invalidations: [.terms, .suggestions]
         )
     }
@@ -1131,7 +1177,7 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
             for (language, items) in merged {
                 for item in items { addCandidate(item, language: language, to: &candidate) }
             }
-            try commit(candidate, promptLanguages: Set(merged.keys), invalidations: [.terms, .suggestions])
+            try commitTermMutation(candidate, languages: Set(merged.keys), invalidations: [.terms, .suggestions])
         } else if activeMode == "suggest" {
             replacePending(with: merged, in: &candidate)
             try commit(candidate, promptLanguages: [], invalidations: [.suggestions])
@@ -1305,6 +1351,20 @@ public final class DictionaryCoordinator: DictionaryCoordinating {
         candidate.raw[ReplacementPolicy.approvedKey] = ReplacementPolicy.encode(approved, timestampKey: "approved_at")
         candidate.raw[ReplacementPolicy.rejectedKey] = ReplacementPolicy.encode(rejected, timestampKey: "rejected_at")
         try commit(candidate, promptLanguages: [], invalidations: [.replacements])
+    }
+
+    private func commitTermMutation(
+        _ candidate: Config,
+        languages: Set<String>,
+        invalidations: DictionaryInvalidations
+    ) throws {
+        var mutableCandidate = candidate
+        TermUndoPolicy.capturePreviousTerms(
+            from: snapshot,
+            into: &mutableCandidate,
+            languages: languages
+        )
+        try commit(mutableCandidate, promptLanguages: languages, invalidations: invalidations)
     }
 
     private func commit(

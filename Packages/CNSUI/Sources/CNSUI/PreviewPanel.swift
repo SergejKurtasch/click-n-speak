@@ -20,6 +20,7 @@ public final class PreviewPanel: PopupPresenting {
     private let log: @Sendable (String) -> Void
 
     private var panel: NSPanel?
+    private var iconView: NSImageView?
     private var titleField: NSTextField?
     private var textField: NSTextField?      // non-interactive mode only
     private var textView: DictionaryAwareTextView?  // interactive mode only
@@ -150,6 +151,7 @@ public final class PreviewPanel: PopupPresenting {
         titleField?.stringValue = title
         titleField?.textColor = .white
         setEditorText(text)
+        resizeInteractive(for: text, preservingPosition: false)
 
         position(panel)
         panel.orderFrontRegardless()
@@ -176,7 +178,9 @@ public final class PreviewPanel: PopupPresenting {
             ? text
             : (current + " " + text).trimmingCharacters(in: .whitespacesAndNewlines)
         setEditorText(combined)
+        resizeInteractive(for: combined, preservingPosition: true)
         textView.setSelectedRange(NSRange(location: (combined as NSString).length, length: 0))
+        textView.scrollRangeToVisible(textView.selectedRange())
     }
 
     public func setDecisionEnabled(_ enabled: Bool) {
@@ -263,6 +267,7 @@ public final class PreviewPanel: PopupPresenting {
         removeKeyMonitor()
         panel?.close()
         panel = nil
+        iconView = nil
         titleField = nil
         textField = nil
         textView = nil
@@ -303,6 +308,7 @@ public final class PreviewPanel: PopupPresenting {
         // fresh one in the right layout.
         panel?.close()
         panel = nil
+        iconView = nil
         titleField = nil
         textField = nil
         textView = nil
@@ -391,6 +397,7 @@ public final class PreviewPanel: PopupPresenting {
             removeKeyMonitor()
             panel.close()
             self.panel = nil
+            iconView = nil
             titleField = nil
             textField = nil
             textView = nil
@@ -428,6 +435,7 @@ public final class PreviewPanel: PopupPresenting {
         iconView.image = resources.appIcon()
         iconView.setAccessibilityElement(false)
         effect.addSubview(iconView)
+        self.iconView = iconView
 
         let titleX = iconX + iconSize + 10
         let titleY = height - 15 - 18
@@ -517,6 +525,62 @@ public final class PreviewPanel: PopupPresenting {
             ]
         )
         textView.textStorage?.setAttributedString(attributed)
+    }
+
+    private func resizeInteractive(for text: String, preservingPosition: Bool) {
+        guard isInteractive, let panel else { return }
+        let anchor = preservingPosition
+            ? NSPoint(x: panel.frame.midX, y: panel.frame.midY)
+            : NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(anchor) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first else { return }
+
+        let preferred = PreviewPanelSizing.preferredSize(text: text, visibleFrame: screen.visibleFrame)
+        let size = preservingPosition
+            ? NSSize(
+                width: max(panel.frame.width, preferred.width),
+                height: max(panel.frame.height, preferred.height)
+            )
+            : preferred
+        let oldFrame = panel.frame
+        panel.setContentSize(size)
+        layoutContent(for: size)
+        if preservingPosition {
+            panel.setFrameOrigin(PopupPlacement.originForResize(
+                oldFrame: oldFrame,
+                newSize: panel.frame.size,
+                visibleFrames: NSScreen.screens.map(\.visibleFrame)
+            ))
+        }
+    }
+
+    private func layoutContent(for size: NSSize) {
+        let iconSize: CGFloat = 20
+        let iconX: CGFloat = 15
+        let iconY = size.height - 15 - iconSize
+        iconView?.frame = NSRect(x: iconX, y: iconY, width: iconSize, height: iconSize)
+
+        let titleX = iconX + iconSize + 10
+        let titleY = size.height - 15 - 18
+        titleField?.frame = NSRect(x: titleX, y: titleY, width: size.width - titleX - 15, height: 20)
+
+        let textBottomPad: CGFloat = 10
+        let textHeight = titleY - textBottomPad - 10
+        let textFrame = NSRect(x: 15, y: textBottomPad, width: size.width - 30, height: textHeight)
+        scrollView?.frame = textFrame
+        textField?.frame = textFrame
+
+        if let scrollView, let textView {
+            let contentSize = scrollView.contentSize
+            textView.minSize = contentSize
+            textView.maxSize = NSSize(width: contentSize.width, height: .greatestFiniteMagnitude)
+            textView.textContainer?.containerSize = NSSize(
+                width: contentSize.width,
+                height: .greatestFiniteMagnitude
+            )
+            textView.setFrameSize(NSSize(width: contentSize.width, height: max(textView.frame.height, contentSize.height)))
+        }
     }
 
     private func configureLabel(_ field: NSTextField, color: NSColor, font: NSFont) {

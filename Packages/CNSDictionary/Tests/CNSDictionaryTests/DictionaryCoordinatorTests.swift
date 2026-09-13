@@ -5,6 +5,62 @@ import XCTest
 
 @MainActor
 final class DictionaryCoordinatorTests: XCTestCase {
+    func testAddingFirstTermCanRevertToEmptyDictionary() throws {
+        let paths = makePaths()
+        let coordinator = makeCoordinator(config: makeConfig(), paths: paths)
+        XCTAssertTrue(coordinator.addManualTerm("SwiftUI", language: "en"))
+        try coordinator.revert(language: "en")
+        XCTAssertEqual(coordinator.terms().filter { $0.language == "en" }.map { $0.term }, [])
+    }
+    
+    func testRevertRestoresPreviousStateAndPreservesUseCount() throws {
+        let paths = makePaths()
+        var config = makeConfig()
+        let initialTerms: [JSONValue] = [
+            .object(JSONObject([
+                ("term", .string("SwiftUI")),
+                ("source", .string("manual")),
+                ("use_count", .int(5))
+            ])),
+            .object(JSONObject([
+                ("term", .string("Combine")),
+                ("source", .string("manual")),
+                ("use_count", .int(2))
+            ]))
+        ]
+        var userTerms = config.raw["user_terms"]?.objectValue ?? JSONObject()
+        userTerms["en"] = .array(initialTerms)
+        config.raw["user_terms"] = .object(userTerms)
+        
+        let coordinator = makeCoordinator(config: config, paths: paths)
+        
+        try coordinator.deleteTerm(language: "en", term: "Combine")
+        
+        var currentTerms = coordinator.snapshot.raw["user_terms"]?.objectValue?["en"]?.arrayValue ?? []
+        for i in 0..<currentTerms.count {
+            var obj = currentTerms[i].objectValue!
+            if obj["term"]?.stringValue == "SwiftUI" {
+                obj["use_count"] = .int(10)
+                currentTerms[i] = .object(obj)
+            }
+        }
+        var newByLang = coordinator.snapshot.raw["user_terms"]?.objectValue ?? JSONObject()
+        newByLang["en"] = .array(currentTerms)
+        var newConfig = coordinator.snapshot
+        newConfig.raw["user_terms"] = .object(newByLang)
+        coordinator.adoptConfiguration(newConfig)
+        
+        XCTAssertTrue(coordinator.canRevert(language: "en"))
+        try coordinator.revert(language: "en")
+        
+        let finalTerms = coordinator.terms().filter { $0.language == "en" }
+        XCTAssertEqual(finalTerms.count, 2)
+        let finalSwiftUI = finalTerms.first(where: { $0.term == "SwiftUI" })
+        XCTAssertEqual(finalSwiftUI?.useCount, 10)
+        let finalCombine = finalTerms.first(where: { $0.term == "Combine" })
+        XCTAssertEqual(finalCombine?.useCount, 2)
+    }
+
     private enum FixtureError: Error {
         case correctionIndexWriteFailed
     }

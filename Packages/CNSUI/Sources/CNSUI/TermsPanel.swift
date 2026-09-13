@@ -47,7 +47,41 @@ private struct TermsView: View {
                 Button(viewModel.i18n.t("terms.add")) { viewModel.addTerm() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(viewModel.newTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button(viewModel.i18n.t("menu.revert_terms")) { viewModel.revert() }
+                Button(viewModel.i18n.t("menu.revert_terms")) {
+                    if viewModel.languageFilter != "all" {
+                        viewModel.revert(language: viewModel.languageFilter)
+                    } else {
+                        viewModel.undoChooserLanguage = viewModel.coordinator.snapshot.primaryLanguage
+                        if !viewModel.undoChooserLanguages.contains(viewModel.undoChooserLanguage) {
+                            viewModel.undoChooserLanguage = viewModel.undoChooserLanguages.first ?? ""
+                        }
+                        if viewModel.undoChooserLanguage.isEmpty {
+                            viewModel.errorMessage = viewModel.i18n.t("ui.error_no_snapshot")
+                        } else {
+                            viewModel.showingUndoChooser = true
+                        }
+                    }
+                }
+                .disabled((viewModel.languageFilter == "all" && !viewModel.canRevertAny) || (viewModel.languageFilter != "all" && !viewModel.coordinator.canRevert(language: viewModel.languageFilter)))
+                .popover(isPresented: $viewModel.showingUndoChooser) {
+                    VStack {
+                        Text(viewModel.i18n.t("terms.undo_prompt"))
+                        Picker("", selection: $viewModel.undoChooserLanguage) {
+                            ForEach(viewModel.undoChooserLanguages, id: \.self) {
+                                Text($0.uppercased()).tag($0)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 100)
+                        HStack {
+                            Button(viewModel.i18n.t("btn.cancel")) { viewModel.showingUndoChooser = false }
+                            Button(viewModel.i18n.t("menu.revert_terms")) {
+                                viewModel.revert(language: viewModel.undoChooserLanguage)
+                            }
+                        }
+                    }
+                    .padding()
+                }
             }
             HStack {
                 TextField(viewModel.i18n.t("terms.col_term"), text: $viewModel.searchText)
@@ -148,7 +182,9 @@ private final class TermsViewModel: ObservableObject {
     @Published var stateFilter = "all"
     @Published var newTerm = ""
     @Published var newTermLanguage: String
-    private let coordinator: DictionaryCoordinator
+    @Published var showingUndoChooser = false
+    @Published var undoChooserLanguage = ""
+    let coordinator: DictionaryCoordinator
     @Published var drafts = TermDraftStore()
 
     init(coordinator: DictionaryCoordinator, i18n: I18n) {
@@ -176,6 +212,15 @@ private final class TermsViewModel: ObservableObject {
             primary: coordinator.snapshot.primaryLanguage
         )
     }
+
+    var canRevertAny: Bool {
+        configuredLanguages.contains { coordinator.canRevert(language: $0) }
+    }
+
+    var undoChooserLanguages: [String] {
+        configuredLanguages.filter { coordinator.canRevert(language: $0) }
+    }
+
 
     var filteredTerms: [DictionaryTerm] {
         let query = TermCanonicalizer.canonicalKey(searchText)
@@ -289,16 +334,17 @@ private final class TermsViewModel: ObservableObject {
         load()
     }
 
-    func revert() {
-        let language = languageFilter == "all" ? coordinator.snapshot.primaryLanguage : languageFilter
+    func revert(language: String) {
         do {
             try coordinator.revert(language: language)
             errorMessage = nil
+            showingUndoChooser = false
             load()
         } catch {
             errorMessage = UIErrorLocalization.dictionary(error, i18n: i18n)
         }
     }
+
 
     func sourceLabel(_ source: String) -> String { i18n.t("terms.source_\(source)") }
 

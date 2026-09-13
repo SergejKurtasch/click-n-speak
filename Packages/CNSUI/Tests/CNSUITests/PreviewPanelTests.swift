@@ -274,6 +274,117 @@ struct PreviewPanelTests {
         #expect(onRight.y + size.height <= right.maxY)
     }
 
+    @Test("Short drafts stay compact while long drafts grow within display limits")
+    func adaptiveEditorSize() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let short = PreviewPanelSizing.preferredSize(
+            text: "Short draft.",
+            visibleFrame: visibleFrame
+        )
+        let long = PreviewPanelSizing.preferredSize(
+            text: String(repeating: "A longer dictated sentence with several words. ", count: 40),
+            visibleFrame: visibleFrame
+        )
+
+        #expect(short.width < 400)
+        #expect(short.height < 160)
+        #expect(long.width > short.width)
+        #expect(long.height > short.height)
+        #expect(long.width <= 600)
+        #expect(long.height <= visibleFrame.height * 0.52)
+    }
+
+    @Test("Explicit short lines grow height without needlessly widening the editor")
+    func multilineEditorSize() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let short = PreviewPanelSizing.preferredSize(
+            text: "Short draft.",
+            visibleFrame: visibleFrame
+        )
+        let multiline = PreviewPanelSizing.preferredSize(
+            text: Array(repeating: "short line", count: 12).joined(separator: "\n"),
+            visibleFrame: visibleFrame
+        )
+
+        #expect(multiline.width == short.width)
+        #expect(multiline.height > short.height)
+    }
+
+    @Test("Editor stays within the work area on a small display")
+    func smallDisplayEditorSize() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 500, height: 400)
+        let size = PreviewPanelSizing.preferredSize(
+            text: String(repeating: "A long dictated sentence. ", count: 40),
+            visibleFrame: visibleFrame
+        )
+
+        #expect(size.width <= visibleFrame.width - 24)
+        #expect(size.height <= visibleFrame.height - 24)
+        #expect(size.width <= 600)
+    }
+
+    @Test("Growing an open editor keeps its top edge stable and stays on screen")
+    func resizedEditorPlacement() {
+        let display = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let original = NSRect(x: 500, y: 600, width: 360, height: 132)
+        let grown = PopupPlacement.originForResize(
+            oldFrame: original,
+            newSize: NSSize(width: 600, height: 300),
+            visibleFrames: [display]
+        )
+
+        #expect(grown.x == 380)
+        #expect(grown.y == 432)
+
+        let edge = PopupPlacement.originForResize(
+            oldFrame: NSRect(x: 5, y: 5, width: 360, height: 132),
+            newSize: NSSize(width: 600, height: 480),
+            visibleFrames: [display]
+        )
+        #expect(edge.x >= display.minX)
+        #expect(edge.y >= display.minY)
+    }
+
+    @Test("Appending dictation enlarges the actual editor window")
+    func appendResizesEditorWindow() {
+        let panel = makePanel()
+        let marker = "Adaptive draft marker"
+        panel.showInteractive(text: marker, title: "Edit", onConfirm: { _ in })
+        let before = editorWindow(containing: marker)?.frame
+
+        panel.appendText(String(repeating: " more dictated words for this draft", count: 40))
+        let after = editorWindow(containing: marker)?.frame
+
+        #expect(before != nil)
+        #expect(after != nil)
+        if let before, let after {
+            #expect(before.width < 400)
+            #expect(before.height < 160)
+            #expect(after.width > before.width)
+            #expect(after.height > before.height)
+        }
+        if let window = editorWindow(containing: marker),
+           let scroll = window.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first,
+           let editor = scroll.documentView as? DictionaryAwareTextView,
+           let container = editor.textContainer {
+            editor.layoutManager?.ensureLayout(for: container)
+            let usedHeight = editor.layoutManager?.usedRect(for: container).height ?? 0
+            #expect(container.containerSize.width == scroll.contentSize.width)
+            #expect(editor.frame.height <= max(scroll.contentSize.height, usedHeight + 20))
+        }
+        panel.close()
+    }
+
+    private func editorWindow(containing marker: String) -> NSWindow? {
+        NSApp.windows.first { window in
+            guard let scroll = window.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first,
+                  let editor = scroll.documentView as? DictionaryAwareTextView else {
+                return false
+            }
+            return editor.string.contains(marker)
+        }
+    }
+
     @Test("Interactive editor exposes a stable VoiceOver identifier")
     func editorAccessibility() {
         let panel = makePanel()

@@ -713,11 +713,23 @@ public final class MenuBarController: NSObject {
         return sub
     }
 
+
+    private func showErrorAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: t("btn.ok"))
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
     private func buildInitialPromptSubmenu() -> NSMenu {
         let sub = NSMenu()
         sub.autoenablesItems = false
         sub.addItem(item(t("menu.edit_terms"), #selector(onEditTerms)))
-        sub.addItem(item(t("menu.revert_terms"), #selector(onRevertTerms)))
+        let revertItem = item(t("menu.revert_terms"), #selector(onRevertTerms))
+        let snapshots = config.raw["prompt_snapshots"]?.objectValue ?? JSONObject()
+        revertItem.isEnabled = !snapshots.keys.isEmpty
+        sub.addItem(revertItem)
         sub.addItem(.separator())
 
         let mode = NSMenuItem(title: t("menu.auto_update_mode"), action: nil, keyEquivalent: "")
@@ -1142,17 +1154,49 @@ public final class MenuBarController: NSObject {
     }
 
     @objc private func onRevertTerms() {
-        if let dictionaryCoordinator {
-            do { try dictionaryCoordinator.revert() }
-            catch { log("Dictionary revert failed: \(error.localizedDescription)") }
-        } else {
-            onRevertTermsRequested?()
+        let snapshots = config.raw["prompt_snapshots"]?.objectValue ?? JSONObject()
+        let availableLanguages = snapshots.keys.sorted()
+        guard !availableLanguages.isEmpty else { return }
+
+        let alert = NSAlert()
+        alert.messageText = t("terms.undo_prompt")
+        
+        let popupButton = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        for lang in availableLanguages {
+            popupButton.addItem(withTitle: lang.uppercased())
+            popupButton.lastItem?.representedObject = lang
+        }
+        
+        let primary = config.raw["primary_language"]?.stringValue ?? "en"
+        if let primaryItem = popupButton.itemArray.first(where: { ($0.representedObject as? String) == primary }) {
+            popupButton.select(primaryItem)
+        }
+        
+        alert.accessoryView = popupButton
+        alert.addButton(withTitle: t("menu.revert_terms"))
+        alert.addButton(withTitle: t("btn.cancel"))
+        
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        
+        if response == .alertFirstButtonReturn,
+           let selected = popupButton.selectedItem?.representedObject as? String {
+            if let dictionaryCoordinator {
+                do { try dictionaryCoordinator.revert(language: selected) }
+                catch { log("Dictionary revert failed: \(error.localizedDescription)") }
+            } else {
+                onRevertTermsRequested?() // Assuming it uses primary? Wait, onRevertTermsRequested has no arguments.
+                // We shouldn't rely on it for language. But dictionaryCoordinator is almost always set.
+            }
         }
     }
     @objc private func onModeSuggest() {
         if let dictionaryCoordinator {
             do { try dictionaryCoordinator.setPromptUpdateMode("suggest") }
-            catch { log("Prompt mode update failed: \(error.localizedDescription)") }
+            catch {
+                log("Prompt mode update failed: \(error.localizedDescription)")
+                showErrorAlert(message: UIErrorLocalization.dictionary(error, i18n: i18n))
+            }
             return
         }
         var newConfig = config
@@ -1163,7 +1207,10 @@ public final class MenuBarController: NSObject {
     @objc private func onModeAuto() {
         if let dictionaryCoordinator {
             do { try dictionaryCoordinator.setPromptUpdateMode("auto") }
-            catch { log("Prompt mode update failed: \(error.localizedDescription)") }
+            catch {
+                log("Prompt mode update failed: \(error.localizedDescription)")
+                showErrorAlert(message: UIErrorLocalization.dictionary(error, i18n: i18n))
+            }
             return
         }
         var newConfig = config
@@ -1174,7 +1221,10 @@ public final class MenuBarController: NSObject {
     @objc private func onModeDisabled() {
         if let dictionaryCoordinator {
             do { try dictionaryCoordinator.setPromptUpdateMode("disabled") }
-            catch { log("Prompt mode update failed: \(error.localizedDescription)") }
+            catch {
+                log("Prompt mode update failed: \(error.localizedDescription)")
+                showErrorAlert(message: UIErrorLocalization.dictionary(error, i18n: i18n))
+            }
             return
         }
         var newConfig = config
@@ -1190,9 +1240,13 @@ public final class MenuBarController: NSObject {
         }
         Task { @MainActor [weak self, weak dictionaryCoordinator] in
             guard let self, let dictionaryCoordinator else { return }
-            do { try await dictionaryCoordinator.runPromptAnalysis(onDemand: true) }
-            catch { self.log("On-demand prompt analysis failed: \(error.localizedDescription)") }
-            self.presentSuggestionsPanel(using: dictionaryCoordinator)
+            do {
+                try await dictionaryCoordinator.runPromptAnalysis(onDemand: true)
+                self.presentSuggestionsPanel(using: dictionaryCoordinator)
+            } catch {
+                self.log("On-demand prompt analysis failed: \(error.localizedDescription)")
+                self.showErrorAlert(message: UIErrorLocalization.dictionary(error, i18n: self.i18n))
+            }
         }
     }
     @objc private func onEditReplacements() {

@@ -501,6 +501,30 @@ final class FakeDictionaryCoordinator: DictionaryCoordinating {
     func addManualTerm(_ term: String, language: String) -> Bool {
         return true
     }
+
+    func canRevert(language: String?) -> Bool {
+        return false
+    }
+
+    func revert(language: String?) throws {
+        // No-op
+    }
+
+
+    var fakeFailures: [String: Error] = [:]
+
+    func setPromptUpdateMode(_ mode: String) throws {
+        if let error = fakeFailures["setPromptUpdateMode"] { throw error }
+    }
+
+    func pendingSuggestions() -> [String: [TermCandidate]] {
+        return [:]
+    }
+
+    func runPromptAnalysis(onDemand: Bool) async throws {
+        if let error = fakeFailures["runPromptAnalysis"] { throw error }
+    }
+
 }
 
 final class ShutdownResultRecorder: @unchecked Sendable {
