@@ -121,7 +121,7 @@
   "notify.perm_hotkeys_disabled_title": "Click-n-speak — Гарячі клавіші вимкнено",
   "notify.perm_hotkeys_disabled_body": "Додай Click-n-speak до Конфіденційність і безпека → Input Monitoring, щоб увімкнути гарячі клавіші.",
   "notify.language_changed_title": "Мову змінено",
-  "notify.language_changed_body": "Для застосування нової мови необхідно перезапустити застосунок.",
+  "notify.language_changed_body": "Мову розпізнавання змінено. Мова інтерфейсу зміниться після перезапуску.",
   "dialog.restart_title": "Перезапустити Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak потрібно перезапустити. Перезапустити зараз?",
   "dialog.restart_reason_language": "Мову інтерфейсу змінено.",
@@ -314,7 +314,7 @@
   "menu.primary_language": "Основна мова",
   "menu.additional_languages": "Додаткові мови",
   "menu.ai_editor": "AI-редактор (пунктуація)",
-  "menu.ai_backend": "Бекенд AI-редактора ▶",
+  "menu.ai_backend": "Бекенд AI-редактора",
   "menu.ai_local": "Локально (Qwen)",
   "menu.ai_gemini": "Gemini API",
   "menu.api_keys": "API-ключі",
@@ -387,7 +387,7 @@
   "notify.already_running_body": "Застосунок активовано в рядку меню.",
   "notify.update_available_title": "Доступне оновлення",
   "notify.update_available_body": "{version} готове до завантаження. Відкрийте меню для встановлення.",
-  "menu.setup": "Майстер налаштування...",
+  "menu.setup": "Майстер дозволів...",
   "menu.about": "Про Click-n-speak",
   "menu.delete_local_model": "Видалити локальні моделі...",
   "notify.transcription_error_title": "Не вдалося розпізнати мовлення",
@@ -491,5 +491,10 @@
   "config.recovery_quit": "Вийти",
   "config.recovery_choose": "Виберіть резервну копію налаштувань. Перед відновленням її буде перевірено, а поточний файл збережено в новій резервній копії.",
   "config.recovery_restore_failed": "Не вдалося відновити копію. Перевірте її коректність і можливість прочитати та зберегти оригінал. Запуск залишається призупиненим.",
-  "config.reload_failed": "Не вдалося перечитати налаштування. Чинні налаштування збережено. Виправте файл і повторіть завантаження налаштувань."
+  "config.reload_failed": "Не вдалося перечитати налаштування. Чинні налаштування збережено. Виправте файл і повторіть завантаження налаштувань.",
+  "notify.hotkey_failed_title": "Помилка реєстрації гарячої клавіші",
+  "notify.hotkey_failed_body": "Не вдалося зареєструвати Option+Space. Можливо, комбінація зайнята іншим додатком.",
+  "wizard.permissions_already_granted_title": "Дозволи вже налаштовані",
+  "wizard.permissions_already_granted_body": "Усі необхідні системні дозволи вже надані.",
+  "menu.ai_disabled": "Вимкнений"
 }

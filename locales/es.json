@@ -121,7 +121,7 @@
   "notify.perm_hotkeys_disabled_title": "Click-n-speak — Atajos desactivados",
   "notify.perm_hotkeys_disabled_body": "Añade Click-n-speak a Privacidad y seguridad → Input Monitoring para activar los atajos.",
   "notify.language_changed_title": "Idioma cambiado",
-  "notify.language_changed_body": "Se requiere reinicio para aplicar el nuevo idioma.",
+  "notify.language_changed_body": "Idioma de reconocimiento cambiado. El idioma de la interfaz cambiará después del reinicio.",
   "dialog.restart_title": "Reiniciar Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak necesita reiniciarse. ¿Reiniciar ahora?",
   "dialog.restart_reason_language": "Idioma de la interfaz cambiado.",
@@ -312,7 +312,7 @@
   "menu.primary_language": "Idioma principal",
   "menu.additional_languages": "Idiomas adicionales",
   "menu.ai_editor": "Editor IA (Puntuación)",
-  "menu.ai_backend": "Backend Editor IA ▶",
+  "menu.ai_backend": "Backend Editor IA",
   "menu.ai_local": "Local (Qwen)",
   "menu.ai_gemini": "Gemini API",
   "menu.api_keys": "Claves API",
@@ -385,7 +385,7 @@
   "notify.already_running_body": "La app ha sido traída a la barra de menús.",
   "notify.update_available_title": "Actualización disponible",
   "notify.update_available_body": "{version} listo para descargar. Abra el menú para instalar.",
-  "menu.setup": "Configuración...",
+  "menu.setup": "Asistente de permisos...",
   "menu.about": "Acerca de Click-n-speak",
   "menu.delete_local_model": "Eliminar modelos locales...",
   "notify.transcription_error_title": "Error de reconocimiento de voz",
@@ -489,5 +489,10 @@
   "config.recovery_quit": "Salir",
   "config.recovery_choose": "Seleccione una copia de la configuración. Se validará antes de restaurarla. Primero se guardará el archivo actual en una nueva copia de seguridad.",
   "config.recovery_restore_failed": "No se pudo restaurar la copia. Compruebe que sea válida y que el archivo original se pueda leer y guardar. El inicio sigue en pausa.",
-  "config.reload_failed": "No se pudo volver a cargar la configuración. Se conservan los ajustes activos. Corrija el archivo y vuelva a cargar la configuración."
+  "config.reload_failed": "No se pudo volver a cargar la configuración. Se conservan los ajustes activos. Corrija el archivo y vuelva a cargar la configuración.",
+  "notify.hotkey_failed_title": "Error al registrar el atajo",
+  "notify.hotkey_failed_body": "No se pudo registrar Option+Space. ¿Está siendo utilizado por otra aplicación?",
+  "wizard.permissions_already_granted_title": "Permisos ya concedidos",
+  "wizard.permissions_already_granted_body": "Todos los permisos del sistema necesarios ya están concedidos.",
+  "menu.ai_disabled": "Desactivado"
 }

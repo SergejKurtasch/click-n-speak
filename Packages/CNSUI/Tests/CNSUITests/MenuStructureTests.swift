@@ -96,13 +96,13 @@ struct MenuStructureTests {
             "API Keys",
             "Languages",
             "---",
-            "AI Editor Backend ▶",
+            "AI Editor Backend",
             "Delete Local Models...",
             "Initial Prompt",
             "Last Phrases",
             "Transcribe Audio File...",
             "---",
-            "Setup...",
+            "Permissions Wizard...",
             "Check for Updates",
             "About Click-n-speak",
             "Launch at Login",
@@ -152,7 +152,14 @@ struct MenuStructureTests {
             $0.identifier?.rawValue == "ai-editor.backend"
         })
         #expect(parent.state == .off)
-        #expect(parent.submenu?.items.allSatisfy { $0.state == .off } == true)
+        let disabledItem = try #require(parent.submenu?.items.first {
+            ($0.representedObject as? String) == "disabled"
+        })
+        #expect(disabledItem.state == .on)
+        let localItem = try #require(parent.submenu?.items.first {
+            ($0.representedObject as? String) == "local"
+        })
+        #expect(localItem.state == .off)
 
         var pending = controller.state
         pending.config.raw["ai_editor_enabled"] = .bool(true)
@@ -198,6 +205,11 @@ struct MenuStructureTests {
         #expect(controller.config.aiEditorEnabled)
         #expect(controller.config.aiEditorBackend == "local")
 
+        // Re-selecting the same backend does NOT disable it
+        _ = controller.perform(local.action)
+        #expect(controller.config.aiEditorEnabled)
+        #expect(controller.config.aiEditorBackend == "local")
+
         parent = try #require(controller.menu.items.first {
             $0.identifier?.rawValue == "ai-editor.backend"
         })
@@ -211,10 +223,10 @@ struct MenuStructureTests {
         parent = try #require(controller.menu.items.first {
             $0.identifier?.rawValue == "ai-editor.backend"
         })
-        let selectedGemini = try #require(parent.submenu?.items.first {
-            ($0.representedObject as? String) == "gemini"
+        let disabled = try #require(parent.submenu?.items.first {
+            ($0.representedObject as? String) == "disabled"
         })
-        _ = controller.perform(selectedGemini.action)
+        _ = controller.perform(disabled.action)
         #expect(!controller.config.aiEditorEnabled)
     }
 

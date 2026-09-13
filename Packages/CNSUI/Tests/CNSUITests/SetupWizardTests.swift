@@ -200,6 +200,41 @@ struct SetupWizardTests {
         #expect(!permissions.setupDone)
     }
 
+
+    @Test("Already granted permissions behave differently based on invocation type")
+    func alreadyGrantedInvocation() async {
+        let permissions = FakePermissionService()
+        permissions.microphone = .granted
+        permissions.accessibility = true
+        
+        // Automatic invocation: completes without presenting any UI
+        var presenter = FakeSetupAlertPresenter(responses: [])
+        var wizard = SetupWizard(
+            permissions: permissions,
+            i18n: i18n(),
+            presenter: presenter,
+            accessibilityWaitTimeout: .milliseconds(20),
+            permissionPollInterval: .milliseconds(5)
+        )
+        var result = await wizard.run(invocation: .automatic)
+        #expect(result == .completed)
+        #expect(presenter.requests.count == 0) // No screens for automatic
+        
+        // Manual invocation: shows exactly one screen
+        presenter = FakeSetupAlertPresenter(responses: [.button(0)])
+        wizard = SetupWizard(
+            permissions: permissions,
+            i18n: i18n(),
+            presenter: presenter,
+            accessibilityWaitTimeout: .milliseconds(20),
+            permissionPollInterval: .milliseconds(5)
+        )
+        result = await wizard.run(invocation: .manual)
+        #expect(result == .completed)
+        #expect(presenter.requests.count == 1)
+        #expect(presenter.requests[0].title == i18n().t("wizard.permissions_already_granted_title"))
+    }
+
     private func allButtons(in view: NSView?) -> [NSButton] {
         guard let view else { return [] }
         var result = view is NSButton ? [view as! NSButton] : []

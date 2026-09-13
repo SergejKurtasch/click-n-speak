@@ -121,7 +121,7 @@
   "notify.perm_hotkeys_disabled_title": "Click-n-speak — Raccourcis désactivés",
   "notify.perm_hotkeys_disabled_body": "Ajoute Click-n-speak dans Confidentialité et sécurité → Input Monitoring pour activer les raccourcis.",
   "notify.language_changed_title": "Langue modifiée",
-  "notify.language_changed_body": "Un redémarrage est nécessaire pour appliquer la nouvelle langue.",
+  "notify.language_changed_body": "Langue de reconnaissance modifiée. La langue de l'interface changera après le redémarrage.",
   "dialog.restart_title": "Redémarrer Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak doit redémarrer. Redémarrer maintenant ?",
   "dialog.restart_reason_language": "Langue de l'interface modifiée.",
@@ -312,7 +312,7 @@
   "menu.primary_language": "Langue principale",
   "menu.additional_languages": "Langues supplémentaires",
   "menu.ai_editor": "Éditeur IA (Ponctuation)",
-  "menu.ai_backend": "Backend Éditeur IA ▶",
+  "menu.ai_backend": "Backend Éditeur IA",
   "menu.ai_local": "Local (Qwen)",
   "menu.ai_gemini": "Gemini API",
   "menu.api_keys": "Clés API",
@@ -385,7 +385,7 @@
   "notify.already_running_body": "L'app a été ramenée dans la barre de menus.",
   "notify.update_available_title": "Mise à jour disponible",
   "notify.update_available_body": "{version} prête à télécharger. Ouvrez le menu pour installer.",
-  "menu.setup": "Configuration...",
+  "menu.setup": "Assistant des permissions...",
   "menu.about": "À propos de Click-n-speak",
   "menu.delete_local_model": "Supprimer les modèles locaux...",
   "notify.transcription_error_title": "Échec de la reconnaissance vocale",
@@ -489,5 +489,10 @@
   "config.recovery_quit": "Quitter",
   "config.recovery_choose": "Choisissez une sauvegarde de la configuration. Elle sera vérifiée avant la restauration. Le fichier actuel sera d’abord conservé dans une nouvelle sauvegarde.",
   "config.recovery_restore_failed": "Impossible de restaurer la sauvegarde. Vérifiez sa validité et que le fichier original peut être lu et sauvegardé. Le démarrage reste suspendu.",
-  "config.reload_failed": "Impossible de recharger la configuration. Les réglages actifs sont conservés. Corrigez le fichier puis rechargez la configuration."
+  "config.reload_failed": "Impossible de recharger la configuration. Les réglages actifs sont conservés. Corrigez le fichier puis rechargez la configuration.",
+  "notify.hotkey_failed_title": "Échec de l'enregistrement du raccourci",
+  "notify.hotkey_failed_body": "Impossible d'enregistrer Option+Space. Est-il utilisé par une autre application ?",
+  "wizard.permissions_already_granted_title": "Permissions déjà accordées",
+  "wizard.permissions_already_granted_body": "Toutes les permissions système requises sont déjà accordées.",
+  "menu.ai_disabled": "Désactivé"
 }

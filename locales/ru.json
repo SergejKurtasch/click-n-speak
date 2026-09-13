@@ -121,7 +121,7 @@
   "notify.perm_hotkeys_disabled_title": "Click-n-speak — Горячие клавиши отключены",
   "notify.perm_hotkeys_disabled_body": "Добавьте Click-n-speak в Конфиденциальность и безопасность → Input Monitoring, чтобы включить горячие клавиши.",
   "notify.language_changed_title": "Язык изменён",
-  "notify.language_changed_body": "Для применения нового языка необходим перезапуск.",
+  "notify.language_changed_body": "Язык распознавания изменён. Язык интерфейса изменится после перезапуска.",
   "dialog.restart_title": "Перезапуск Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak необходимо перезапустить. Перезапустить сейчас?",
   "dialog.restart_reason_language": "Язык интерфейса изменён.",
@@ -314,7 +314,7 @@
   "menu.primary_language": "Основной язык",
   "menu.additional_languages": "Дополнительные языки",
   "menu.ai_editor": "AI-редактор (пунктуация)",
-  "menu.ai_backend": "Бэкенд AI-редактора ▶",
+  "menu.ai_backend": "Бэкенд AI-редактора",
   "menu.ai_local": "Локально (Qwen)",
   "menu.ai_gemini": "Gemini API",
   "menu.api_keys": "API-ключи",
@@ -387,7 +387,7 @@
   "notify.already_running_body": "Приложение активировано в строке меню.",
   "notify.update_available_title": "Доступно обновление",
   "notify.update_available_body": "{version} готово к загрузке. Откройте меню для установки.",
-  "menu.setup": "Мастер настройки...",
+  "menu.setup": "Мастер разрешений...",
   "menu.about": "О Click-n-speak",
   "menu.delete_local_model": "Удалить локальные модели...",
   "notify.transcription_error_title": "Не удалось распознать речь",
@@ -491,5 +491,10 @@
   "config.recovery_quit": "Выйти",
   "config.recovery_choose": "Выберите резервную копию настроек. Перед восстановлением она будет проверена, а текущий файл сохранён в новой резервной копии.",
   "config.recovery_restore_failed": "Не удалось восстановить копию. Проверьте её корректность и возможность прочитать и сохранить исходный файл. Запуск остаётся приостановленным.",
-  "config.reload_failed": "Не удалось перечитать настройки. Действующие настройки сохранены. Исправьте файл и снова выберите перезагрузку настроек."
+  "config.reload_failed": "Не удалось перечитать настройки. Действующие настройки сохранены. Исправьте файл и снова выберите перезагрузку настроек.",
+  "notify.hotkey_failed_title": "Ошибка регистрации горячей клавиши",
+  "notify.hotkey_failed_body": "Не удалось зарегистрировать Option+Space. Возможно, комбинация занята другим приложением.",
+  "wizard.permissions_already_granted_title": "Разрешения уже настроены",
+  "wizard.permissions_already_granted_body": "Все необходимые системные разрешения уже предоставлены.",
+  "menu.ai_disabled": "Выключен"
 }

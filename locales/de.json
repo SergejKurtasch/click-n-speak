@@ -121,7 +121,7 @@
   "notify.perm_hotkeys_disabled_title": "Click-n-speak — Hotkeys deaktiviert",
   "notify.perm_hotkeys_disabled_body": "Click-n-speak zu Datenschutz & Sicherheit → Input Monitoring hinzufügen, um Hotkeys zu aktivieren.",
   "notify.language_changed_title": "Sprache geändert",
-  "notify.language_changed_body": "Neustart erforderlich, um die neue Sprache anzuwenden.",
+  "notify.language_changed_body": "Erkennungssprache geändert. Die Oberflächensprache wird nach einem Neustart geändert.",
   "dialog.restart_title": "Click-n-speak neu starten",
   "dialog.restart_body": "{reason}\n\nClick-n-speak muss neu gestartet werden. Jetzt neu starten?",
   "dialog.restart_reason_language": "Oberflächensprache geändert.",
@@ -312,7 +312,7 @@
   "menu.primary_language": "Hauptsprache",
   "menu.additional_languages": "Weitere Sprachen",
   "menu.ai_editor": "KI-Editor (Zeichensetzung)",
-  "menu.ai_backend": "KI-Editor Backend ▶",
+  "menu.ai_backend": "KI-Editor Backend",
   "menu.ai_local": "Lokal (Qwen)",
   "menu.ai_gemini": "Gemini API",
   "menu.api_keys": "API-Schlüssel",
@@ -385,7 +385,7 @@
   "notify.already_running_body": "Die App wurde in der Menüleiste aktiviert.",
   "notify.update_available_title": "Update verfügbar",
   "notify.update_available_body": "{version} steht zum Download bereit. Menü öffnen zum Installieren.",
-  "menu.setup": "Einrichten...",
+  "menu.setup": "Berechtigungsassistent...",
   "menu.about": "Über Click-n-speak",
   "menu.delete_local_model": "Lokale Modelle löschen...",
   "notify.transcription_error_title": "Spracherkennung fehlgeschlagen",
@@ -489,5 +489,10 @@
   "config.recovery_quit": "Beenden",
   "config.recovery_choose": "Wählen Sie eine Sicherung der Einstellungen. Sie wird vor der Wiederherstellung geprüft. Die aktuelle Datei wird zuerst als neue Sicherung gespeichert.",
   "config.recovery_restore_failed": "Die Sicherung konnte nicht wiederhergestellt werden. Prüfen Sie ihre Gültigkeit und ob die Originaldatei gelesen und gesichert werden kann. Der Start bleibt angehalten.",
-  "config.reload_failed": "Die Einstellungen konnten nicht neu geladen werden. Die aktiven Einstellungen bleiben erhalten. Korrigieren Sie die Datei und laden Sie die Einstellungen erneut."
+  "config.reload_failed": "Die Einstellungen konnten nicht neu geladen werden. Die aktiven Einstellungen bleiben erhalten. Korrigieren Sie die Datei und laden Sie die Einstellungen erneut.",
+  "notify.hotkey_failed_title": "Hotkey-Registrierung fehlgeschlagen",
+  "notify.hotkey_failed_body": "Option+Space konnte nicht registriert werden. Wird sie von einer anderen App verwendet?",
+  "wizard.permissions_already_granted_title": "Berechtigungen bereits erteilt",
+  "wizard.permissions_already_granted_body": "Alle erforderlichen Systemberechtigungen wurden bereits erteilt.",
+  "menu.ai_disabled": "Deaktiviert"
 }

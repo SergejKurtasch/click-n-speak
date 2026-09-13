@@ -31,7 +31,7 @@ final class AppLaunchCoordinator {
         defer { isRunning = false }
 
         if !permissions.isSetupDone() || !permissions.allPermissionsGranted() {
-            _ = await runPermissionSetup(force: true)
+            _ = await runPermissionSetup(force: true, invocation: .automatic)
         }
 
         guard !config.languagePickerDone else {
@@ -41,7 +41,7 @@ final class AppLaunchCoordinator {
     }
 
     @discardableResult
-    func runPermissionSetup(force: Bool) async -> SetupWizardResult {
+    func runPermissionSetup(force: Bool, invocation: SetupInvocation = .manual) async -> SetupWizardResult {
         if !force, permissions.isSetupDone(), permissions.allPermissionsGranted() {
             return .completed
         }
@@ -51,7 +51,7 @@ final class AppLaunchCoordinator {
             log: log
         )
         self.wizard = wizard
-        let result = await wizard.run()
+        let result = await wizard.run(invocation: invocation)
         self.wizard = nil
         return result
     }

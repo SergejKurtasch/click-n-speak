@@ -515,6 +515,14 @@ public final class MenuBarController: NSObject {
         sub.autoenablesItems = false
         let activeBackend = factualActiveEditorBackend
         let desiredBackend = config.aiEditorEnabled ? config.aiEditorBackend : nil
+        
+        let disabled = choiceItem(
+            t("menu.ai_disabled"),
+            value: "disabled",
+            #selector(onAIBackendDisabled),
+            state: config.aiEditorEnabled ? .off : (activeBackend == nil ? .on : .mixed)
+        )
+        sub.addItem(disabled)
 
         let local = choiceItem(
             aiEditorLocalTitle(active: activeBackend == "local", desired: desiredBackend == "local"),
@@ -1009,18 +1017,18 @@ public final class MenuBarController: NSObject {
         }
     }
 
+    @objc private func onAIBackendDisabled() {
+        var newConfig = config
+        newConfig.raw["ai_editor_enabled"] = .bool(false)
+        onConfigChanged?(newConfig)
+        log("AI Editor disabled")
+    }
+
     @objc private func onAIBackendLocal() {
         var newConfig = config
-        let shouldDisable = config.aiEditorEnabled && config.aiEditorBackend == "local"
-        newConfig.raw["ai_editor_enabled"] = .bool(!shouldDisable)
-        if !shouldDisable {
-            newConfig.raw["ai_editor_backend"] = .string("local")
-        }
+        newConfig.raw["ai_editor_enabled"] = .bool(true)
+        newConfig.raw["ai_editor_backend"] = .string("local")
         onConfigChanged?(newConfig)
-        if shouldDisable {
-            log("AI Editor disabled from local backend selection")
-            return
-        }
         log("AI Editor backend selected: local")
         guard let model = ModelRegistry.aiEditorModel(id: normalizedAIEditorModelID),
               !ModelManager.isDownloaded(model, paths: paths) else { return }
@@ -1029,15 +1037,10 @@ public final class MenuBarController: NSObject {
 
     @objc private func onAIBackendGemini() {
         var newConfig = config
-        let shouldDisable = config.aiEditorEnabled && config.aiEditorBackend == "gemini"
-        newConfig.raw["ai_editor_enabled"] = .bool(!shouldDisable)
-        if !shouldDisable {
-            newConfig.raw["ai_editor_backend"] = .string("gemini")
-        }
+        newConfig.raw["ai_editor_enabled"] = .bool(true)
+        newConfig.raw["ai_editor_backend"] = .string("gemini")
         onConfigChanged?(newConfig)
-        log(shouldDisable
-            ? "AI Editor disabled from Gemini backend selection"
-            : "AI Editor backend selected: gemini")
+        log("AI Editor backend selected: gemini")
     }
 
     @objc private func onDownloadAIModel() {

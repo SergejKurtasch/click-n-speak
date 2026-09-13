@@ -293,6 +293,10 @@ final class SetupAlertPanel: NSPanel {
     }
 }
 
+public enum SetupInvocation: Sendable {
+    case automatic, manual
+}
+
 @MainActor
 public final class SetupWizard {
     public static private(set) var isActive = false
@@ -322,7 +326,17 @@ public final class SetupWizard {
         self.log = log
     }
 
-    public func run() async -> SetupWizardResult {
+    public func run(invocation: SetupInvocation = .automatic) async -> SetupWizardResult {
+        if invocation == .manual && permissions.allPermissionsGranted() {
+            _ = await presenter.present(
+                SetupAlertRequest(
+                    title: i18n.t("wizard.permissions_already_granted_title"),
+                    body: i18n.t("wizard.permissions_already_granted_body"),
+                    buttons: [i18n.t("btn.close")]
+                )
+            )
+            return .completed
+        }
         guard !Self.isActive else {
             log("Permission setup is already active.")
             return .incomplete

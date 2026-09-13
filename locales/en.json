@@ -121,7 +121,7 @@
   "notify.perm_hotkeys_disabled_title": "Click-n-speak — Hotkeys Disabled",
   "notify.perm_hotkeys_disabled_body": "Add Click-n-speak to Privacy & Security → Input Monitoring to enable hotkeys.",
   "notify.language_changed_title": "Language changed",
-  "notify.language_changed_body": "Restart required to apply the new language.",
+  "notify.language_changed_body": "Recognition language changed. Interface language will change after restart.",
   "dialog.restart_title": "Restart Click-n-speak",
   "dialog.restart_body": "{reason}\n\nClick-n-speak needs to restart. Restart now?",
   "dialog.restart_reason_language": "Interface language changed.",
@@ -312,7 +312,7 @@
   "menu.primary_language": "Primary Language",
   "menu.additional_languages": "Additional Languages",
   "menu.ai_editor": "AI Editor (Punctuation & Cleanup)",
-  "menu.ai_backend": "AI Editor Backend ▶",
+  "menu.ai_backend": "AI Editor Backend",
   "menu.ai_local": "Local (Qwen)",
   "menu.ai_gemini": "Gemini API",
   "menu.api_keys": "API Keys",
@@ -385,7 +385,7 @@
   "notify.already_running_body": "The app has been brought to the menu bar.",
   "notify.update_available_title": "Update Available",
   "notify.update_available_body": "{version} is ready to download. Open the menu to install.",
-  "menu.setup": "Setup...",
+  "menu.setup": "Permissions Wizard...",
   "menu.about": "About Click-n-speak",
   "menu.delete_local_model": "Delete Local Models...",
   "notify.transcription_error_title": "Speech recognition failed",
@@ -489,5 +489,10 @@
   "config.recovery_quit": "Quit",
   "config.recovery_choose": "Choose a configuration backup. It will be validated before restoration. The current file will first be preserved in a new recovery backup.",
   "config.recovery_restore_failed": "The backup could not be restored. Check that it is valid and that the original file can be read and backed up. Startup remains paused.",
-  "config.reload_failed": "The configuration could not be reloaded. The active settings are retained. Repair the configuration file and try Reload Config again."
+  "config.reload_failed": "The configuration could not be reloaded. The active settings are retained. Repair the configuration file and try Reload Config again.",
+  "notify.hotkey_failed_title": "Hotkey registration failed",
+  "notify.hotkey_failed_body": "Could not register Option+Space. Is another app using it?",
+  "wizard.permissions_already_granted_title": "Permissions Already Granted",
+  "wizard.permissions_already_granted_body": "All required system permissions are already granted.",
+  "menu.ai_disabled": "Disabled"
 }

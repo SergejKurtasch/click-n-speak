@@ -28,8 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var scheduler: MaintenanceScheduler?
     private var logger: FileLogger?
     private var session: SessionController?
+    var hotkeyRegistrar: (@MainActor () -> Bool)?
     private var hotkey: HotkeyManager?
-    private var permissionService: SystemPermissionService?
+    var permissionService: PermissionServicing?
     private var launchCoordinator: AppLaunchCoordinator?
     private var runtimeCoordinator: AppRuntimeCoordinator?
     private var dictionaryCoordinator: DictionaryCoordinator?
@@ -51,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         generic: String,
         ok: String
     )?
+    private var hotkeyFailedNotification: (title: String, body: String)?
     private var languageChangeNotification: (title: String, body: String)?
     private var interfaceLanguage = "en"
     private var menuState: MenuState?
@@ -134,6 +136,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             i18n.t("dialog.restart_helper_not_ready"),
             i18n.t("dialog.restart_failed_body"),
             i18n.t("btn.ok")
+        )
+        hotkeyFailedNotification = (
+            i18n.t("notify.hotkey_failed_title"),
+            i18n.t("notify.hotkey_failed_body")
         )
         languageChangeNotification = (
             i18n.t("notify.language_changed_title"),
@@ -364,7 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 runtimeCanRecord: runtimeCoordinator.canRecord,
                 log: log
             )
-            self.startHotkeyIfAllowed(log: log)
+            self.reconcileHotkeyAvailability(log: log)
             self.menuController?.checkAndDownloadLocalModelIfNeeded()
             do {
                 try await dictionaryCoordinator.runPromptAnalysis(onDemand: true)
@@ -447,26 +453,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let launchCoordinator else { return }
         Task { @MainActor [weak self] in
             _ = await launchCoordinator.runPermissionSetup(force: true)
-            self?.startHotkeyIfAllowed()
+            self?.reconcileHotkeyAvailability()
         }
     }
 
-    private func startHotkeyIfAllowed(log explicitLog: (@Sendable (String) -> Void)? = nil) {
+    @MainActor
+    func shouldStartHotkey(
+        permissionsGranted: Bool,
+        runtimeCanRecord: Bool,
+        alreadyStarted: Bool,
+        terminating: Bool
+    ) -> Bool {
+        permissionsGranted && runtimeCanRecord && !alreadyStarted && !terminating
+    }
+
+    func reconcileHotkeyAvailability(log explicitLog: (@Sendable (String) -> Void)? = nil) {
         let log: @Sendable (String) -> Void = explicitLog ?? { [weak logger] message in
             guard let logger else { return }
             Task { await logger.info(message) }
         }
-        guard permissionService?.allPermissionsGranted() == true else {
-            log("Hotkey remains disabled until Microphone and Accessibility are granted.")
+        let granted = permissionService?.allPermissionsGranted() == true
+        let canRecord = runtimeCoordinator?.canRecord == true
+        
+        guard shouldStartHotkey(
+            permissionsGranted: granted,
+            runtimeCanRecord: canRecord,
+            alreadyStarted: hotkeyStarted,
+            terminating: terminationStarted
+        ) else {
+            if !granted {
+                log("Hotkey remains disabled until Microphone and Accessibility are granted.")
+            } else if !canRecord {
+                log("Hotkey remains disabled until a transcription runtime is active.")
+            }
             return
         }
-        guard runtimeCoordinator?.canRecord == true else {
-            log("Hotkey remains disabled until a transcription runtime is active.")
-            return
+        
+        let registrar = hotkeyRegistrar ?? { [weak hotkey] in hotkey?.start() ?? false }
+        let success = registrar()
+        if success {
+            hotkeyStarted = true
+            log("Hotkey registered: Option+Space")
+        } else {
+            log("Hotkey registration failed")
+            if let notification = hotkeyFailedNotification {
+                notificationService?.deliver(title: notification.title, body: notification.body)
+            }
         }
-        guard !hotkeyStarted, let hotkey else { return }
-        hotkeyStarted = hotkey.start()
-        log(hotkeyStarted ? "Hotkey registered: Option+Space" : "Hotkey registration failed")
     }
 
     private func requestRestart() {
@@ -662,10 +695,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         runtimeCoordinator.onStateChanged = { [weak self] state in
             self?.updateMenuRuntimeState(state)
-            if case .ready = state { self?.startHotkeyIfAllowed() }
+            if case .ready = state { self?.reconcileHotkeyAvailability() }
             if case let .degraded(active, _, _, _) = state,
                active?.transcriber.readiness == .ready {
-                self?.startHotkeyIfAllowed()
+                self?.reconcileHotkeyAvailability()
             }
         }
 
