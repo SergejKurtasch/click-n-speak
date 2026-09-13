@@ -21,6 +21,10 @@ public final class FileTranscriptionViewModel: ObservableObject {
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var successMessage: String?
     @Published public private(set) var progress = FileTranscriptionProgress(stage: .preparing)
+    @Published public private(set) var refinementMessage: String?
+    @Published public private(set) var refinementOutcome: FileRefinementOutcome = .notRequested
+    @Published public private(set) var isEditorAvailable = false
+    @Published public private(set) var editorUnavailableReason: String?
     public private(set) var jobID: UUID?
 
     private let onTranscribe: FileTranscriptionAction
@@ -35,6 +39,19 @@ public final class FileTranscriptionViewModel: ObservableObject {
         self.i18n = i18n
         self.onTranscribe = onTranscribe
         self.onCancel = onCancel
+    }
+
+    public func updateEditorAvailability(isActive: Bool, isPreparing: Bool) {
+        if isPreparing {
+            isEditorAvailable = false
+            editorUnavailableReason = i18n.t("dialog.editor_preparing_reason")
+        } else if !isActive {
+            isEditorAvailable = false
+            editorUnavailableReason = i18n.t("dialog.editor_disabled_reason")
+        } else {
+            isEditorAvailable = true
+            editorUnavailableReason = nil
+        }
     }
 
     @discardableResult
@@ -55,6 +72,8 @@ public final class FileTranscriptionViewModel: ObservableObject {
         isCancelling = false
         errorMessage = nil
         successMessage = nil
+        refinementMessage = nil
+        refinementOutcome = .notRequested
         transcriptionResult = ""
         progress = .init(stage: .preparing)
 
@@ -103,6 +122,31 @@ public final class FileTranscriptionViewModel: ObservableObject {
         case let .failed(failure):
             errorMessage = UIErrorLocalization.transcription(failure, i18n: i18n)
         }
+        
+        refinementOutcome = result.refinement
+        switch result.refinement {
+        case .notRequested:
+            refinementMessage = nil
+        case .applied:
+            refinementMessage = i18n.t("dialog.refinement_applied")
+        case .unchanged:
+            refinementMessage = i18n.t("dialog.refinement_unchanged")
+        case .unavailable:
+            refinementMessage = i18n.t("dialog.refinement_unavailable")
+        case .skipped:
+            refinementMessage = i18n.t("dialog.refinement_skipped")
+        case .timedOut:
+            refinementMessage = i18n.t("dialog.refinement_timeout")
+        case .failed:
+            refinementMessage = i18n.t("dialog.refinement_failed")
+        case .notRun:
+            if result.status == .success {
+                refinementMessage = i18n.t("dialog.refinement_not_run")
+            } else {
+                refinementMessage = nil
+            }
+        }
+        
         isProcessing = false
         isCancelling = false
         activeTask = nil
@@ -149,6 +193,10 @@ public final class FileDropPanel: NSWindow, RefreshablePanel {
     }
 
     public func refreshForPresentation() {}
+    
+    public func updateEditorAvailability(isActive: Bool, isPreparing: Bool) {
+        viewModel.updateEditorAvailability(isActive: isActive, isPreparing: isPreparing)
+    }
 
     var viewModelForTesting: FileTranscriptionViewModel { viewModel }
 }

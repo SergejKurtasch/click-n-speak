@@ -509,5 +509,14 @@
     "state.downloading": "Downloading...",
     "state.preparing": "Preparing...",
     "state.in_use": "In use",
-    "dialog.delete_failed_title": "Delete failed"
+    "dialog.delete_failed_title": "Delete failed",
+    "dialog.refinement_not_run": "Refinement was not executed.",
+    "dialog.refinement_applied": "AI refinement applied.",
+    "dialog.refinement_unchanged": "Refinement applied (no changes).",
+    "dialog.refinement_unavailable": "AI Editor is unavailable.",
+    "dialog.refinement_skipped": "Refinement skipped (internal limits).",
+    "dialog.refinement_timeout": "Refinement timed out.",
+    "dialog.refinement_failed": "Refinement failed.",
+    "dialog.editor_disabled_reason": "Disabled in settings",
+    "dialog.editor_preparing_reason": "Starting up..."
 }

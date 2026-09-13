@@ -150,6 +150,12 @@ public final class MenuBarController: NSObject {
         replacementsPanel?.refresh()
         updateStatusItem(for: newState)
 
+        if let panel = fileDropPanel {
+            let isActive = newState.runtime.activeEditorBackend != nil
+            let isPreparing = newState.runtime.phase == .preparing
+            panel.updateEditorAvailability(isActive: isActive, isPreparing: isPreparing)
+        }
+
         if menuIsTracking {
             pendingState = newState
             if previous.history != newState.history {

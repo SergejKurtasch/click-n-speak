@@ -511,5 +511,14 @@
     "state.downloading": "Загружается/проверяется",
     "state.preparing": "Готовится",
     "state.in_use": "Используется",
-    "dialog.delete_failed_title": "Ошибка удаления"
+    "dialog.delete_failed_title": "Ошибка удаления",
+    "dialog.refinement_not_run": "Улучшение текста не запускалось.",
+    "dialog.refinement_applied": "Текст успешно улучшен (AI).",
+    "dialog.refinement_unchanged": "AI-улучшение выполнено (без изменений).",
+    "dialog.refinement_unavailable": "AI-редактор недоступен.",
+    "dialog.refinement_skipped": "Улучшение пропущено (внутренние лимиты).",
+    "dialog.refinement_timeout": "Время ожидания AI-редактора истекло.",
+    "dialog.refinement_failed": "Ошибка при улучшении текста.",
+    "dialog.editor_disabled_reason": "Выключен в настройках",
+    "dialog.editor_preparing_reason": "Запускается..."
 }

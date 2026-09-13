@@ -220,14 +220,18 @@ actor FakeTranscriber: Transcribing {
     private var suspendPreWarm = false
     private(set) var preWarmCancelledCount = 0
 
+    var fileResult: FileTranscriptionResult = .init(text: "", status: .noSpeech)
+
     init(
-        texts: [String],
+        texts: [String] = [],
         results: [TranscriptionResult] = [],
-        delay: TimeInterval = 0
+        delay: TimeInterval = 0,
+        fileResult: FileTranscriptionResult? = nil
     ) {
         self.texts = texts
         self.scriptedResults = results
         self.delay = delay
+        if let fileResult = fileResult { self.fileResult = fileResult }
     }
 
     func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
@@ -291,6 +295,14 @@ actor FakeTranscriber: Transcribing {
     func finishReload() {
         reloadContinuation?.resume()
         reloadContinuation = nil
+    }
+
+    func transcribeFile(_ request: FileTranscriptionRequest, progress: @escaping @Sendable (FileTranscriptionProgress) -> Void) async -> FileTranscriptionResult {
+        if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+        if aborted.value {
+            return FileTranscriptionResult(text: "", status: .cancelled)
+        }
+        return fileResult
     }
 
     func warmup(language: String?) async {
