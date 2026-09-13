@@ -87,14 +87,14 @@ def test_automated_scenarios_have_dedicated_test_targets_and_regression_coverage
     } == {f"R{number:02d}" for number in range(1, 16)}
     expected_targets = {
         "R01": ["ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig","ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#validBackupRestoresSafely"],
-        "R02": ["Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage"],
+        "R02": ["Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage", "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#dirtyUsageSurvivesCoordinatorRoundTrip"],
         "R03": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#fileJobBlocksHotkey","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#injectingBlocksHotkey"],
         "R04": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#silentAppendPreservesPopup"],
         "R05": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendPreservesDatasetSource","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendAfterUserEditPreservesProvenance"],
         "R06": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#partialFailureIsVisible"],
         "R07": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownBlocksNewActivities","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownCannotReopenPopup"],
         "R08": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#preparationCannotCommitIntoRecording"],
-        "R09": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents"],
+        "R09": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents", "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#revalidationRebuildsActiveClient"],
         "R10": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#languageChangeRebuildsPrompt"],
         "R11": ["Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific"],
         "R12": ["Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal"],
@@ -111,6 +111,36 @@ def test_automated_scenarios_have_dedicated_test_targets_and_regression_coverage
     for regression_id, targets in expected_targets.items():
         assert regression_scenarios[regression_id]["id"].startswith(f"regression.{regression_id}.")
         assert regression_scenarios[regression_id]["test_targets"] == targets
+
+
+def test_original_eleven_audit_probes_are_permanent_selected_tests() -> None:
+    scenarios = validate_scenario_manifest(load_json(REPO_ROOT / "tests/parity/swift_parity_scenarios.json"))
+    selected = {
+        target
+        for scenario in scenarios
+        for target in scenario.get("test_targets", [])
+        if "#" in target
+    }
+    runtime_file = "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift"
+    startup_file = "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift"
+    session_file = "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"
+    expected = {
+        f"{runtime_file}#revalidationRebuildsActiveClient",
+        f"{runtime_file}#preparationCannotCommitIntoRecording",
+        f"{runtime_file}#dirtyUsageSurvivesCoordinatorRoundTrip",
+        f"{startup_file}#startupPreservesCorruptConfig",
+        f"{runtime_file}#languageChangeRebuildsPrompt",
+        f"{session_file}#fileJobBlocksHotkey",
+        f"{session_file}#injectingBlocksHotkey",
+        f"{session_file}#silentAppendPreservesPopup",
+        f"{session_file}#appendPreservesDatasetSource",
+        f"{session_file}#partialFailureIsVisible",
+        f"{session_file}#shutdownCannotReopenPopup",
+    }
+    assert expected <= selected
+    for target in expected:
+        source, test_name = target.split("#", 1)
+        assert f"func {test_name}(" in (REPO_ROOT / source).read_text(encoding="utf-8")
 
 
 def test_python_migrates_every_supported_schema_without_unknown_key_loss() -> None:
@@ -583,6 +613,13 @@ def test_swift_scenario_target_uses_exact_suite_filter() -> None:
         ["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames"],
     )
     assert selected[-2:] == ["--filter", "testTelemetryRejectsContentBearingFieldNames"]
+    python_selected = scenario_gate_command(
+        REPO_ROOT,
+        ["tests/parity/test_parity_contract.py#test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts"],
+    )
+    assert python_selected[-1] == (
+        "tests/parity/test_parity_contract.py::test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts"
+    )
 
 
 def test_acceptance_build_environment_preserves_tcc_and_production_switch() -> None:
