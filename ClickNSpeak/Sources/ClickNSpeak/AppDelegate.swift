@@ -21,6 +21,7 @@ enum AppTerminationDrainOutcome: Equatable {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let paths: Paths
     private let recoveryPresenter: (ConfigRecoveryCoordinator) -> Config?
+    private let restartCoordinator: AppRestartCoordinator
     private var instanceGuard: SingleInstanceGuard?
     private var menuController: MenuBarController?
     private var modelDownloader: ModelDownloader?
@@ -40,7 +41,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateTimer: Timer?
     private var appActivationObserver: NSObjectProtocol?
     private var terminationStarted = false
+    private var restartTerminationRequested = false
+    private var restartPreparationTask: Task<Void, Never>?
     private var shutdownNotification: (title: String, body: String)?
+    private var restartFailureStrings: (
+        title: String,
+        helperMissing: String,
+        helperNotReady: String,
+        generic: String,
+        ok: String
+    )?
     private var languageChangeNotification: (title: String, body: String)?
     private var interfaceLanguage = "en"
     private var menuState: MenuState?
@@ -48,10 +58,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     init(
         paths: Paths = .resolveDefault(),
-        recoveryPresenter: @escaping (ConfigRecoveryCoordinator) -> Config? = { $0.present() }
+        recoveryPresenter: @escaping (ConfigRecoveryCoordinator) -> Config? = { $0.present() },
+        restartCoordinator: AppRestartCoordinator? = nil
     ) {
         self.paths = paths
         self.recoveryPresenter = recoveryPresenter
+        let applicationURL = Bundle.main.bundleURL
+        self.restartCoordinator = restartCoordinator ?? AppRestartCoordinator(
+            paths: paths,
+            applicationURL: applicationURL,
+            helperURL: applicationURL.appendingPathComponent("Contents/MacOS/CNSRestartHelper")
+        )
         super.init()
     }
 
@@ -68,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         instanceGuard = guardInstance
+        RestartTicketStore.cleanupCompleted(in: paths.restartDirectory)
 
         let logger = FileLogger(fileURL: paths.logFile)
         self.logger = logger
@@ -110,6 +128,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             i18n.t("notify.shutdown_timeout_title"),
             i18n.t("notify.shutdown_timeout_body")
         )
+        restartFailureStrings = (
+            i18n.t("dialog.restart_failed_title"),
+            i18n.t("dialog.restart_helper_missing"),
+            i18n.t("dialog.restart_helper_not_ready"),
+            i18n.t("dialog.restart_failed_body"),
+            i18n.t("btn.ok")
+        )
         languageChangeNotification = (
             i18n.t("notify.language_changed_title"),
             i18n.t("notify.language_changed_body")
@@ -138,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             initialState: initialMenuState,
             log: log
         )
+        menuCtrl.onRestartRequested = { [weak self] in self?.requestRestart() }
         let downloader = ModelDownloader(paths: paths, log: log)
         menuCtrl.modelDownloader = downloader
         menuController = menuCtrl
@@ -443,6 +469,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         log(hotkeyStarted ? "Hotkey registered: Option+Space" : "Hotkey registration failed")
     }
 
+    private func requestRestart() {
+        guard !terminationStarted, restartPreparationTask == nil,
+              !restartCoordinator.isPending else { return }
+        restartPreparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.restartPreparationTask = nil }
+            do {
+                try await self.restartCoordinator.prepare()
+                guard !self.terminationStarted else {
+                    self.restartCoordinator.cancel()
+                    return
+                }
+                self.restartTerminationRequested = true
+                NSApp.terminate(nil)
+            } catch {
+                self.presentRestartFailure(error)
+            }
+        }
+    }
+
+    private func presentRestartFailure(_ error: Error) {
+        let strings = restartFailureStrings
+        let alert = NSAlert()
+        alert.messageText = strings?.title ?? "Restart failed"
+        switch error {
+        case AppRestartError.helperMissing:
+            alert.informativeText = strings?.helperMissing ?? "Restart helper is unavailable."
+        case AppRestartError.helperNotReady, AppRestartError.parentObservationFailed:
+            alert.informativeText = strings?.helperNotReady ?? "Restart helper did not become ready."
+        default:
+            alert.informativeText = strings?.generic ?? "Click-n-speak could not restart."
+        }
+        alert.addButton(withTitle: strings?.ok ?? "OK")
+        alert.runModal()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationStarted else { return .terminateLater }
         terminationStarted = true
@@ -467,20 +529,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     await RuntimeTelemetry.drain()
                 }
             )
-            guard outcome == .completed else {
-                await self.logger?.info("Click-n-speak shutdown paused because owned work did not drain")
-                if let notification = self.shutdownNotification {
-                    self.notificationService?.deliver(title: notification.title, body: notification.body)
+            do {
+                let accepted = try Self.completeTermination(
+                    outcome: outcome,
+                    restart: self.restartCoordinator,
+                    restartRequested: self.restartTerminationRequested,
+                    releaseLock: { self.instanceGuard?.release() }
+                )
+                guard accepted else {
+                    await self.logger?.info("Click-n-speak shutdown paused because owned work did not drain")
+                    if let notification = self.shutdownNotification {
+                        self.notificationService?.deliver(title: notification.title, body: notification.body)
+                    }
+                    self.restartTerminationRequested = false
+                    self.terminationStarted = false
+                    sender.reply(toApplicationShouldTerminate: false)
+                    return
                 }
+                await self.logger?.info("Click-n-speak shutdown complete")
+                sender.reply(toApplicationShouldTerminate: true)
+            } catch {
+                await self.logger?.info("Restart authorization failed before application exit")
+                self.presentRestartFailure(error)
+                self.restartTerminationRequested = false
                 self.terminationStarted = false
                 sender.reply(toApplicationShouldTerminate: false)
-                return
             }
-            await self.logger?.info("Click-n-speak shutdown complete")
-            self.instanceGuard?.release()
-            sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    static func completeTermination(
+        outcome: AppTerminationDrainOutcome,
+        restart: AppRestartCoordinator?,
+        restartRequested: Bool,
+        releaseLock: () -> Void
+    ) throws -> Bool {
+        guard outcome == .completed else {
+            restart?.cancel()
+            return false
+        }
+        if restartRequested {
+            guard let restart else { throw AppRestartError.invalidTicket }
+            do {
+                try restart.authorizeAfterDrain()
+            } catch {
+                restart.cancel()
+                throw error
+            }
+        } else {
+            restart?.cancel()
+        }
+        releaseLock()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {

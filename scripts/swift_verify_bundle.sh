@@ -13,15 +13,16 @@ EXPECTED_ARCHITECTURE="${CNS_RELEASE_ARCHITECTURE:-$(uname -m)}"
 PLIST="$APP/Contents/Info.plist"
 EXECUTABLE="$APP/Contents/MacOS/ClickNSpeak"
 HELPER="$APP/Contents/MacOS/CNSUpdateHelper"
+RESTART_HELPER="$APP/Contents/MacOS/CNSRestartHelper"
 MLX_METALLIB="$APP/Contents/MacOS/mlx.metallib"
 LOCALES="$APP/Contents/Resources/locales"
 ICONS="$APP/Contents/Resources/icons"
 APP_ICON="$APP/Contents/Resources/icon.icns"
 
-for required in "$PLIST" "$EXECUTABLE" "$HELPER" "$MLX_METALLIB" "$LOCALES" "$ICONS" "$APP_ICON"; do
+for required in "$PLIST" "$EXECUTABLE" "$HELPER" "$RESTART_HELPER" "$MLX_METALLIB" "$LOCALES" "$ICONS" "$APP_ICON"; do
     [ -e "$required" ] || { echo "Missing required bundle resource: $required" >&2; exit 1; }
 done
-[ -x "$EXECUTABLE" ] && [ -x "$HELPER" ] || {
+[ -x "$EXECUTABLE" ] && [ -x "$HELPER" ] && [ -x "$RESTART_HELPER" ] || {
     echo "Application executables do not have executable permissions." >&2
     exit 1
 }
@@ -46,7 +47,7 @@ ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST")"
     exit 1
 }
 
-for signed_code in "$MLX_METALLIB" "$HELPER" "$EXECUTABLE" "$APP"; do
+for signed_code in "$MLX_METALLIB" "$HELPER" "$RESTART_HELPER" "$EXECUTABLE" "$APP"; do
     codesign --verify --strict --verbose=2 "$signed_code"
 done
 codesign --verify --deep --strict --verbose=2 "$APP"
@@ -69,7 +70,7 @@ elif [ "$PRODUCTION_RELEASE" = "1" ]; then
     exit 1
 fi
 
-for binary in "$EXECUTABLE" "$HELPER"; do
+for binary in "$EXECUTABLE" "$HELPER" "$RESTART_HELPER"; do
     ARCHITECTURES="$(lipo -archs "$binary")"
     echo "$ARCHITECTURES" | tr ' ' '\n' | grep -qx "$EXPECTED_ARCHITECTURE" || {
         echo "Required architecture $EXPECTED_ARCHITECTURE missing from $binary" >&2

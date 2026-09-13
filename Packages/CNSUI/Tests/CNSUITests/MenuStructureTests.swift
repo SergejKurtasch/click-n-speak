@@ -73,6 +73,18 @@ struct MenuStructureTests {
         menu.items.map { $0.isSeparatorItem ? "---" : $0.title }
     }
 
+    @Test("Restart menu dispatches one intent without launching a process itself")
+    func restartMenuDispatchesIntent() throws {
+        let controller = try makeController()
+        var requests = 0
+        controller.onRestartRequested = { requests += 1 }
+        let restart = try #require(controller.menu.items.first { $0.title == "Restart" })
+
+        _ = controller.perform(restart.action)
+
+        #expect(requests == 1)
+    }
+
     @Test("Top-level order uses one consolidated AI Editor backend control")
     func topLevelOrder() throws {
         let c = try makeController()

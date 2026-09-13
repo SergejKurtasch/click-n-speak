@@ -28,12 +28,14 @@ if [ "$RESET_TCC_AFTER_BUILD" != "0" ] && [ "$RESET_TCC_AFTER_BUILD" != "1" ]; t
     exit 2
 fi
 
-echo "==> Building ClickNSpeak and CNSUpdateHelper ($CONFIG)"
+echo "==> Building ClickNSpeak, CNSUpdateHelper, and CNSRestartHelper ($CONFIG)"
 ( cd "$APP_PACKAGE" && swift build -c "$CONFIG" --product ClickNSpeak )
 ( cd "$APP_PACKAGE" && swift build -c "$CONFIG" --product CNSUpdateHelper )
+( cd "$APP_PACKAGE" && swift build -c "$CONFIG" --product CNSRestartHelper )
 MAIN_BINARY="$APP_PACKAGE/.build/$CONFIG/ClickNSpeak"
 HELPER_BINARY="$APP_PACKAGE/.build/$CONFIG/CNSUpdateHelper"
-for binary in "$MAIN_BINARY" "$HELPER_BINARY"; do
+RESTART_HELPER_BINARY="$APP_PACKAGE/.build/$CONFIG/CNSRestartHelper"
+for binary in "$MAIN_BINARY" "$HELPER_BINARY" "$RESTART_HELPER_BINARY"; do
     [ -f "$binary" ] || { echo "Binary not found: $binary" >&2; exit 1; }
 done
 
@@ -47,6 +49,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 0755 "$MAIN_BINARY" "$APP/Contents/MacOS/ClickNSpeak"
 install -m 0755 "$HELPER_BINARY" "$APP/Contents/MacOS/CNSUpdateHelper"
+install -m 0755 "$RESTART_HELPER_BINARY" "$APP/Contents/MacOS/CNSRestartHelper"
 install -m 0644 "$MLX_METALLIB_CACHE" "$APP/Contents/MacOS/mlx.metallib"
 install -m 0644 "$APP_PACKAGE/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CNSGitRevision string $GIT_REVISION" "$APP/Contents/Info.plist"
@@ -62,6 +65,7 @@ if [ -n "$SIGNING_IDENTITY" ]; then
     echo "==> Signing nested executables and application with Developer ID"
     codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$APP/Contents/MacOS/mlx.metallib"
     codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp "$APP/Contents/MacOS/CNSUpdateHelper"
+    codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp "$APP/Contents/MacOS/CNSRestartHelper"
     codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp \
         --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/ClickNSpeak"
     codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp \
@@ -74,6 +78,7 @@ else
     echo "==> Ad-hoc signing development bundle"
     codesign --force --sign - "$APP/Contents/MacOS/mlx.metallib"
     codesign --force --sign - "$APP/Contents/MacOS/CNSUpdateHelper"
+    codesign --force --sign - "$APP/Contents/MacOS/CNSRestartHelper"
     codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/ClickNSpeak"
     codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP"
 fi

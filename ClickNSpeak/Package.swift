@@ -25,6 +25,11 @@ let package = Package(
             dependencies: ["CNSCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .executableTarget(
+            name: "CNSRestartHelper",
+            dependencies: ["CNSCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "ClickNSpeakTests",
             dependencies: [

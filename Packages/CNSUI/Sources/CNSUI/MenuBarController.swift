@@ -34,6 +34,7 @@ public final class MenuBarController: NSObject {
         @escaping @Sendable (FileTranscriptionProgress) -> Void
     ) async -> FileTranscriptionResult)?
     public var onSetupRequested: (() -> Void)?
+    public var onRestartRequested: (() -> Void)?
     public var onCredentialsChanged: ((String) -> Void)?
     public var onModelDownloadCompleted: ((String) -> Void)?
     public var onPermissionRefreshRequested: (() -> Void)?
@@ -1440,10 +1441,7 @@ public final class MenuBarController: NSObject {
         log("Config reloaded from disk")
     }
     @objc private func onRestart() {
-        let task = Process()
-        task.executableURL = Bundle.main.executableURL
-        try? task.run()
-        NSApp.terminate(nil)
+        onRestartRequested?()
     }
     @objc private func onQuit() { NSApp.terminate(nil) }
 

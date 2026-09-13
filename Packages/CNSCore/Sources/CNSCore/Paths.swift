@@ -61,6 +61,11 @@ public struct Paths: Sendable {
         dataDirectory.appendingPathComponent("updates", isDirectory: true)
     }
 
+    /// Small handoff records for an ordinary application restart.
+    public var restartDirectory: URL {
+        dataDirectory.appendingPathComponent("restart", isDirectory: true)
+    }
+
     /// Resolve the local file URL for a given `ModelInfo`.
     public func modelFile(for model: ModelInfo) -> URL {
         modelsDirectory.appendingPathComponent(model.fileName)
