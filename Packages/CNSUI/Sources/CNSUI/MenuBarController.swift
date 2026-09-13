@@ -431,6 +431,11 @@ public final class MenuBarController: NSObject {
             "\(t("menu.check_updates")) — v\($0)"
         } ?? t("menu.check_updates")
         menu.addItem(item(updateTitle, #selector(onCheckUpdates), icon: "check-updates", id: "updates"))
+        if appUpdateViewModel.readyHandle != nil {
+            let installTitle = t("menu.update_ready")
+            let installItem = item(installTitle, #selector(onInstallStagedUpdate), icon: "check-updates", id: "install-update")
+            menu.addItem(installItem)
+        }
         menu.addItem(item(t("menu.about"), #selector(onAbout)))
         let launchAtLoginItem = item(
             t("menu.launch_at_login"),
@@ -1415,6 +1420,11 @@ public final class MenuBarController: NSObject {
 
     private func startAppUpdate(update: AppUpdate) {
         appUpdateViewModel.startUpdate(update: update)
+    }
+
+    @objc private func onInstallStagedUpdate() {
+        guard let handle = appUpdateViewModel.readyHandle else { return }
+        onInstallRequested?(handle)
     }
 
     @objc private func onToggleAutostart() {

@@ -505,7 +505,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestAppUpdate(_ handle: StagedUpdateHandle) {
-        guard instanceGuard != nil else { return }
+        guard instanceGuard != nil,
+              !terminationStarted,
+              pendingUpdateInstallation == nil,
+              restartPreparationTask == nil,
+              !restartCoordinator.isPending else { return }
         Task { await self.logger?.info("App update installation requested") }
 
         Task { @MainActor [weak self] in
