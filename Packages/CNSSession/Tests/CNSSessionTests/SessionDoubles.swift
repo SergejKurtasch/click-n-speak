@@ -131,6 +131,10 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
     }
 
     func start(callbacks: AudioCallbacks) async throws {
+        try await start(callbacks: callbacks, settings: RecordingSettings())
+    }
+
+    func start(callbacks: AudioCallbacks, settings: RecordingSettings) async throws {
         if let startError { throw startError }
         let shouldSuspend = lock.withLock { () -> Bool in
             startCount += 1

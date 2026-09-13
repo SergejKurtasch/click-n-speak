@@ -272,11 +272,18 @@ struct ModelManagerTests {
         let model = singleFileModel(data: validGGML)
         try validGGML.write(to: paths.modelFile(for: model))
 
-        #expect(throws: ModelValidationError.activeModelDeletion(model.id)) {
-            try ModelManager.delete(model, paths: paths, activeModelID: model.id)
+        let token = try ModelArtifactAccessRegistry.shared.acquireUse(modelID: model.id, reason: .preparation(generation: 1))
+        #expect(throws: ModelArtifactAccessError.inUse(modelID: model.id)) {
+            try ModelManager.delete(model, paths: paths)
         }
         #expect(FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
-        try ModelManager.delete(model, paths: paths, activeModelID: "another-model")
+        
+        ModelArtifactAccessRegistry.shared.releaseUse(token)
+        try ModelManager.delete(model, paths: paths)
+        #expect(!FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
+    }
+        #expect(FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
+        try ModelManager.delete(model, paths: paths, )
         #expect(!FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
     }
 

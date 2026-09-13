@@ -453,6 +453,8 @@ public final class SessionController {
             await self?.runWorker(stream, sessionId: id, audioBacklog: audioBacklog)
         }
 
+        let recordingSettings = (try? (activeSessionConfig ?? config).recordingSettings) ?? RecordingSettings()
+
         recorderStartTask?.cancel()
         recorderStartTask = Task { [weak self] in
             guard let self else { return }
@@ -461,7 +463,7 @@ public final class SessionController {
                 try await self.recorder.start(callbacks: self.makeRecorderCallbacks(
                     sessionId: id,
                     audioBacklog: audioBacklog
-                ))
+                ), settings: recordingSettings)
                 await self.recorderDidStart(sessionId: id)
             } catch is CancellationError {
                 await self.recorderStartWasCancelled(sessionId: id)

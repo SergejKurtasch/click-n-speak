@@ -78,7 +78,7 @@ public struct AudioCallbacks: Sendable {
 /// Microphone capture. `AudioRecorder` conforms.
 public protocol AudioCapturing: Sendable {
     var isRecording: Bool { get }
-    func start(callbacks: AudioCallbacks) async throws
+    func start(callbacks: AudioCallbacks, settings: RecordingSettings) async throws
     /// Stop accepting samples, drain every sample already owned by the capture
     /// pipeline, and emit the final callback before returning.
     func stop() async

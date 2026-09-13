@@ -1,4 +1,5 @@
 import Foundation
+import CNSCore
 
 /// Chunking parameters. Defaults match `AudioRecorder.__init__` in
 /// `recorder.py` (`silence_duration` comes from config, default 1.0 in the app).
@@ -21,6 +22,14 @@ public struct ChunkingConfig: Sendable {
         self.targetSpeechDuration = targetSpeechDuration
         self.maxSpeechDuration = maxSpeechDuration
         self.minSpeechDuration = minSpeechDuration
+    }
+    
+    public init(settings: RecordingSettings, sampleRate: Int = 16000) {
+        self.sampleRate = sampleRate
+        self.silenceDuration = settings.silenceDurationLimit
+        self.targetSpeechDuration = settings.targetChunkDuration
+        self.maxSpeechDuration = settings.maxChunkDuration
+        self.minSpeechDuration = settings.minChunkDuration
     }
 }
 

@@ -123,6 +123,16 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     /// we wait it out so it is not recorded (`play_sound` + `time.sleep(0.2)` in
     /// `recorder.start`). Suspending keeps that wait off the caller's thread.
     public func start(callbacks: Callbacks) async throws {
+        try await start(callbacks: callbacks, settings: RecordingSettings(
+            silenceDurationLimit: config.silenceDuration,
+            targetChunkDuration: config.targetSpeechDuration,
+            minChunkDuration: config.minSpeechDuration,
+            maxChunkDuration: config.maxSpeechDuration
+        ))
+    }
+
+    public func start(callbacks: Callbacks, settings: RecordingSettings) async throws {
+        let chunkingConfig = ChunkingConfig(settings: settings, sampleRate: config.sampleRate)
         let generation: Int? = stateLock.withLock { state in
             if state.recording || state.stopping { return nil }
             state.generation += 1
@@ -134,7 +144,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             state.teardownStarted = false
             state.interruptionReported = false
             state.callbacks = callbacks
-            state.chunker = AudioChunker(config: config)
+            state.chunker = AudioChunker(config: chunkingConfig)
             state.accumulation.removeAll(keepingCapacity: true)
             state.pendingFrame.removeAll(keepingCapacity: true)
             state.overflowSamples = 0

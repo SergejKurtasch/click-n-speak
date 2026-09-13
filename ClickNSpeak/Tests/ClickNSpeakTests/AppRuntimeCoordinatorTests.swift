@@ -201,6 +201,10 @@ private final class RuntimeSessionRecorder: AudioCapturing, @unchecked Sendable 
     var isRecording: Bool { lock.withLock { recording } }
 
     func start(callbacks: AudioCallbacks) async throws {
+        try await start(callbacks: callbacks, settings: RecordingSettings())
+    }
+
+    func start(callbacks: AudioCallbacks, settings: RecordingSettings) async throws {
         lock.withLock {
             self.callbacks = callbacks
             recording = true

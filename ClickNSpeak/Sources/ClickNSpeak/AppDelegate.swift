@@ -736,6 +736,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menuCtrl.onConfigurationReloaded = { [weak self, weak runtimeCoordinator, weak dictionaryCoordinator] updated in
             guard let self, let dictionaryCoordinator else { return }
+            _ = try updated.recordingSettings
             let previousPrimary = dictionaryCoordinator.snapshot.primaryLanguage
             try dictionaryCoordinator.adoptPersistedConfiguration(updated)
             runtimeCoordinator?.adoptPersistedConfiguration(dictionaryCoordinator.snapshot)

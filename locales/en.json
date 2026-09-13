@@ -504,5 +504,10 @@
     "stats.failed": "Failed to load statistics.",
     "terms.undo_prompt": "Revert language:",
     "dialog.credential_env_override": "Key is provided by environment variable %@. To change it, restart the app with a different environment.",
-    "dialog.credential_saved": "Key saved. Availability will be checked upon next use."
+    "dialog.credential_saved": "Key saved. Availability will be checked upon next use.",
+    "state.deleting": "Deleting...",
+    "state.downloading": "Downloading...",
+    "state.preparing": "Preparing...",
+    "state.in_use": "In use",
+    "dialog.delete_failed_title": "Delete failed"
 }
