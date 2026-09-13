@@ -1,5 +1,7 @@
 # Click-n-speak Swift 1.1.0 RC Go/No-Go
 
+> Historical snapshot from 2026-08-31. For current readiness and artifact hashes, see [2026-09-13 RC readiness](SWIFT_1.1.0_RC_GO_NO_GO_2026-09-13.md). The development hashes and scenario counts below are not current release evidence.
+
 Last updated: 2026-08-31
 
 ## Candidate identity

@@ -1,6 +1,8 @@
 # Swift Epoch Implementation Status
 
-Last updated: 2026-08-31
+Last updated: 2026-09-13
+
+Current stability round (separate from the historical implementation epochs below): Epochs 01–05 are code-complete. Epoch 06 observability and candidate-bound acceptance implementation is complete; full deterministic Swift, 58 Python parity tests, and the existing Whisper/Qwen real-model suites passed. The development app/DMG built at `0a631fa` passed bundle verification and mounted-DMG equality. Production cutover remains **NO-GO**: Developer ID/notarization, signed physical workflows, candidate-bound manual evidence, and eight-hour soak are missing. See [current RC readiness](../releases/SWIFT_1.1.0_RC_GO_NO_GO_2026-09-13.md). Historical pass counts below must not be read as current-candidate release approval.
 
 | Epoch | Status | Verification | Deferred external checks |
 |---|---|---|---|
@@ -18,8 +20,8 @@ Last updated: 2026-08-31
 ## Epoch 01 delivered
 
 - Canonical repository-wide Swift verification script.
-- Normal app builds no longer reset TCC grants.
-- Explicit destructive permission-reset script with a required confirmation flag.
+- Production app builds preserve TCC; development rebuilds reset Accessibility/Microphone by default after ad-hoc signing unless `CNS_RESET_TCC_AFTER_BUILD=0` is explicitly set.
+- Explicit permission-reset script with a required confirmation flag remains available for local testing.
 - Debug/release bundle smoke-verification script.
 - Injected, path-correct `SystemPermissionService`.
 - Nonmodal asynchronous permission wizard state machine.
