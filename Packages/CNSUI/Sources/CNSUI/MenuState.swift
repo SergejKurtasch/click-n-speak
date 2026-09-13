@@ -35,14 +35,7 @@ public enum MenuRuntimePhase: String, Sendable, Equatable {
     case stopping
 }
 
-public enum MenuRuntimeRecoveryAction: String, Sendable, Equatable {
-    case downloadModel
-    case openAPIKeys
-    case selectCloudBackend
-    case keepPreviousRuntime
-    case retry
-    case redownloadModel
-}
+
 
 public struct MenuRuntimeSnapshot: Sendable, Equatable {
     public var phase: MenuRuntimePhase
@@ -54,7 +47,7 @@ public struct MenuRuntimeSnapshot: Sendable, Equatable {
     public var activeEditorBackend: String?
     public var activeEditorModel: String?
     public var userMessage: String?
-    public var recoveryActions: [MenuRuntimeRecoveryAction]
+    public var recoveryActions: [RuntimeRecoveryCommand]
 
     public init(
         phase: MenuRuntimePhase = .uninitialized,
@@ -66,7 +59,7 @@ public struct MenuRuntimeSnapshot: Sendable, Equatable {
         activeEditorBackend: String? = nil,
         activeEditorModel: String? = nil,
         userMessage: String? = nil,
-        recoveryActions: [MenuRuntimeRecoveryAction] = []
+        recoveryActions: [RuntimeRecoveryCommand] = []
     ) {
         self.phase = phase
         self.desiredSTTBackend = desiredSTTBackend

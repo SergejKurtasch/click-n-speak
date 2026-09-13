@@ -594,7 +594,7 @@ struct AppRuntimeCoordinatorTests {
             #expect(active?.transcriber.backend == "local")
             #expect(active?.aiEditor.backend == "local")
             #expect(desired.sttBackend == "gemini")
-            #expect(recovery.contains(.retry))
+            #expect(recovery.contains(where: { $0.kind == .retry }))
         } else {
             Issue.record("Expected a rejected router transaction to be recoverable")
         }
@@ -739,7 +739,7 @@ struct AppRuntimeCoordinatorTests {
         #expect(session.runtimeAvailable)
         if case let .degraded(active, _, _, recovery) = coordinator.state {
             #expect(active?.transcriber.backend == "local")
-            #expect(recovery.contains(.openAPIKeys))
+            #expect(recovery.contains(where: { $0.kind == .openAPIKeys }))
         } else {
             Issue.record("Expected degraded state")
         }
@@ -1095,7 +1095,9 @@ struct AppRuntimeCoordinatorTests {
 
         let shutdown = Task { await coordinator.shutdown() }
         while session.runtimeAvailable { await Task.yield() }
-        coordinator.keepPreviousRuntime()
+        var gen = 1
+        if case let .degraded(_, _, _, recovery) = coordinator.state, let first = recovery.first { gen = first.generation }
+        coordinator.keepPreviousRuntime(generation: gen)
         coordinator.adoptPersistedConfiguration(initial)
         await coordinator.activateInitial(initial)
 
@@ -1257,7 +1259,7 @@ struct AppRuntimeCoordinatorTests {
         if case let .degraded(runtime, _, _, recovery) = coordinator.state {
             #expect(runtime?.transcriber.backend == "local")
             #expect(runtime?.aiEditor == .disabled)
-            #expect(recovery.contains(.openAPIKeys))
+            #expect(recovery.contains(where: { $0.kind == .openAPIKeys }))
         } else {
             Issue.record("Expected credential recovery state")
         }
@@ -1290,7 +1292,7 @@ struct AppRuntimeCoordinatorTests {
         if case let .degraded(runtime, _, _, recovery) = coordinator.state {
             #expect(runtime?.transcriber == .unavailable)
             #expect(runtime?.aiEditor == .disabled)
-            #expect(recovery == [.openAPIKeys])
+            #expect(recovery.contains(where: { $0.kind == .openAPIKeys }))
         } else {
             Issue.record("Expected credential recovery state")
         }
@@ -1298,11 +1300,13 @@ struct AppRuntimeCoordinatorTests {
         coordinator.revalidateDesiredConfiguration(reason: .retry)
         await settle()
         if case let .degraded(_, _, _, recovery) = coordinator.state {
-            #expect(recovery == [.openAPIKeys])
+            #expect(recovery.contains(where: { $0.kind == .openAPIKeys }))
         } else {
             Issue.record("Expected credential recovery state after retry")
         }
-        coordinator.keepPreviousRuntime()
+        var gen = 1
+        if case let .degraded(_, _, _, recovery) = coordinator.state, let first = recovery.first { gen = first.generation }
+        coordinator.keepPreviousRuntime(generation: gen)
         #expect(!session.runtimeAvailable)
         if case .degraded = coordinator.state {
             // The stopped credential client cannot be restored as a previous runtime.
@@ -1384,7 +1388,9 @@ struct AppRuntimeCoordinatorTests {
         coordinator.requestConfiguration(config(backend: "gemini"))
         await settle()
 
-        coordinator.keepPreviousRuntime()
+        var gen = 1
+        if case let .degraded(_, _, _, recovery) = coordinator.state, let first = recovery.first { gen = first.generation }
+        coordinator.keepPreviousRuntime(generation: gen)
 
         #expect(router.currentDescriptorSnapshot.backend == "local")
         #expect(session.runtimeAvailable)

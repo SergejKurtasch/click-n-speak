@@ -502,5 +502,7 @@
     "terms.discard": "Discard",
     "stats.loading": "Loading statistics...",
     "stats.failed": "Failed to load statistics.",
-    "terms.undo_prompt": "Sprache rückgängig machen:"
+    "terms.undo_prompt": "Sprache rückgängig machen:",
+    "dialog.credential_env_override": "Key is provided by environment variable %@. To change it, restart the app with a different environment.",
+    "dialog.credential_saved": "Key saved. Availability will be checked upon next use."
 }

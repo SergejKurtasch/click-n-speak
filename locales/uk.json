@@ -504,5 +504,7 @@
     "terms.discard": "Отменить",
     "stats.loading": "Загрузка статистики...",
     "stats.failed": "Не удалось получить статистику.",
-    "terms.undo_prompt": "Мова скасування:"
+    "terms.undo_prompt": "Мова скасування:",
+    "dialog.credential_env_override": "Key is provided by environment variable %@. To change it, restart the app with a different environment.",
+    "dialog.credential_saved": "Key saved. Availability will be checked upon next use."
 }

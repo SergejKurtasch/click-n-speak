@@ -214,7 +214,7 @@ struct MenuStateTests {
         var state = MenuState(config: Config.migrated(JSONObject()))
         state.runtime.phase = .degraded
         state.runtime.userMessage = "Credential missing"
-        state.runtime.recoveryActions = [.openAPIKeys, .keepPreviousRuntime, .retry]
+        state.runtime.recoveryActions = [RuntimeRecoveryCommand(kind: .openAPIKeys, target: .general), RuntimeRecoveryCommand(kind: .keepPreviousRuntime, target: .general), RuntimeRecoveryCommand(kind: .retry, target: .general)]
         let controller = makeController(state: state)
         let submenu = try #require(controller.menu.item(withTitle: "Model")?.submenu)
 

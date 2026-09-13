@@ -36,13 +36,20 @@ public final class MenuBarController: NSObject {
     public var onSetupRequested: (() -> Void)?
     public var onRestartRequested: (() -> Void)?
     public var onCredentialsChanged: ((String) -> Void)?
+
+    // Test injections
+    public var alertRunner: ((NSAlert) -> NSApplication.ModalResponse)?
+    public var testEnvironment: [String: String]?
+    public var testKeychain: [String: String]?
+    public var testKeychainSetError: Error?
+
     public var onModelDownloadCompleted: ((String) -> Void)?
     public var onPermissionRefreshRequested: (() -> Void)?
     public var onRevertTermsRequested: (() -> Void)?
     public var onDownloadStateChanged: ((MenuDownloadSnapshot) -> Void)?
     public var onHistorySnapshotChanged: ((MenuHistorySnapshot) -> Void)?
     public var onLocalModelsChanged: (() -> Void)?
-    public var onRuntimeRecoveryRequested: ((MenuRuntimeRecoveryAction) -> Void)?
+    public var onRuntimeRecoveryRequested: ((RuntimeRecoveryCommand) -> Void)?
 
     /// The built menu tree, exposed for structural tests.
     public let menu: NSMenu
@@ -450,7 +457,7 @@ public final class MenuBarController: NSObject {
                 runtimeRecoveryTitle(action),
                 #selector(onRuntimeRecovery)
             )
-            recoveryItem.representedObject = action.rawValue
+            recoveryItem.representedObject = action
             sub.addItem(recoveryItem)
         }
         sub.addItem(.separator())
@@ -800,18 +807,30 @@ public final class MenuBarController: NSObject {
     }
 
     @objc private func onRuntimeRecovery(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let action = MenuRuntimeRecoveryAction(rawValue: raw) else { return }
-        switch action {
-        case .downloadModel:
-            recoverLocalModel(redownload: false)
-        case .redownloadModel:
-            recoverLocalModel(redownload: true)
-        case .openAPIKeys:
-            if state.runtime.desiredSTTBackend == "openai" {
-                onOpenAIApiKey()
+        guard let action = sender.representedObject as? RuntimeRecoveryCommand else { return }
+        switch action.kind {
+        case .download:
+            if case .localModel(let id) = action.target, let model = ModelRegistry.whisperModelByLegacyID(id) ?? ModelRegistry.aiEditorModel(id: id) {
+                startDownload(model: model)
             } else {
-                onGeminiApiKey()
+                recoverLocalModel(redownload: false)
+            }
+        case .redownload:
+            if case .localModel(let id) = action.target, let model = ModelRegistry.whisperModelByLegacyID(id) ?? ModelRegistry.aiEditorModel(id: id) {
+                ModelManager.quarantineInvalidArtifact(at: paths.modelFile(for: model), model: model, paths: paths)
+                startDownload(model: model)
+            } else {
+                recoverLocalModel(redownload: true)
+            }
+        case .openAPIKeys:
+            if case .cloudProvider(let name) = action.target {
+                presentCredentialDialog(provider: name)
+            } else {
+                if state.runtime.desiredSTTBackend == "openai" {
+                    presentCredentialDialog(provider: "openai")
+                } else {
+                    presentCredentialDialog(provider: "gemini")
+                }
             }
         case .selectCloudBackend:
             guard let group = ModelCatalog.cloudSTTModels.first,
@@ -847,128 +866,129 @@ public final class MenuBarController: NSObject {
         startDownload(model: model)
     }
 
-    private func runtimeRecoveryTitle(_ action: MenuRuntimeRecoveryAction) -> String {
-        switch action {
-        case .downloadModel: t("menu.recovery_download_model")
-        case .redownloadModel: t("menu.recovery_redownload_model")
-        case .openAPIKeys: t("menu.recovery_open_api_keys")
-        case .selectCloudBackend: t("menu.recovery_select_cloud")
-        case .keepPreviousRuntime: t("menu.recovery_keep_previous")
-        case .retry: t("btn.retry")
+    private func runtimeRecoveryTitle(_ action: RuntimeRecoveryCommand) -> String {
+        switch action.kind {
+        case .download: return t("menu.recovery_download_model")
+        case .redownload: return t("menu.recovery_redownload_model")
+        case .openAPIKeys: return t("menu.recovery_open_api_keys")
+        case .selectCloudBackend: return t("menu.recovery_select_cloud")
+        case .keepPreviousRuntime: return t("menu.recovery_keep_previous")
+        case .retry: return t("btn.retry")
         }
     }
 
     @objc private func onGeminiApiKey() {
-        let alert = NSAlert()
-        alert.messageText = t("dialog.gemini_key_title")
-        let existingKey = KeychainHelper.getPassword(
-            service: KeychainHelper.defaultService,
-            account: KeychainHelper.geminiAccount
-        )
-        alert.informativeText = t(existingKey == nil
-            ? "dialog.gemini_key_body"
-            : "dialog.gemini_key_body_existing")
-
-        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        input.placeholderString = existingKey == nil ? nil : "••••••••••••"
-        input.setAccessibilityLabel(t("dialog.gemini_key_title"))
-        alert.accessoryView = input
-
-        alert.addButton(withTitle: t("btn.save_test"))
-        alert.addButton(withTitle: t("btn.cancel"))
-        alert.addButton(withTitle: t("btn.clear"))
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            let key = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty {
-                guard Self.isCredentialFormatValid(key, provider: "gemini") else {
-                    presentCredentialValidationError(provider: "gemini")
-                    return
-                }
-                do {
-                    try KeychainHelper.setPassword(
-                        service: KeychainHelper.defaultService,
-                        account: KeychainHelper.geminiAccount,
-                        password: key
-                    )
-                    log("Gemini API Key saved to Keychain.")
-                    onCredentialsChanged?("gemini")
-                } catch {
-                    log("Failed to save Gemini API Key: \(error)")
-                    presentCredentialPersistenceError()
-                }
-            }
-        } else if response == .alertThirdButtonReturn {
-            do {
-                try KeychainHelper.deletePassword(
-                    service: KeychainHelper.defaultService,
-                    account: KeychainHelper.geminiAccount
-                )
-                log("Gemini API Key cleared.")
-                onCredentialsChanged?("gemini")
-            } catch {
-                log("Failed to clear Gemini API Key: \(error)")
-                presentCredentialPersistenceError()
-            }
-        }
+        presentCredentialDialog(provider: "gemini")
     }
+
     @objc private func onOpenAIApiKey() {
-        let alert = NSAlert()
-        alert.messageText = t("dialog.openai_key_title")
-        let existingKey = KeychainHelper.getPassword(
-            service: KeychainHelper.defaultService,
-            account: KeychainHelper.openAIAccount
+        presentCredentialDialog(provider: "openai")
+    }
+
+    private func presentCredentialDialog(provider: String) {
+        let isGemini = provider == "gemini"
+        let account = isGemini ? KeychainHelper.geminiAccount : KeychainHelper.openAIAccount
+        
+        let tk = self.testKeychain
+        let env = testEnvironment ?? ProcessInfo.processInfo.environment
+        let lookup: @Sendable (String, String) -> String? = { s, a in
+            if let testKc = tk { return testKc["\(s)-\(a)"] }
+            return KeychainHelper.getRawKeychainPassword(service: s, account: a)
+        }
+        
+        let metadata = KeychainHelper.getMetadata(
+            account: account,
+            environment: env,
+            keychainLookup: lookup
         )
-        alert.informativeText = t(existingKey == nil
-            ? "dialog.openai_key_body"
-            : "dialog.openai_key_body_existing")
+        
+        let alert = NSAlert()
+        alert.messageText = isGemini ? t("dialog.gemini_key_title") : t("dialog.openai_key_title")
+        
+        var isEnv = false
+        var envVarName = ""
+        switch metadata.source {
+        case .environment(let name):
+            isEnv = true
+            envVarName = name
+        case .keychain, .none:
+            break
+        }
+        
+        if isEnv {
+            alert.informativeText = t("dialog.credential_env_override").replacingOccurrences(of: "%@", with: envVarName)
+        } else {
+            alert.informativeText = metadata.isConfigured
+                ? (isGemini ? t("dialog.gemini_key_body_existing") : t("dialog.openai_key_body_existing"))
+                : (isGemini ? t("dialog.gemini_key_body") : t("dialog.openai_key_body"))
+        }
 
         let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        input.placeholderString = existingKey == nil ? nil : "••••••••••••"
-        input.setAccessibilityLabel(t("dialog.openai_key_title"))
+        input.placeholderString = metadata.isConfigured ? "••••••••••••" : nil
+        input.setAccessibilityLabel(alert.messageText)
         alert.accessoryView = input
-
-        alert.addButton(withTitle: t("btn.save_test"))
+        
+        alert.addButton(withTitle: t("btn.save"))
         alert.addButton(withTitle: t("btn.cancel"))
         alert.addButton(withTitle: t("btn.clear"))
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            let key = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty {
-                guard Self.isCredentialFormatValid(key, provider: "openai") else {
-                    presentCredentialValidationError(provider: "openai")
-                    return
+        
+        if isEnv {
+            input.isEnabled = false
+            alert.buttons[0].isEnabled = false
+            alert.buttons[2].isEnabled = false
+        }
+        
+        var retry = true
+        while retry {
+            retry = false
+            let response = alertRunner?(alert) ?? alert.runModal()
+            if response == .alertFirstButtonReturn {
+                let key = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !key.isEmpty {
+                    guard Self.isCredentialFormatValid(key, provider: provider) else {
+                        presentCredentialValidationError(provider: provider)
+                        retry = true
+                        continue
+                    }
+                    do {
+                        if let err = testKeychainSetError { throw err }
+                        if testKeychain != nil {
+                            testKeychain!["\(KeychainHelper.defaultService)-\(account)"] = key
+                        } else {
+                            try KeychainHelper.setPassword(account: account, password: key)
+                        }
+                        log("\(provider.capitalized) API Key saved to Keychain.")
+                        
+                        let successAlert = NSAlert()
+                        successAlert.messageText = t("dialog.credential_saved")
+                        successAlert.addButton(withTitle: t("btn.ok"))
+                        _ = alertRunner?(successAlert) ?? successAlert.runModal()
+                        
+                        onCredentialsChanged?(provider)
+                    } catch {
+                        log("Failed to save \(provider.capitalized) API Key: \(error)")
+                        presentCredentialPersistenceError()
+                        retry = true
+                    }
                 }
+            } else if response == .alertThirdButtonReturn {
                 do {
-                    try KeychainHelper.setPassword(
-                        service: KeychainHelper.defaultService,
-                        account: KeychainHelper.openAIAccount,
-                        password: key
-                    )
-                    log("OpenAI API Key saved to Keychain.")
-                    onCredentialsChanged?("openai")
+                    if let err = testKeychainSetError { throw err }
+                    if testKeychain != nil {
+                        testKeychain!.removeValue(forKey: "\(KeychainHelper.defaultService)-\(account)")
+                    } else {
+                        try KeychainHelper.deletePassword(account: account)
+                    }
+                    log("\(provider.capitalized) API Key cleared.")
+                    onCredentialsChanged?(provider)
                 } catch {
-                    log("Failed to save OpenAI API Key: \(error)")
+                    log("Failed to clear \(provider.capitalized) API Key: \(error)")
                     presentCredentialPersistenceError()
+                    retry = true
                 }
-            }
-        } else if response == .alertThirdButtonReturn {
-            do {
-                try KeychainHelper.deletePassword(
-                    service: KeychainHelper.defaultService,
-                    account: KeychainHelper.openAIAccount
-                )
-                log("OpenAI API Key cleared.")
-                onCredentialsChanged?("openai")
-            } catch {
-                log("Failed to clear OpenAI API Key: \(error)")
-                presentCredentialPersistenceError()
             }
         }
     }
-
     static func isCredentialFormatValid(_ key: String, provider: String) -> Bool {
         guard key.count >= 20, key.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
             return false
@@ -982,7 +1002,7 @@ public final class MenuBarController: NSObject {
         alert.messageText = t("dialog.api_key_invalid_title")
         alert.informativeText = t("dialog.api_key_invalid_\(provider)")
         alert.addButton(withTitle: t("btn.ok"))
-        alert.runModal()
+        _ = alertRunner?(alert) ?? alert.runModal()
     }
 
     private func presentCredentialPersistenceError() {
@@ -991,7 +1011,7 @@ public final class MenuBarController: NSObject {
         alert.messageText = t("dialog.api_key_save_failed_title")
         alert.informativeText = t("dialog.api_key_save_failed_body")
         alert.addButton(withTitle: t("btn.ok"))
-        alert.runModal()
+        _ = alertRunner?(alert) ?? alert.runModal()
     }
     @objc private func onSelectPrimaryLanguage(_ sender: NSMenuItem) {
         guard let lang = sender.representedObject as? String else { return }

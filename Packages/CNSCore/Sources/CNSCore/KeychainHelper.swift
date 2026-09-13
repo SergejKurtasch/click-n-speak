@@ -6,12 +6,16 @@ public enum KeychainHelper: Sendable {
     public static let geminiAccount = "google_api_key"
     public static let openAIAccount = "openai_api_key"
 
-    /// Store a password in macOS Keychain natively using Security.framework.
     public static func setPassword(
         service: String = defaultService,
         account: String,
-        password: String
+        password: String,
+        keychainSet: @Sendable (String, String, String) throws -> Void = { s, a, p in try setRawKeychainPassword(service: s, account: a, password: p) }
     ) throws {
+        try keychainSet(service, account, password)
+    }
+
+    public static func setRawKeychainPassword(service: String, account: String, password: String) throws {
         guard let data = password.data(using: .utf8) else {
             throw NSError(domain: "KeychainHelper", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode password string."])
         }
@@ -25,16 +29,12 @@ public enum KeychainHelper: Sendable {
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         switch status {
         case errSecSuccess:
-            // Update existing item
-            let attributesToUpdate: [String: Any] = [
-                kSecValueData as String: data
-            ]
+            let attributesToUpdate: [String: Any] = [kSecValueData as String: data]
             let updateStatus = SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
             if updateStatus != errSecSuccess {
                 throw NSError(domain: "KeychainHelper", code: Int(updateStatus), userInfo: [NSLocalizedDescriptionKey: "SecItemUpdate failed: \(updateStatus)"])
             }
         case errSecItemNotFound:
-            // Add new item
             var newItem = query
             newItem[kSecValueData as String] = data
             let addStatus = SecItemAdd(newItem as CFDictionary, nil)
@@ -46,21 +46,7 @@ public enum KeychainHelper: Sendable {
         }
     }
 
-    /// Return a password from macOS Keychain natively using Security.framework.
-    public static func getPassword(
-        service: String = defaultService,
-        account: String
-    ) -> String? {
-        // Special case for Gemini API key env vars, matching Python implementation
-        if account == geminiAccount {
-            if let envKey = ProcessInfo.processInfo.environment["GOOGLE_API_KEY"], !envKey.isEmpty {
-                return envKey
-            }
-            if let envKey = ProcessInfo.processInfo.environment["GOOGLE_GENAI_API_KEY"], !envKey.isEmpty {
-                return envKey
-            }
-        }
-
+    public static func getRawKeychainPassword(service: String, account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -82,11 +68,55 @@ public enum KeychainHelper: Sendable {
         return result
     }
 
-    /// Delete a password from macOS Keychain natively using Security.framework.
+    public static func resolveCredential(
+        service: String = defaultService,
+        account: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        keychainLookup: @Sendable (String, String) -> String? = { s, a in getRawKeychainPassword(service: s, account: a) }
+    ) -> (metadata: CredentialMetadata, secret: String?) {
+        if account == geminiAccount {
+            if let envKey = environment["GOOGLE_API_KEY"], !envKey.isEmpty {
+                return (CredentialMetadata(source: .environment(variable: "GOOGLE_API_KEY"), isConfigured: true), envKey)
+            }
+            if let envKey = environment["GOOGLE_GENAI_API_KEY"], !envKey.isEmpty {
+                return (CredentialMetadata(source: .environment(variable: "GOOGLE_GENAI_API_KEY"), isConfigured: true), envKey)
+            }
+        }
+        
+        if let val = keychainLookup(service, account), !val.isEmpty {
+            return (CredentialMetadata(source: .keychain, isConfigured: true), val)
+        }
+        
+        return (CredentialMetadata(source: .none, isConfigured: false), nil)
+    }
+
+    public static func getMetadata(
+        service: String = defaultService,
+        account: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        keychainLookup: @Sendable (String, String) -> String? = { s, a in getRawKeychainPassword(service: s, account: a) }
+    ) -> CredentialMetadata {
+        return resolveCredential(service: service, account: account, environment: environment, keychainLookup: keychainLookup).metadata
+    }
+
+    public static func getPassword(
+        service: String = defaultService,
+        account: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        keychainLookup: @Sendable (String, String) -> String? = { s, a in getRawKeychainPassword(service: s, account: a) }
+    ) -> String? {
+        return resolveCredential(service: service, account: account, environment: environment, keychainLookup: keychainLookup).secret
+    }
+
     public static func deletePassword(
         service: String = defaultService,
-        account: String
+        account: String,
+        keychainDelete: @Sendable (String, String) throws -> Void = { s, a in try deleteRawKeychainPassword(service: s, account: a) }
     ) throws {
+        try keychainDelete(service, account)
+    }
+
+    public static func deleteRawKeychainPassword(service: String, account: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

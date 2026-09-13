@@ -24,14 +24,6 @@ struct RuntimeSelection: Sendable, Equatable {
     }
 }
 
-enum RuntimeRecoveryAction: String, Sendable, Equatable {
-    case downloadModel
-    case openAPIKeys
-    case selectCloudBackend
-    case keepPreviousRuntime
-    case retry
-    case redownloadModel
-}
 
 enum RuntimeRevalidationReason: Sendable, Equatable {
     case credentials(provider: String)
@@ -56,7 +48,7 @@ enum RuntimeCoordinatorState: Sendable, Equatable {
         active: RuntimeDescriptor?,
         desired: RuntimeSelection,
         message: String,
-        recovery: [RuntimeRecoveryAction]
+        recovery: [RuntimeRecoveryCommand]
     )
     case stopping
 }
@@ -296,8 +288,9 @@ final class AppRuntimeCoordinator {
         requestConfiguration(desiredConfig)
     }
 
-    func keepPreviousRuntime() {
+    func keepPreviousRuntime(generation: Int) {
         guard !shutdownRequested else { return }
+        guard generation == desiredGeneration else { return }
         guard let activeConfig, let activeRuntime else { return }
         guard activeRuntime.transcriber.readiness == .ready else { return }
         guard !runtimeUsesPendingCredential(activeRuntime) else { return }
@@ -330,7 +323,7 @@ final class AppRuntimeCoordinator {
                 active: activeRuntime,
                 desired: RuntimeSelection(config: activeConfig),
                 message: error.localizedDescription,
-                recovery: [.retry]
+                recovery: [RuntimeRecoveryCommand(kind: .retry, target: .general, generation: desiredGeneration)]
             )
         }
     }
@@ -523,7 +516,7 @@ final class AppRuntimeCoordinator {
                 active: activeRuntime,
                 desired: desired,
                 message: message,
-                recovery: recoveryActions(
+                recovery: recoveryActions(generation: generation, 
                     for: error,
                     deactivatedCredential: deactivatedCredential
                 )
@@ -616,7 +609,7 @@ final class AppRuntimeCoordinator {
                 active: runtime,
                 desired: RuntimeSelection(config: config),
                 message: error.localizedDescription,
-                recovery: [.retry, .keepPreviousRuntime]
+                recovery: [RuntimeRecoveryCommand(kind: .retry, target: .general, generation: desiredGeneration), RuntimeRecoveryCommand(kind: .keepPreviousRuntime, target: .general, generation: desiredGeneration)]
             )
         }
     }
@@ -664,7 +657,7 @@ final class AppRuntimeCoordinator {
                 active: runtime,
                 desired: RuntimeSelection(config: desiredConfig),
                 message: editorError.localizedDescription,
-                recovery: recoveryActions(for: editorError)
+                recovery: recoveryActions(generation: generation, for: editorError)
             )
         RuntimeTelemetry.emitRuntimeEvent("runtime_partially_activated", fields: [
             "generation": generation,
@@ -911,22 +904,32 @@ final class AppRuntimeCoordinator {
         return true
     }
 
-    private func recoveryActions(
+    private func recoveryActions(generation: Int, 
         for error: Error,
         deactivatedCredential: Bool
-    ) -> [RuntimeRecoveryAction] {
-        if deactivatedCredential { return [.openAPIKeys] }
+    ) -> [RuntimeRecoveryCommand] {
+        if deactivatedCredential {
+            let provider = (error as? RuntimePreparationError).flatMap { e -> String? in
+                if case .credentialMissing(let b) = e { return b.lowercased() }
+                return nil
+            } ?? "gemini"
+            return [RuntimeRecoveryCommand(kind: .openAPIKeys, target: .cloudProvider(name: provider), generation: generation)]
+        }
         if case let RuntimePreparationError.credentialMissing(backend) = error,
            invalidatedCredentialProviders.contains(backend.lowercased()) {
-            return [.openAPIKeys]
+            return [RuntimeRecoveryCommand(kind: .openAPIKeys, target: .cloudProvider(name: backend.lowercased()), generation: generation)]
         }
         if let activeRuntime, runtimeUsesPendingCredential(activeRuntime) {
-            if error is RuntimePreparationError {
-                return [.retry, .openAPIKeys]
+            if let prepError = error as? RuntimePreparationError {
+                var cmds = [RuntimeRecoveryCommand(kind: .retry, target: .general, generation: generation)]
+                if case .credentialMissing(let b) = prepError {
+                    cmds.append(RuntimeRecoveryCommand(kind: .openAPIKeys, target: .cloudProvider(name: b.lowercased()), generation: generation))
+                }
+                return cmds
             }
-            return [.retry]
+            return [RuntimeRecoveryCommand(kind: .retry, target: .general, generation: generation)]
         }
-        return recoveryActions(for: error)
+        return recoveryActions(generation: generation, for: error)
     }
 
     private func ensureCurrent(_ generation: Int) throws {
@@ -934,19 +937,36 @@ final class AppRuntimeCoordinator {
         guard generation == desiredGeneration else { throw CancellationError() }
     }
 
-    private func recoveryActions(for error: Error) -> [RuntimeRecoveryAction] {
+    private func recoveryActions(generation: Int, for error: Error) -> [RuntimeRecoveryCommand] {
         guard let error = error as? RuntimePreparationError else {
-            return [.retry, .keepPreviousRuntime]
+            return [
+                RuntimeRecoveryCommand(kind: .retry, target: .general, generation: generation),
+                RuntimeRecoveryCommand(kind: .keepPreviousRuntime, target: .general, generation: generation)
+            ]
         }
         switch error {
-        case .modelMissing:
-            return [.downloadModel, .selectCloudBackend, .keepPreviousRuntime]
-        case .modelCorrupted:
-            return [.redownloadModel, .selectCloudBackend, .keepPreviousRuntime]
-        case .credentialMissing:
-            return [.openAPIKeys, .keepPreviousRuntime]
+        case .modelMissing(let id):
+            return [
+                RuntimeRecoveryCommand(kind: .download, target: .localModel(id: id), generation: generation),
+                RuntimeRecoveryCommand(kind: .selectCloudBackend, target: .general, generation: generation),
+                RuntimeRecoveryCommand(kind: .keepPreviousRuntime, target: .general, generation: generation)
+            ]
+        case .modelCorrupted(let id):
+            return [
+                RuntimeRecoveryCommand(kind: .redownload, target: .localModel(id: id), generation: generation),
+                RuntimeRecoveryCommand(kind: .selectCloudBackend, target: .general, generation: generation),
+                RuntimeRecoveryCommand(kind: .keepPreviousRuntime, target: .general, generation: generation)
+            ]
+        case .credentialMissing(let backend):
+            return [
+                RuntimeRecoveryCommand(kind: .openAPIKeys, target: .cloudProvider(name: backend), generation: generation),
+                RuntimeRecoveryCommand(kind: .keepPreviousRuntime, target: .general, generation: generation)
+            ]
         case .unsupportedBackend, .unsupportedModel, .initializationFailed:
-            return [.retry, .keepPreviousRuntime]
+            return [
+                RuntimeRecoveryCommand(kind: .retry, target: .general, generation: generation),
+                RuntimeRecoveryCommand(kind: .keepPreviousRuntime, target: .general, generation: generation)
+            ]
         }
     }
 

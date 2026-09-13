@@ -300,11 +300,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.mutateMenuState { $0.localModels = models }
         }
         menuCtrl.onRuntimeRecoveryRequested = { [weak runtimeCoordinator] action in
-            switch action {
+            switch action.kind {
             case .retry:
                 runtimeCoordinator?.revalidateDesiredConfiguration(reason: .retry)
             case .keepPreviousRuntime:
-                runtimeCoordinator?.keepPreviousRuntime()
+                runtimeCoordinator?.keepPreviousRuntime(generation: action.generation)
             default:
                 break
             }
@@ -828,9 +828,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case let .degraded(active, desired, message, recovery):
                 runtime.phase = .degraded
                 runtime.userMessage = message
-                runtime.recoveryActions = recovery.compactMap {
-                    MenuRuntimeRecoveryAction(rawValue: $0.rawValue)
-                }
+                runtime.recoveryActions = recovery
                 if let active { Self.applyActive(active, to: &runtime) }
                 Self.applyDesired(desired, to: &runtime)
             case .stopping:
