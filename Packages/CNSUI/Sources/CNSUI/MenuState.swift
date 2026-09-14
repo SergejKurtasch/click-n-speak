@@ -39,6 +39,7 @@ public enum MenuRuntimePhase: String, Sendable, Equatable {
 
 public struct MenuRuntimeSnapshot: Sendable, Equatable {
     public var phase: MenuRuntimePhase
+    public var generation: Int
     public var desiredSTTBackend: String
     public var desiredSTTModel: String
     public var activeSTTBackend: String?
@@ -51,6 +52,7 @@ public struct MenuRuntimeSnapshot: Sendable, Equatable {
 
     public init(
         phase: MenuRuntimePhase = .uninitialized,
+        generation: Int = 0,
         desiredSTTBackend: String = "local",
         desiredSTTModel: String = "",
         activeSTTBackend: String? = nil,
@@ -62,6 +64,7 @@ public struct MenuRuntimeSnapshot: Sendable, Equatable {
         recoveryActions: [RuntimeRecoveryCommand] = []
     ) {
         self.phase = phase
+        self.generation = generation
         self.desiredSTTBackend = desiredSTTBackend
         self.desiredSTTModel = desiredSTTModel
         self.activeSTTBackend = activeSTTBackend

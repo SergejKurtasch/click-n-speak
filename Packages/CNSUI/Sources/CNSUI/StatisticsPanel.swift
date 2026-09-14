@@ -83,7 +83,7 @@ private struct StatisticsView: View {
 }
 
 @MainActor
-private final class StatisticsViewModel: ObservableObject {
+final class StatisticsViewModel: ObservableObject {
     let i18n: I18n
     let openHistory: () -> Void
     let fetchMetrics: (UUID) async throws -> JSONObject
@@ -119,7 +119,6 @@ private final class StatisticsViewModel: ObservableObject {
         }
     }
     
-    // Copy the formatting logic from MenuBarController.presentStatistics
     func formatMetrics(_ metrics: JSONObject) -> String {
         func percentage(_ value: Double?) -> String {
             value.map { String(format: "%.1f%%", $0 * 100) } ?? i18n.t("stats.not_available")
@@ -141,30 +140,28 @@ private final class StatisticsViewModel: ObservableObject {
         }
 
         let editScore = percentage(metrics["edit_score_avg"]?.doubleValue)
-        let editTrend = trend(metrics["edit_score_avg"], positiveGood: false)
+        let editTrend = trend(metrics["edit_score_trend"], positiveGood: false)
         
-        let hitRate = percentage(metrics["dictionary_hit_rate"]?.doubleValue)
-        let hitTrend = trend(metrics["dictionary_hit_rate"], positiveGood: true)
+        let hitRate = percentage(metrics["hit_rate"]?.doubleValue)
+        let hitTrend = trend(metrics["hit_rate_trend"], positiveGood: true)
         
-        let acceptRate = percentage(metrics["suggestion_acceptance_rate"]?.doubleValue)
-        let acceptTrend = trend(metrics["suggestion_acceptance_rate"], positiveGood: true)
+        let acceptRate = percentage(metrics["acceptance_rate"]?.doubleValue)
         
-        let promptUtil = percentage(metrics["prompt_utilization"]?.doubleValue)
-        let promptTrend = trend(metrics["prompt_utilization"], positiveGood: true)
+        let promptUtil = percentage(metrics["prompt_utilisation"]?.doubleValue)
 
-        let lastCount = metrics["phrases_in_window"]?.intValue ?? 0
+        let lastCount = metrics["current_window_count"]?.intValue ?? 0
         var lines: [String] = []
         lines.append(i18n.t("stats.performance_header", ["n": "\(lastCount)"]))
         lines.append("  \(i18n.t("stats.edit_label")): \(editScore)   \(editTrend)")
         lines.append("  \(i18n.t("stats.hit_rate_label")): \(hitRate)   \(hitTrend)")
-        lines.append("  \(i18n.t("stats.acceptance_rate_label")): \(acceptRate)   \(acceptTrend)")
-        lines.append("  \(i18n.t("stats.prompt_util_label")): \(promptUtil)   \(promptTrend)")
+        lines.append("  \(i18n.t("stats.acceptance_rate_label")): \(acceptRate)")
+        lines.append("  \(i18n.t("stats.prompt_util_label")): \(promptUtil)")
         
-        if let active = metrics["active_terms"]?.intValue {
+        if let active = metrics["active_terms_count"]?.intValue {
             lines.append("")
             lines.append("\(i18n.t("stats.active_terms_label")): \(active)")
         }
-        if let inactive = metrics["inactive_terms_to_clean"]?.intValue, inactive > 0 {
+        if let inactive = metrics["inactive_terms_count"]?.intValue, inactive > 0 {
             lines.append(i18n.t("stats.inactive_clean", ["n": "\(inactive)"]))
         }
 
@@ -200,8 +197,8 @@ private final class StatisticsViewModel: ObservableObject {
             lines.append("")
             lines.append(i18n.t("stats.failed_pairs_header"))
             for item in failures {
-                let source = item.objectValue?["source"]?.stringValue ?? "?"
-                let target = item.objectValue?["target"]?.stringValue ?? "?"
+                let source = item.objectValue?["from"]?.stringValue ?? "?"
+                let target = item.objectValue?["to"]?.stringValue ?? "?"
                 let count = item.objectValue?["count"]?.intValue ?? 0
                 lines.append("  \"\(source)\" → \"\(target)\" (\(count)×)")
             }

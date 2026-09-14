@@ -8,6 +8,66 @@ import AppKit
 @MainActor
 @Suite("Menu structure")
 struct MenuStructureTests {
+    @Test("A stale recovery action cannot replace a newer runtime selection")
+    func staleRuntimeRecoveryIsIgnored() throws {
+        let controller = try makeController()
+        var state = controller.state
+        state.runtime.generation = 2
+        controller.apply(state)
+        var forwarded: Config?
+        controller.onConfigChanged = { forwarded = $0 }
+        let item = NSMenuItem(title: "old recovery", action: nil, keyEquivalent: "")
+        item.representedObject = RuntimeRecoveryCommand(
+            kind: .selectCloudBackend, target: .general, generation: 1
+        )
+
+        controller.perform(NSSelectorFromString("onRuntimeRecovery:"), with: item)
+
+        #expect(forwarded == nil)
+        item.representedObject = RuntimeRecoveryCommand(
+            kind: .selectCloudBackend, target: .general, generation: 2
+        )
+        controller.perform(NSSelectorFromString("onRuntimeRecovery:"), with: item)
+        #expect(forwarded?.sttBackend != nil)
+    }
+
+    @Test("Redownload keeps a model that an active runtime still uses")
+    func redownloadDoesNotQuarantineActiveModel() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cns-recovery-model-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        try paths.ensureModelsDirectory()
+        let model = try #require(ModelRegistry.whisperModels.first)
+        let installed = paths.modelFile(for: model)
+        let artifact = Data("active-model".utf8)
+        try artifact.write(to: installed)
+        let token = try ModelArtifactAccessRegistry.shared.acquireUse(
+            modelID: model.id, reason: .preparation(generation: 99)
+        )
+        defer { ModelArtifactAccessRegistry.shared.releaseUse(token) }
+        let i18n = I18n.load("en", localesDirectory: repoResources().localesDirectory)
+        let controller = MenuBarController(
+            config: Config.migrated(JSONObject()),
+            i18n: i18n,
+            resources: repoResources(), paths: paths, installStatusItem: false
+        )
+        var alertMessage: String?
+        controller.alertRunner = { alert in
+            alertMessage = alert.messageText
+            return .alertFirstButtonReturn
+        }
+        let item = NSMenuItem(title: "redownload", action: nil, keyEquivalent: "")
+        item.representedObject = RuntimeRecoveryCommand(
+            kind: .redownload, target: .localModel(id: model.id), generation: 0
+        )
+
+        controller.perform(NSSelectorFromString("onRuntimeRecovery:"), with: item)
+
+        #expect(try Data(contentsOf: installed) == artifact)
+        #expect(alertMessage == i18n.t("download.model_in_use"))
+    }
+
     @Test("A failed menu reload retains active settings and never forwards defaults")
     func invalidReloadPreservesConfiguration() throws {
         let resources = repoResources()

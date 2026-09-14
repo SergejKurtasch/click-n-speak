@@ -486,6 +486,8 @@
     "dialog.api_key_invalid_gemini": "Introduce una clave completa de Gemini API sin espacios.",
     "dialog.api_key_invalid_openai": "Introduce una clave completa de OpenAI API que empiece por sk-.",
     "download.failed_generic": "Comprueba la conexión y el espacio libre e inténtalo de nuevo.",
+    "download.model_in_use": "Este modelo sigue en uso. Termina la actividad actual o reinicia la aplicación y vuelve a intentarlo.",
+    "download.quarantine_failed": "No se pudo apartar el modelo. El archivo instalado no se ha modificado.",
     "btn.retry": "Reintentar",
     "ui.error_conflicting_replacement": "Una frase de origen solo puede tener un destino de sustitución.",
     "dialog.api_key_save_failed_title": "No se pudo actualizar la clave API",

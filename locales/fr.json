@@ -486,6 +486,8 @@
     "dialog.api_key_invalid_gemini": "Saisissez une clé Gemini API complète sans espace.",
     "dialog.api_key_invalid_openai": "Saisissez une clé OpenAI API complète commençant par sk-.",
     "download.failed_generic": "Vérifiez la connexion et l’espace disque disponible, puis réessayez.",
+    "download.model_in_use": "Ce modèle est encore utilisé. Terminez l’opération en cours ou redémarrez l’application, puis réessayez.",
+    "download.quarantine_failed": "Impossible de déplacer le modèle. Le fichier installé est resté inchangé.",
     "btn.retry": "Réessayer",
     "ui.error_conflicting_replacement": "Une phrase source ne peut avoir qu’une seule cible de remplacement.",
     "dialog.api_key_save_failed_title": "Impossible de mettre à jour la clé API",

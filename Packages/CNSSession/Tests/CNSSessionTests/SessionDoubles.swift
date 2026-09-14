@@ -124,6 +124,7 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
     private var startContinuation: CheckedContinuation<Void, Never>?
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    private(set) var lastSettings: RecordingSettings?
 
     var isRecording: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -138,6 +139,7 @@ final class FakeRecorder: AudioCapturing, @unchecked Sendable {
         if let startError { throw startError }
         let shouldSuspend = lock.withLock { () -> Bool in
             startCount += 1
+            lastSettings = settings
             return suspendStart
         }
         if shouldSuspend {

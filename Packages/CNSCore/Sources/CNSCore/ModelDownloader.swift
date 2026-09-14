@@ -290,15 +290,14 @@ public final class ModelDownloader: NSObject {
         generation += 1
         let currentGeneration = generation
         let taskID = UUID()
+        activeModel = model
+        state = .downloading
         if let token = try? registry.acquireUse(modelID: model.id, reason: .downloading(taskID: taskID)) {
             accessTokens.append(token)
         } else {
-            // "If damaged model is retained by active service, safely reject replacement until released"
-            applyError("Model currently in use and cannot be replaced", generation: currentGeneration)
+            applyError("Model artifact is reserved for deletion", generation: currentGeneration)
             return
         }
-        activeModel = model
-        state = .downloading
         downloadedBytes = 0
         totalBytes = model.artifacts.reduce(0) { $0 + $1.expectedSize }
         bytesPerSecond = 0
@@ -652,7 +651,11 @@ public final class ModelDownloader: NSObject {
             } catch is CancellationError {
                 return
             } catch {
-                ModelManager.quarantineInvalidArtifact(at: stagingURL, model: model, paths: paths)
+                do {
+                    try ModelManager.quarantineInvalidArtifact(at: stagingURL, model: model, paths: paths)
+                } catch {
+                    log("ModelDownloader: staging quarantine failed: \(error.localizedDescription)")
+                }
                 applyError(error.localizedDescription, generation: currentGeneration)
             }
         }

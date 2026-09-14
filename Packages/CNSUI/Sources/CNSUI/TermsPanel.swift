@@ -172,9 +172,10 @@ private struct TermsView: View {
 }
 
 @MainActor
-private final class TermsViewModel: ObservableObject {
+final class TermsViewModel: ObservableObject {
     let i18n: I18n
     @Published private(set) var terms: [DictionaryTerm] = []
+    @Published private(set) var deletedConflictTerms: [DictionaryTerm] = []
     @Published var errorMessage: String?
     @Published var searchText = ""
     @Published var languageFilter = "all"
@@ -195,17 +196,26 @@ private final class TermsViewModel: ObservableObject {
     }
 
     func load() {
+        let priorRows = Dictionary(
+            uniqueKeysWithValues: (terms + deletedConflictTerms).map { ($0.id, $0) }
+        )
         terms = coordinator.terms()
         var currentValues = [String: String]()
         for item in terms { currentValues[item.id] = item.term }
         drafts.reconcile(currentValues)
+        let currentIDs = Set(currentValues.keys)
+        deletedConflictTerms = priorRows.values.filter { item in
+            !currentIDs.contains(item.id)
+                && drafts.draft(for: item.id)?.hasConflict == true
+                && drafts.draft(for: item.id)?.remote == nil
+        }.sorted { $0.id < $1.id }
         
         if !configuredLanguages.contains(newTermLanguage) {
             newTermLanguage = coordinator.snapshot.primaryLanguage
         }
     }
 
-    var languages: [String] { Set(terms.map(\.language)).sorted() }
+    var languages: [String] { Set((terms + deletedConflictTerms).map(\.language)).sorted() }
     var configuredLanguages: [String] {
         [coordinator.snapshot.primaryLanguage] + LanguageCode.dedupeList(
             coordinator.snapshot.additionalLanguages,
@@ -224,12 +234,14 @@ private final class TermsViewModel: ObservableObject {
 
     var filteredTerms: [DictionaryTerm] {
         let query = TermCanonicalizer.canonicalKey(searchText)
-        return terms.filter { item in
+        return (terms + deletedConflictTerms).filter { item in
             (languageFilter == "all" || item.language == languageFilter)
                 && (sourceFilter == "all" || item.source == sourceFilter)
                 && (stateFilter == "all"
                     || (stateFilter == "inactive" ? item.inactive : !item.inactive))
-                && (query.isEmpty || TermCanonicalizer.canonicalKey(item.term).contains(query))
+                && (query.isEmpty || TermCanonicalizer.canonicalKey(
+                    drafts.draft(for: item.id)?.text ?? item.term
+                ).contains(query))
         }
     }
 
@@ -291,10 +303,7 @@ private final class TermsViewModel: ObservableObject {
     func discardDraft(for item: DictionaryTerm) {
         drafts.acceptRemote(for: item.id)
         errorMessage = nil
-        // If it was deleted, acceptRemote removes it from drafts.
-        // We should trigger objectWillChange manually if needed, but @Published drafts should do it if we change it to object? 
-        // Wait, `drafts` is a struct, so assigning to it triggers @Published if it's published. 
-        // We should make `drafts` @Published.
+        load()
     }
 
     func delete(_ item: DictionaryTerm) {

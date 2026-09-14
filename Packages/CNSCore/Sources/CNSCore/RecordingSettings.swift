@@ -15,9 +15,9 @@ public struct RecordingSettings: Sendable, Equatable {
     
     public init(
         silenceDurationLimit: Double = 1.0,
-        targetChunkDuration: Double = 10.0,
-        minChunkDuration: Double = 2.0,
-        maxChunkDuration: Double = 20.0
+        targetChunkDuration: Double = 4.0,
+        minChunkDuration: Double = 1.0,
+        maxChunkDuration: Double = 8.0
     ) {
         self.silenceDurationLimit = silenceDurationLimit
         self.targetChunkDuration = targetChunkDuration

@@ -486,6 +486,8 @@
     "dialog.api_key_invalid_gemini": "Gib einen vollständigen Gemini-API-Schlüssel ohne Leerzeichen ein.",
     "dialog.api_key_invalid_openai": "Gib einen vollständigen OpenAI-API-Schlüssel ein, der mit sk- beginnt.",
     "download.failed_generic": "Prüfe Verbindung und freien Speicherplatz und versuche es erneut.",
+    "download.model_in_use": "Dieses Modell wird noch verwendet. Beende die aktuelle Aktion oder starte die App neu und versuche es erneut.",
+    "download.quarantine_failed": "Das Modell konnte nicht beiseite verschoben werden. Die installierte Datei blieb unverändert.",
     "btn.retry": "Erneut versuchen",
     "ui.error_conflicting_replacement": "Eine Ausgangsphrase darf nur ein Ersetzungsziel haben.",
     "dialog.api_key_save_failed_title": "API-Schlüssel konnte nicht aktualisiert werden",

@@ -488,6 +488,8 @@
     "dialog.api_key_invalid_gemini": "Введіть повний ключ Gemini API без пробілів.",
     "dialog.api_key_invalid_openai": "Введіть повний ключ OpenAI API, що починається з sk-.",
     "download.failed_generic": "Перевірте підключення та вільне місце на диску, потім спробуйте ще раз.",
+    "download.model_in_use": "Модель ще використовується. Завершіть поточну дію або перезапустіть застосунок і повторіть спробу.",
+    "download.quarantine_failed": "Не вдалося перемістити модель у карантин. Установлений файл залишився без змін.",
     "btn.retry": "Повторити",
     "ui.error_conflicting_replacement": "Для однієї початкової фрази можна задати лише один варіант заміни.",
     "dialog.api_key_save_failed_title": "Не вдалося оновити API-ключ",

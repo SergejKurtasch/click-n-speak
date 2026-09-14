@@ -98,6 +98,7 @@ final class AppRuntimeCoordinator {
     private var dictionarySnapshot: Config
     private var desiredConfig: Config
     private var desiredGeneration = 0
+    var currentDesiredGeneration: Int { desiredGeneration }
     private var pendingTask: Task<Void, Never>?
     private var committingGeneration: Int?
     private var postCommitApplyPending = false

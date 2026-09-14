@@ -51,6 +51,7 @@ public final class MenuBarController: NSObject {
     public var onHistorySnapshotChanged: ((MenuHistorySnapshot) -> Void)?
     public var onLocalModelsChanged: (() -> Void)?
     public var onRuntimeRecoveryRequested: ((RuntimeRecoveryCommand) -> Void)?
+    public var isRuntimeRecoveryCurrent: ((RuntimeRecoveryCommand) -> Bool)?
 
     /// The built menu tree, exposed for structural tests.
     public let menu: NSMenu
@@ -768,7 +769,7 @@ public final class MenuBarController: NSObject {
         alert.alertStyle = .warning
         alert.addButton(withTitle: t("btn.ok"))
         NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        _ = alertRunner?(alert) ?? alert.runModal()
     }
     private func buildInitialPromptSubmenu() -> NSMenu {
         let sub = NSMenu()
@@ -848,7 +849,9 @@ public final class MenuBarController: NSObject {
     }
 
     @objc private func onRuntimeRecovery(_ sender: NSMenuItem) {
-        guard let action = sender.representedObject as? RuntimeRecoveryCommand else { return }
+        guard let action = sender.representedObject as? RuntimeRecoveryCommand,
+              action.generation == state.runtime.generation,
+              isRuntimeRecoveryCurrent?(action) ?? true else { return }
         switch action.kind {
         case .download:
             if case .localModel(let id) = action.target, let model = ModelRegistry.whisperModelByLegacyID(id) ?? ModelRegistry.aiEditorModel(id: id) {
@@ -858,8 +861,7 @@ public final class MenuBarController: NSObject {
             }
         case .redownload:
             if case .localModel(let id) = action.target, let model = ModelRegistry.whisperModelByLegacyID(id) ?? ModelRegistry.aiEditorModel(id: id) {
-                ModelManager.quarantineInvalidArtifact(at: paths.modelFile(for: model), model: model, paths: paths)
-                startDownload(model: model)
+                quarantineAndDownload(model: model)
             } else {
                 recoverLocalModel(redownload: true)
             }
@@ -898,13 +900,29 @@ public final class MenuBarController: NSObject {
             ?? desiredEditor
         guard let model else { return }
         if redownload {
-            ModelManager.quarantineInvalidArtifact(
-                at: paths.modelFile(for: model),
-                model: model,
-                paths: paths
-            )
+            quarantineAndDownload(model: model)
+        } else {
+            startDownload(model: model)
         }
-        startDownload(model: model)
+    }
+
+    private func quarantineAndDownload(model: ModelInfo) {
+        do {
+            let registry = ModelArtifactAccessRegistry.shared
+            let reservation = try registry.reserveDeletion(modelID: model.id)
+            do {
+                defer { registry.finishDeletion(reservation) }
+                try ModelManager.quarantineInvalidArtifact(
+                    at: paths.modelFile(for: model), model: model, paths: paths
+                )
+            }
+            startDownload(model: model)
+        } catch is ModelArtifactAccessError {
+            showErrorAlert(message: t("download.model_in_use"))
+        } catch {
+            log("Model quarantine failed: \(error.localizedDescription)")
+            showErrorAlert(message: t("download.quarantine_failed"))
+        }
     }
 
     private func runtimeRecoveryTitle(_ action: RuntimeRecoveryCommand) -> String {

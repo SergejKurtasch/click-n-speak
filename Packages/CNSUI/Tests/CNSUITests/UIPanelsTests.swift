@@ -93,6 +93,26 @@ final class UIPanelsTests: XCTestCase {
         XCTAssertEqual(panel.title, i18n.t("terms.window_title"))
     }
 
+    func testDirtyTermDeletedRemotelyRemainsResolvable() throws {
+        let dictionary = coordinator()
+        XCTAssertTrue(dictionary.addManualTerm("Swift", language: "en"))
+        let model = TermsViewModel(coordinator: dictionary, i18n: i18n())
+        let original = try XCTUnwrap(model.filteredTerms.first)
+        model.binding(for: original).wrappedValue = "SwiftUI"
+
+        try dictionary.deleteTerm(language: "en", term: "Swift")
+        model.load()
+
+        let deletedRow = try XCTUnwrap(model.filteredTerms.first)
+        XCTAssertEqual(deletedRow.id, original.id)
+        XCTAssertNil(model.drafts.draft(for: deletedRow.id)?.remote)
+        XCTAssertEqual(model.drafts.draft(for: deletedRow.id)?.text, "SwiftUI")
+
+        model.addAsNew(deletedRow, text: "SwiftUI")
+        XCTAssertEqual(dictionary.terms().map(\.term), ["SwiftUI"])
+        XCTAssertNil(model.drafts.draft(for: original.id))
+    }
+
     func testReplacementsPanelInstantiation() {
         let i18n = i18n()
         let panel = ReplacementsPanel(coordinator: coordinator(), i18n: i18n)

@@ -99,6 +99,40 @@ struct SessionControllerTests {
 
     // MARK: - Happy path
 
+    @Test("The next recording uses the latest validated chunking settings")
+    func changedRecordingSettingsReachRecorder() async {
+        let rig = makeRig()
+        var changed = Self.makeConfig()
+        changed.raw["silence_duration"] = .double(1.5)
+        changed.raw["target_speech_duration"] = .double(5)
+        changed.raw["min_speech_duration"] = .double(2)
+        changed.raw["max_speech_duration"] = .double(9)
+        rig.controller.updateConfig(changed)
+
+        rig.controller.toggle(now: Date())
+        await settle()
+
+        #expect(rig.recorder.lastSettings == RecordingSettings(
+            silenceDurationLimit: 1.5,
+            targetChunkDuration: 5,
+            minChunkDuration: 2,
+            maxChunkDuration: 9
+        ))
+    }
+
+    @Test("An invalid recording configuration never starts the recorder")
+    func invalidRecordingSettingsDoNotStart() async {
+        var invalid = Self.makeConfig()
+        invalid.raw["target_speech_duration"] = .null
+        let rig = makeRig(config: invalid)
+
+        rig.controller.toggle(now: Date())
+        await settle()
+
+        #expect(rig.recorder.startCount == 0)
+        #expect(rig.controller.isRecording == false)
+    }
+
     @Test("A full cycle shows the HUD, then the editable popup")
     func fullCycle() async {
         let rig = makeRig()

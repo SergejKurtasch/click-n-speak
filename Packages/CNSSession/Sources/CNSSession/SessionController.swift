@@ -387,6 +387,13 @@ public final class SessionController {
     // MARK: - Start
 
     private func beginStart() {
+        let recordingSettings: RecordingSettings
+        do {
+            recordingSettings = try config.recordingSettings
+        } catch {
+            log("Recording settings are invalid; recording was not started.")
+            return
+        }
         if warmupTask != nil {
             warmupTask?.cancel()
             transcriber.abortInFlight()
@@ -452,8 +459,6 @@ public final class SessionController {
         workerTask = Task { [weak self] in
             await self?.runWorker(stream, sessionId: id, audioBacklog: audioBacklog)
         }
-
-        let recordingSettings = (try? (activeSessionConfig ?? config).recordingSettings) ?? RecordingSettings()
 
         recorderStartTask?.cancel()
         recorderStartTask = Task { [weak self] in

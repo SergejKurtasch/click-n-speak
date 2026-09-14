@@ -486,6 +486,8 @@
     "dialog.api_key_invalid_gemini": "Enter a complete Gemini API key without spaces.",
     "dialog.api_key_invalid_openai": "Enter a complete OpenAI API key beginning with sk-.",
     "download.failed_generic": "Check your connection and available disk space, then try again.",
+    "download.model_in_use": "This model is still in use. Finish the current activity or restart the app, then retry.",
+    "download.quarantine_failed": "Could not move the model aside. The installed file was kept unchanged.",
     "btn.retry": "Retry",
     "ui.error_conflicting_replacement": "A source phrase can have only one replacement target.",
     "dialog.api_key_save_failed_title": "Could Not Update API Key",

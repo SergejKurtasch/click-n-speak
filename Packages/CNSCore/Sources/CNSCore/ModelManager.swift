@@ -32,6 +32,19 @@ public enum ModelValidationState: Sendable, Equatable {
     case invalid(String)
 }
 
+public enum ModelActivationError: LocalizedError, Sendable {
+    case recoveryRequired(previousModel: URL?, destination: URL)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .recoveryRequired(previousModel, _):
+            previousModel == nil
+                ? "Model activation failed and the staged model could not be restored."
+                : "Model activation failed and automatic rollback could not finish. The previous model was preserved."
+        }
+    }
+}
+
 private struct ArtifactFingerprint: Codable, Sendable, Equatable {
     let inode: UInt64
     let size: Int64
@@ -97,6 +110,24 @@ public enum ModelManager {
         model: ModelInfo,
         paths: Paths
     ) async throws {
+        try await validateAndActivate(
+            stagingURL: stagingURL, model: model, paths: paths,
+            moveItem: { source, destination in
+                try FileManager.default.moveItem(at: source, to: destination)
+            },
+            writeValidationCache: { data, url in
+                try writeCacheData(data, to: url)
+            }
+        )
+    }
+
+    static func validateAndActivate(
+        stagingURL: URL,
+        model: ModelInfo,
+        paths: Paths,
+        moveItem: @escaping @Sendable (URL, URL) throws -> Void,
+        writeValidationCache: @escaping @Sendable (Data, URL) throws -> Void
+    ) async throws {
         try await Task.detached(priority: .utility) {
             let fingerprints = try validateArtifacts(model: model, root: stagingURL)
             let destination = paths.modelFile(for: model)
@@ -104,30 +135,72 @@ public enum ModelManager {
                 ".\(model.fileName).previous-\(UUID().uuidString)",
                 isDirectory: model.storage.isSnapshot
             )
+            let failedCandidate = paths.modelsDirectory.appendingPathComponent(
+                ".\(model.fileName).failed-\(UUID().uuidString)",
+                isDirectory: model.storage.isSnapshot
+            )
             let fm = FileManager.default
             var movedOldModel = false
             do {
                 if fm.fileExists(atPath: destination.path) {
-                    try fm.moveItem(at: destination, to: backup)
+                    try moveItem(destination, backup)
                     movedOldModel = true
                 }
-                try fm.moveItem(at: stagingURL, to: destination)
+                try moveItem(stagingURL, destination)
                 try saveValidationRecord(
                     model: model,
                     fingerprints: fingerprints,
-                    paths: paths
+                    paths: paths,
+                    writeData: writeValidationCache
                 )
                 if movedOldModel {
                     try? fm.removeItem(at: backup)
                 }
             } catch {
-                if fm.fileExists(atPath: destination.path) {
-                    try? fm.removeItem(at: destination)
+                let activationError = error
+                if movedOldModel {
+                    var candidateMovedAside = false
+                    if fm.fileExists(atPath: destination.path) {
+                        do {
+                            try moveItem(destination, failedCandidate)
+                            candidateMovedAside = true
+                        } catch {
+                            throw ModelActivationError.recoveryRequired(
+                                previousModel: backup, destination: destination
+                            )
+                        }
+                    }
+                    do {
+                        try moveItem(backup, destination)
+                    } catch {
+                        if candidateMovedAside {
+                            do {
+                                try moveItem(failedCandidate, destination)
+                            } catch {
+                                // Both artifacts remain in transaction-owned siblings.
+                            }
+                        }
+                        throw ModelActivationError.recoveryRequired(
+                            previousModel: backup, destination: destination
+                        )
+                    }
+                    if candidateMovedAside {
+                        do {
+                            try moveItem(failedCandidate, stagingURL)
+                        } catch {
+                            // The previous model is active; retain the candidate for diagnosis.
+                        }
+                    }
+                } else if fm.fileExists(atPath: destination.path) {
+                    do {
+                        try moveItem(destination, stagingURL)
+                    } catch {
+                        throw ModelActivationError.recoveryRequired(
+                            previousModel: nil, destination: destination
+                        )
+                    }
                 }
-                if movedOldModel, fm.fileExists(atPath: backup.path) {
-                    try? fm.moveItem(at: backup, to: destination)
-                }
-                throw error
+                throw activationError
             }
         }.value
     }
@@ -138,29 +211,26 @@ public enum ModelManager {
         at url: URL,
         model: ModelInfo,
         paths: Paths
-    ) {
+    ) throws {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return }
         let directory = paths.modelsDirectory.appendingPathComponent(".quarantine", isDirectory: true)
-        do {
-            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-            let stamp = Int(Date().timeIntervalSince1970)
-            let destination = directory.appendingPathComponent("\(model.id)-\(stamp)-\(UUID().uuidString)")
-            try fm.moveItem(at: url, to: destination)
-            let entries = try fm.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: [.contentModificationDateKey],
-                options: [.skipsHiddenFiles]
-            ).sorted {
-                let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return lhs > rhs
-            }
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stamp = Int(Date().timeIntervalSince1970)
+        let destination = directory.appendingPathComponent("\(model.id)-\(stamp)-\(UUID().uuidString)")
+        try fm.moveItem(at: url, to: destination)
+        if let entries = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ).sorted(by: {
+            let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lhs > rhs
+        }) {
             for stale in entries.dropFirst(3) {
                 try? fm.removeItem(at: stale)
             }
-        } catch {
-            try? fm.removeItem(at: url)
         }
     }
 
@@ -395,7 +465,10 @@ public enum ModelManager {
     private static func saveValidationRecord(
         model: ModelInfo,
         fingerprints: [String: ArtifactFingerprint],
-        paths: Paths
+        paths: Paths,
+        writeData: @Sendable (Data, URL) throws -> Void = { data, url in
+            try writeCacheData(data, to: url)
+        }
     ) throws {
         cacheLock.lock()
         defer { cacheLock.unlock() }
@@ -413,7 +486,7 @@ public enum ModelManager {
             sourceRevision: model.sourceRevision,
             artifacts: fingerprints
         )
-        try writeCache(cache, to: url)
+        try writeData(JSONEncoder().encode(cache), url)
     }
 
     private static func removeValidationRecord(modelID: String, paths: Paths) {
@@ -429,7 +502,10 @@ public enum ModelManager {
     }
 
     private static func writeCache(_ cache: ModelValidationCache, to url: URL) throws {
-        let data = try JSONEncoder().encode(cache)
+        try writeCacheData(JSONEncoder().encode(cache), to: url)
+    }
+
+    private static func writeCacheData(_ data: Data, to url: URL) throws {
         let temporary = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
         try data.write(to: temporary, options: [.atomic])
         if FileManager.default.fileExists(atPath: url.path) {

@@ -264,6 +264,88 @@ struct ModelManagerTests {
         #expect(try Data(contentsOf: installed) == working)
     }
 
+    @Test("A failed quarantine move preserves the original artifact")
+    func quarantineFailurePreservesArtifact() throws {
+        let paths = testPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        try paths.ensureModelsDirectory()
+        let model = singleFileModel(data: validGGML)
+        let installed = paths.modelFile(for: model)
+        try validGGML.write(to: installed)
+        try Data("blocking-file".utf8).write(
+            to: paths.modelsDirectory.appendingPathComponent(".quarantine")
+        )
+
+        #expect(throws: (any Error).self) {
+            try ModelManager.quarantineInvalidArtifact(at: installed, model: model, paths: paths)
+        }
+        #expect(try Data(contentsOf: installed) == validGGML)
+    }
+
+    @Test("A failed backup restore keeps a usable destination and the previous model")
+    func failedRollbackPreservesBothArtifacts() async throws {
+        let paths = testPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        try paths.ensureModelsDirectory()
+        let model = singleFileModel(data: validGGML)
+        let installed = paths.modelFile(for: model)
+        let previous = Data("lmgg-previous-model".utf8)
+        try previous.write(to: installed)
+        let staging = paths.modelsDirectory.appendingPathComponent(".fixture.partial")
+        try validGGML.write(to: staging)
+        await #expect(throws: ModelActivationError.self) {
+            try await ModelManager.validateAndActivate(
+                stagingURL: staging,
+                model: model,
+                paths: paths,
+                moveItem: { source, destination in
+                    if source.lastPathComponent.contains(".previous-") {
+                        throw CocoaError(.fileWriteNoPermission)
+                    }
+                    try FileManager.default.moveItem(at: source, to: destination)
+                },
+                writeValidationCache: { _, _ in throw CocoaError(.fileWriteNoPermission) }
+            )
+        }
+
+        #expect(try Data(contentsOf: installed) == validGGML)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: paths.modelsDirectory, includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.contains(".previous-") }
+        #expect(backups.count == 1)
+        if let backup = backups.first {
+            #expect(try Data(contentsOf: backup) == previous)
+        }
+    }
+
+    @Test("A validation cache write failure restores the previous installation")
+    func failedCacheWriteRestoresWorkingModel() async throws {
+        let paths = testPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        try paths.ensureModelsDirectory()
+        let model = singleFileModel(data: validGGML)
+        let installed = paths.modelFile(for: model)
+        let previous = Data("lmgg-previous-model".utf8)
+        try previous.write(to: installed)
+        let staging = paths.modelsDirectory.appendingPathComponent(".fixture.partial")
+        try validGGML.write(to: staging)
+
+        await #expect(throws: CocoaError.self) {
+            try await ModelManager.validateAndActivate(
+                stagingURL: staging,
+                model: model,
+                paths: paths,
+                moveItem: { source, destination in
+                    try FileManager.default.moveItem(at: source, to: destination)
+                },
+                writeValidationCache: { _, _ in throw CocoaError(.fileWriteNoPermission) }
+            )
+        }
+
+        #expect(try Data(contentsOf: installed) == previous)
+        #expect(try Data(contentsOf: staging) == validGGML)
+    }
+
     @Test("Active model deletion is blocked and inactive deletion clears data")
     func deletionProtection() throws {
         let paths = testPaths()
@@ -361,6 +443,26 @@ struct ModelManagerTests {
 @MainActor
 @Suite("ModelDownloader durable state")
 struct ModelDownloaderPersistenceTests {
+    @Test("A deletion reservation reports download refusal to the UI")
+    func reservationFailureIsVisible() throws {
+        let paths = testPaths()
+        let registry = ModelArtifactAccessRegistry()
+        let model = singleFileModel(data: Data("fixture".utf8))
+        let reservation = try registry.reserveDeletion(modelID: model.id)
+        defer { registry.finishDeletion(reservation) }
+        let downloader = ModelDownloader(paths: paths, registry: registry)
+        var receivedError: String?
+        downloader.onError = { receivedError = $0 }
+
+        downloader.start(model: model)
+
+        guard case .failed = downloader.state else {
+            Issue.record("The download must enter failed state when the artifact is reserved for deletion")
+            return
+        }
+        #expect(receivedError != nil)
+    }
+
     @Test("A persisted streamed partial is resumable after a new downloader is created")
     func relaunchRestoresResumeState() throws {
         let paths = testPaths()

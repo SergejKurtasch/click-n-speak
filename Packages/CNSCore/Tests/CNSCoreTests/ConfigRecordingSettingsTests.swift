@@ -15,18 +15,18 @@ struct ConfigRecordingSettingsTests {
         let cfg = try config([:])
         let settings = try cfg.recordingSettings
         #expect(settings.silenceDurationLimit == 1.0)
-        #expect(settings.targetChunkDuration == 10.0)
-        #expect(settings.minChunkDuration == 2.0)
-        #expect(settings.maxChunkDuration == 20.0)
+        #expect(settings.targetChunkDuration == 4.0)
+        #expect(settings.minChunkDuration == 1.0)
+        #expect(settings.maxChunkDuration == 8.0)
     }
 
     @Test("Valid custom values (including integer JSON)")
     func customValues() throws {
         let cfg = try config([
-            "silence_duration_limit": .double(1.5),
-            "target_chunk_duration": .int(15), // integer JSON
-            "min_chunk_duration": .double(3.0),
-            "max_chunk_duration": .int(25)
+            "silence_duration": .double(1.5),
+            "target_speech_duration": .int(15),
+            "min_speech_duration": .double(3.0),
+            "max_speech_duration": .int(25)
         ])
         let settings = try cfg.recordingSettings
         #expect(settings.silenceDurationLimit == 1.5)
@@ -34,12 +34,28 @@ struct ConfigRecordingSettingsTests {
         #expect(settings.minChunkDuration == 3.0)
         #expect(settings.maxChunkDuration == 25.0)
     }
+
+    @Test("Legacy recording keys remain readable but canonical keys win")
+    func legacyAliases() throws {
+        let cfg = try config([
+            "silence_duration_limit": .double(1.5),
+            "target_chunk_duration": .int(12),
+            "min_chunk_duration": .int(2),
+            "max_chunk_duration": .int(20),
+            "target_speech_duration": .int(6)
+        ])
+        let settings = try cfg.recordingSettings
+        #expect(settings.silenceDurationLimit == 1.5)
+        #expect(settings.targetChunkDuration == 6)
+        #expect(settings.minChunkDuration == 2)
+        #expect(settings.maxChunkDuration == 20)
+    }
     
     @Test("Valid boundary: target = max")
     func boundaryValues() throws {
         let cfg = try config([
-            "target_chunk_duration": .int(10),
-            "max_chunk_duration": .int(10)
+            "target_speech_duration": .int(10),
+            "max_speech_duration": .int(10)
         ])
         let settings = try cfg.recordingSettings
         #expect(settings.targetChunkDuration == 10.0)
@@ -48,28 +64,28 @@ struct ConfigRecordingSettingsTests {
 
     @Test("Wrong type yields invalidType")
     func wrongType() async throws {
-        #expect(throws: RecordingSettingsError.invalidType(field: "silence_duration_limit")) {
-            _ = try config(["silence_duration_limit": .string("1.5")])
+        #expect(throws: RecordingSettingsError.invalidType(field: "silence_duration")) {
+            _ = try config(["silence_duration": .string("1.5")])
         }
     }
 
-    @Test("Null is treated as missing and uses default")
-    func nullValue() throws {
-        let cfg = try config(["target_chunk_duration": .null])
-        let settings = try cfg.recordingSettings
-        #expect(settings.targetChunkDuration == 10.0)
+    @Test("Explicit null is invalid rather than silently defaulted")
+    func nullValue() {
+        #expect(throws: RecordingSettingsError.invalidType(field: "target_speech_duration")) {
+            _ = try config(["target_speech_duration": .null])
+        }
     }
 
     @Test("Zero or negative values")
     func zeroNegative() async throws {
-        #expect(throws: RecordingSettingsError.nonPositive(field: "silence_duration_limit")) {
-            _ = try config(["silence_duration_limit": .double(0.0)])
+        #expect(throws: RecordingSettingsError.nonPositive(field: "silence_duration")) {
+            _ = try config(["silence_duration": .double(0.0)])
         }
-        #expect(throws: RecordingSettingsError.nonPositive(field: "target_chunk_duration")) {
-            _ = try config(["target_chunk_duration": .double(-5.0)])
+        #expect(throws: RecordingSettingsError.nonPositive(field: "target_speech_duration")) {
+            _ = try config(["target_speech_duration": .double(-5.0)])
         }
         #expect(throws: RecordingSettingsError.invalidOrdering) {
-            _ = try config(["min_chunk_duration": .double(-1.0)])
+            _ = try config(["min_speech_duration": .double(-1.0)])
         }
     }
 
@@ -77,16 +93,16 @@ struct ConfigRecordingSettingsTests {
     func orderViolation() async throws {
         #expect(throws: RecordingSettingsError.invalidOrdering) {
             _ = try config([
-                "min_chunk_duration": .int(5),
-                "target_chunk_duration": .int(4),
-                "max_chunk_duration": .int(20)
+                "min_speech_duration": .int(5),
+                "target_speech_duration": .int(4),
+                "max_speech_duration": .int(20)
             ])
         }
         #expect(throws: RecordingSettingsError.invalidOrdering) {
             _ = try config([
-                "min_chunk_duration": .int(2),
-                "target_chunk_duration": .int(10),
-                "max_chunk_duration": .int(9)
+                "min_speech_duration": .int(2),
+                "target_speech_duration": .int(10),
+                "max_speech_duration": .int(9)
             ])
         }
     }

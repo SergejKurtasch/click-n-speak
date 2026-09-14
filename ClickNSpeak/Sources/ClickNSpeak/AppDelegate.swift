@@ -200,12 +200,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let transcriberRouter = TranscriberRouter()
         let editorRouter = AiEditorRouter()
 
-        let chunking = ChunkingConfig(
-            silenceDuration: config.raw["silence_duration"]?.doubleValue ?? 1.0,
-            targetSpeechDuration: config.raw["target_speech_duration"]?.doubleValue ?? 4.0,
-            maxSpeechDuration: config.raw["max_speech_duration"]?.doubleValue ?? 8.0,
-            minSpeechDuration: config.raw["min_speech_duration"]?.doubleValue ?? 1.0
-        )
+        // The session supplies validated recording settings for every start.
+        let chunking = ChunkingConfig()
         let panel = PreviewPanel(resources: resources, i18n: i18n, log: log)
         let sessionRef = SessionBox()
         let recorder = AudioRecorder(
@@ -309,7 +305,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let models = self.localModelStates(paths: paths)
             self.mutateMenuState { $0.localModels = models }
         }
+        menuCtrl.isRuntimeRecoveryCurrent = { [weak runtimeCoordinator] action in
+            action.generation == runtimeCoordinator?.currentDesiredGeneration
+        }
         menuCtrl.onRuntimeRecoveryRequested = { [weak runtimeCoordinator] action in
+            guard action.generation == runtimeCoordinator?.currentDesiredGeneration else { return }
             switch action.kind {
             case .retry:
                 runtimeCoordinator?.revalidateDesiredConfiguration(reason: .retry)
@@ -910,6 +910,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateMenuRuntimeState(_ coordinatorState: RuntimeCoordinatorState) {
         mutateMenuState { menu in
             var runtime = menu.runtime
+            runtime.generation = runtimeCoordinator?.currentDesiredGeneration ?? runtime.generation
             runtime.userMessage = nil
             runtime.recoveryActions = []
             switch coordinatorState {
