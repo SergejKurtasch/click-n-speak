@@ -13,15 +13,18 @@ public final class SingleInstanceGuard: @unchecked Sendable {
         self.lockURL = lockURL
     }
 
-    /// Returns true if this process acquired the lock (is the primary instance).
-    public func acquire() -> Bool {
-        try? FileManager.default.createDirectory(
+    /// Returns false only when another process owns the lock. File system
+    /// failures are reported so callers do not mistake them for a second app.
+    public func acquireOrThrow() throws -> Bool {
+        try FileManager.default.createDirectory(
             at: lockURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let descriptor = open(lockURL.path, O_WRONLY | O_CREAT, 0o644)
-        guard descriptor >= 0 else { return false }
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
+            let failure = errno
             close(descriptor)
-            return false
+            if failure == EWOULDBLOCK || failure == EAGAIN { return false }
+            throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
         }
         // Best-effort write of our PID, matching the Python lock file contents.
         ftruncate(descriptor, 0)
@@ -29,6 +32,11 @@ public final class SingleInstanceGuard: @unchecked Sendable {
         _ = pid.withCString { write(descriptor, $0, strlen($0)) }
         fd = descriptor
         return true
+    }
+
+    /// Compatibility convenience for callers that only need a yes/no result.
+    public func acquire() -> Bool {
+        (try? acquireOrThrow()) ?? false
     }
 
     public func release() {

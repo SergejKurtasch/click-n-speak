@@ -21,6 +21,8 @@ enum AppTerminationDrainOutcome: Equatable {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let paths: Paths
     private let recoveryPresenter: (ConfigRecoveryCoordinator) -> Config?
+    private let storageRecoveryPresenter: (StartupStorageRecoveryCoordinator) -> Void
+    private let initialConfigSaver: (Config, URL) throws -> Void
     private let restartCoordinator: AppRestartCoordinator
     private var instanceGuard: SingleInstanceGuard?
     private var menuController: MenuBarController?
@@ -64,10 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     init(
         paths: Paths = .resolveDefault(),
         recoveryPresenter: @escaping (ConfigRecoveryCoordinator) -> Config? = { $0.present() },
+        storageRecoveryPresenter: @escaping (StartupStorageRecoveryCoordinator) -> Void = { $0.present() },
+        initialConfigSaver: @escaping (Config, URL) throws -> Void = { try $0.saveAtomically(to: $1) },
         restartCoordinator: AppRestartCoordinator? = nil
     ) {
         self.paths = paths
         self.recoveryPresenter = recoveryPresenter
+        self.storageRecoveryPresenter = storageRecoveryPresenter
+        self.initialConfigSaver = initialConfigSaver
         let applicationURL = Bundle.main.bundleURL
         self.restartCoordinator = restartCoordinator ?? AppRestartCoordinator(
             paths: paths,
@@ -77,14 +83,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         super.init()
     }
 
+    private func resolveStartupStorage(
+        issue: StartupStorageIssue,
+        operation: @escaping () throws -> StartupStorageOutcome
+    ) -> StartupStorageOutcome? {
+        do {
+            return try operation()
+        } catch {
+            if let logger {
+                Task { await logger.info("Startup storage operation failed: \(issue)") }
+            }
+            let recovery = StartupStorageRecoveryCoordinator(issue: issue, operation: operation)
+            storageRecoveryPresenter(recovery)
+            return recovery.outcome
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        try? paths.ensureDataDirectory()
+        guard resolveStartupStorage(issue: .dataDirectory, operation: {
+            try self.paths.ensureDataDirectory()
+            return .ready
+        }) == .ready else { return }
         let permissionService = SystemPermissionService(paths: paths)
         self.permissionService = permissionService
 
         // Single-instance guard: activate the running copy and exit if held.
         let guardInstance = SingleInstanceGuard(lockURL: paths.instanceLockFile)
-        guard guardInstance.acquire() else {
+        guard let lockOutcome = resolveStartupStorage(issue: .instanceLock, operation: {
+            try guardInstance.acquireOrThrow() ? .ready : .anotherInstance
+        }) else { return }
+        guard lockOutcome == .ready else {
             activateExistingInstance()
             NSApp.terminate(nil)
             return
@@ -112,7 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Persist a migrated default on first run (Python copies config.example.json).
         if !configExisted {
-            try? loadedConfig.saveAtomically(to: paths.configFile)
+            guard resolveStartupStorage(issue: .initialConfiguration, operation: {
+                try self.initialConfigSaver(loadedConfig, self.paths.configFile)
+                return .ready
+            }) == .ready else { return }
         }
 
         let notificationService = UserNotificationService(log: log)

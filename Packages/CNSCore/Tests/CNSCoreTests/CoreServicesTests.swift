@@ -133,17 +133,30 @@ struct KeychainCompatibilityTests {
 @Suite("SingleInstanceGuard")
 struct SingleInstanceGuardTests {
     @Test("Second guard on same lock fails while first holds it")
-    func exclusivity() {
+    func exclusivity() throws {
         let lockURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("cns-\(UUID().uuidString)").appendingPathComponent(".instance.lock")
         let first = SingleInstanceGuard(lockURL: lockURL)
-        #expect(first.acquire())
+        #expect(try first.acquireOrThrow())
         let second = SingleInstanceGuard(lockURL: lockURL)
-        #expect(!second.acquire())
+        #expect(try !second.acquireOrThrow())
         first.release()
         let third = SingleInstanceGuard(lockURL: lockURL)
         #expect(third.acquire())
         third.release()
+    }
+
+    @Test("A lock file I/O failure is distinct from another running instance")
+    func lockFileFailure() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cns-lock-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let lockURL = directory.appendingPathComponent(".instance.lock", isDirectory: true)
+        try FileManager.default.createDirectory(at: lockURL, withIntermediateDirectories: false)
+
+        let guardInstance = SingleInstanceGuard(lockURL: lockURL)
+        #expect(throws: Error.self) { try guardInstance.acquireOrThrow() }
     }
 }
 

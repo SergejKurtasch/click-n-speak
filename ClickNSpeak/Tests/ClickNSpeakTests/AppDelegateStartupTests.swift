@@ -13,6 +13,92 @@ import Testing
 struct AppDelegateStartupTests {
     private enum DrainFailure: Error { case write }
 
+    private enum StorageFailure: Error { case write }
+
+    @Test("A storage recovery retries only the failed operation before unblocking startup")
+    func storageRecoveryRetry() throws {
+        var available = false
+        var attempts = 0
+        let recovery = StartupStorageRecoveryCoordinator(issue: .initialConfiguration) {
+            attempts += 1
+            guard available else { throw StorageFailure.write }
+            return .ready
+        }
+
+        #expect(throws: StorageFailure.self) { try recovery.retry() }
+        #expect(recovery.outcome == nil)
+        available = true
+        #expect(try recovery.retry() == .ready)
+        #expect(recovery.outcome == .ready)
+        #expect(attempts == 2)
+    }
+
+    @Test("A failed data directory creation pauses startup before taking the instance lock")
+    func dataDirectoryFailurePausesStartup() throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let blocked = parent.appendingPathComponent("blocked")
+        try Data("file".utf8).write(to: blocked)
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": blocked.path])
+        var presented = false
+        let app = AppDelegate(paths: paths, storageRecoveryPresenter: { recovery in
+            presented = true
+            #expect(recovery.issue == .dataDirectory)
+            #expect(throws: Error.self) { try recovery.retry() }
+        })
+
+        app.applicationDidFinishLaunching(Notification(name: Notification.Name("test-launch")))
+
+        #expect(presented)
+        #expect(!FileManager.default.fileExists(atPath: paths.instanceLockFile.path))
+        #expect(!FileManager.default.fileExists(atPath: paths.configFile.path))
+    }
+
+    @Test("An inaccessible lock file pauses startup instead of reporting a duplicate instance")
+    func instanceLockFailurePausesStartup() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        try paths.ensureDataDirectory()
+        try FileManager.default.createDirectory(at: paths.instanceLockFile, withIntermediateDirectories: false)
+        var presented = false
+        let app = AppDelegate(paths: paths, storageRecoveryPresenter: { recovery in
+            presented = true
+            #expect(recovery.issue == .instanceLock)
+            #expect(throws: Error.self) { try recovery.retry() }
+        })
+
+        app.applicationDidFinishLaunching(Notification(name: Notification.Name("test-launch")))
+
+        #expect(presented)
+        #expect(!FileManager.default.fileExists(atPath: paths.configFile.path))
+    }
+
+    @Test("A first-run config write failure cannot bootstrap an unsaved profile")
+    func initialConfigWriteFailurePausesStartup() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        var presented = false
+        let app = AppDelegate(paths: paths,
+            storageRecoveryPresenter: { recovery in
+                presented = true
+                #expect(recovery.issue == .initialConfiguration)
+                #expect(throws: StorageFailure.self) { try recovery.retry() }
+                let competingInstance = SingleInstanceGuard(lockURL: paths.instanceLockFile)
+                #expect(!competingInstance.acquire())
+            },
+            initialConfigSaver: { _, _ in throw StorageFailure.write })
+
+        app.applicationDidFinishLaunching(Notification(name: Notification.Name("test-launch")))
+
+        #expect(presented)
+        #expect(!FileManager.default.fileExists(atPath: paths.configFile.path))
+        #expect(!FileManager.default.fileExists(atPath: paths.phraseHistoryFile.path))
+        #expect(!FileManager.default.fileExists(atPath: paths.correctionsFile.path))
+    }
+
     @Test("A first-launch recognition language change keeps the current UI locale until restart")
     func firstLaunchLanguageSelectionRequiresInterfaceRestart() {
         var initial = Config.migrated(JSONObject())
