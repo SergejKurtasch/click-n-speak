@@ -43,7 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appActivationObserver: NSObjectProtocol?
     private var terminationStarted = false
     private var restartTerminationRequested = false
-    private var pendingUpdateInstallation: UpdateInstallationHandle?
+    private let updateInstallationIntent = UpdateInstallationIntent()
+    private var updateCancellationFailed = false
     private var restartPreparationTask: Task<Void, Never>?
     private var shutdownNotification: (title: String, body: String)?
     private var restartFailureStrings: (
@@ -53,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         generic: String,
         ok: String
     )?
+    private var updateFailureStrings: (title: String, body: String, cancellation: String, ok: String)?
     private var hotkeyFailedNotification: (title: String, body: String)?
     private var languageChangeNotification: (title: String, body: String)?
     private var interfaceLanguage = "en"
@@ -136,6 +138,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             i18n.t("dialog.restart_helper_missing"),
             i18n.t("dialog.restart_helper_not_ready"),
             i18n.t("dialog.restart_failed_body"),
+            i18n.t("btn.ok")
+        )
+        updateFailureStrings = (
+            i18n.t("dialog.update_failed_title"),
+            i18n.t("dialog.update_failed_body"),
+            i18n.t("dialog.update_cancel_failed_body"),
             i18n.t("btn.ok")
         )
         hotkeyFailedNotification = (
@@ -507,27 +515,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func requestAppUpdate(_ handle: StagedUpdateHandle) {
         guard instanceGuard != nil,
               !terminationStarted,
-              pendingUpdateInstallation == nil,
               restartPreparationTask == nil,
-              !restartCoordinator.isPending else { return }
+              !restartCoordinator.isPending,
+              updateInstallationIntent.beginPreparation() else { return }
         Task { await self.logger?.info("App update installation requested") }
 
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let outHandle = try await AppUpdater.shared.beginInstallation(handle: handle)
-                self.pendingUpdateInstallation = outHandle
+                self.updateInstallationIntent.markHelperStarted(outHandle)
                 self.restartTerminationRequested = false
                 NSApp.terminate(nil)
             } catch {
+                if let pending = await AppUpdater.shared.pendingInstallationHandle() {
+                    self.updateInstallationIntent.markHelperStarted(pending)
+                    self.updateCancellationFailed = true
+                } else {
+                    self.updateInstallationIntent.abortPreparation()
+                }
                 await self.logger?.info("Update installation failed: \(error.localizedDescription)")
+                self.presentUpdateFailure(error)
             }
+        }
+    }
+
+    private func presentUpdateFailure(_ error: Error, cancellation: Bool = false) {
+        let strings = updateFailureStrings
+        let alert = NSAlert()
+        alert.messageText = strings?.title ?? "Update Failed"
+        let body = cancellation
+            ? (strings?.cancellation ?? "The update helper could not be stopped. The application remains open.")
+            : (strings?.body ?? "The update could not be installed.")
+        alert.informativeText = "\(body)\n\n\(error.localizedDescription)"
+        alert.addButton(withTitle: strings?.ok ?? "OK")
+        alert.runModal()
+    }
+
+    private func cancelUpdateHandoffAfterRefusal() async {
+        do {
+            try await updateInstallationIntent.cancelPending { handle in
+                try await AppUpdater.shared.cancelPendingInstallation(handle: handle)
+            }
+            updateCancellationFailed = false
+        } catch {
+            updateCancellationFailed = true
+            await logger?.info("Update helper cancellation could not be confirmed: \(error.localizedDescription)")
+            presentUpdateFailure(error, cancellation: true)
         }
     }
 
     private func requestRestart() {
         guard !terminationStarted, restartPreparationTask == nil,
-              !restartCoordinator.isPending else { return }
+              !restartCoordinator.isPending, !updateInstallationIntent.isBusy else { return }
         restartPreparationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.restartPreparationTask = nil }
@@ -563,6 +603,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationStarted else { return .terminateLater }
+        if updateInstallationIntent.isPreparing { return .terminateCancel }
+        if updateCancellationFailed {
+            terminationStarted = true
+            Task { @MainActor in
+                await cancelUpdateHandoffAfterRefusal()
+                terminationStarted = false
+                sender.reply(toApplicationShouldTerminate: false)
+            }
+            return .terminateLater
+        }
         terminationStarted = true
         stopLifecycleSources()
 
@@ -585,6 +635,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     await RuntimeTelemetry.drain()
                 }
             )
+            if outcome == .completed,
+               let handle = self.updateInstallationIntent.pendingHandle,
+               !(await AppUpdater.shared.isPendingInstallationReady(handle: handle)) {
+                await self.cancelUpdateHandoffAfterRefusal()
+                self.presentUpdateFailure(AppUpdaterError.helperNotReady)
+                self.restartTerminationRequested = false
+                self.terminationStarted = false
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
             do {
                 let accepted = try Self.completeTermination(
                     outcome: outcome,
@@ -597,10 +657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let notification = self.shutdownNotification {
                         self.notificationService?.deliver(title: notification.title, body: notification.body)
                     }
-                    if let handle = self.pendingUpdateInstallation {
-                        try? await AppUpdater.shared.cancelPendingInstallation(handle: handle)
-                        self.pendingUpdateInstallation = nil
-                    }
+                    await self.cancelUpdateHandoffAfterRefusal()
                     self.restartTerminationRequested = false
                     self.terminationStarted = false
                     sender.reply(toApplicationShouldTerminate: false)
@@ -611,10 +668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 await self.logger?.info("Restart authorization failed before application exit")
                 self.presentRestartFailure(error)
-                if let handle = self.pendingUpdateInstallation {
-                    try? await AppUpdater.shared.cancelPendingInstallation(handle: handle)
-                    self.pendingUpdateInstallation = nil
-                }
+                await self.cancelUpdateHandoffAfterRefusal()
                 self.restartTerminationRequested = false
                 self.terminationStarted = false
                 sender.reply(toApplicationShouldTerminate: false)

@@ -119,4 +119,23 @@ struct AppResourcesTests {
         #expect(!menuSource.contains("log(key)"))
         #expect(!menuSource.contains("log(input.stringValue)"))
     }
+
+    @Test("Application update progress has labels in every supported locale")
+    func updateProgressLocalization() {
+        let root = repositoryRoot()
+        let keys = [
+            "download.app_downloading",
+            "download.app_downloading_percent",
+            "download.app_verifying_archive",
+            "download.app_staging",
+            "download.app_verifying_candidate",
+            "download.app_ready",
+        ]
+        for language in I18n.supportedLangs {
+            let i18n = I18n.load(language, localesDirectory: root.appendingPathComponent("locales"))
+            for key in keys {
+                #expect(i18n.t(key) != key, "Missing \(language).\(key)")
+            }
+        }
+    }
 }

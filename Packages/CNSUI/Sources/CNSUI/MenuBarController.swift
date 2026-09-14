@@ -76,23 +76,30 @@ public final class MenuBarController: NSObject {
 
     /// Download progress panel.
     private lazy var modelDownloadPanel = ModelDownloadPanel(i18n: i18n, log: log)
-    private lazy var appUpdatePanel = ModelDownloadPanel(i18n: i18n, title: i18n.t("download.app_update", ["version": ""]), log: log)
+    private lazy var appUpdatePanel = ModelDownloadPanel(
+        i18n: i18n,
+        title: i18n.t("download.app_update", ["version": ""])
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+        log: log
+    )
     private lazy var appUpdateViewModel: AppUpdateViewModel = {
-        let vm = AppUpdateViewModel(updater: AppUpdater.shared, panel: appUpdatePanel)
+        let vm = AppUpdateViewModel(updater: AppUpdater.shared, panel: appUpdatePanel, i18n: i18n)
         vm.onReady = { [weak self] handle in
             guard let self = self else { return }
-            let alert = NSAlert()
-            alert.messageText = self.t("dialog.update_ready_title")
-            alert.informativeText = self.t("dialog.update_ready_body")
-            alert.addButton(withTitle: self.t("btn.restart_now"))
-            alert.addButton(withTitle: self.t("btn.later"))
-            let response = self.alertRunner?(alert) ?? alert.runModal()
-            if response == .alertFirstButtonReturn {
-                self.onInstallRequested?(handle)
-            }
+            self.apply(self.state)
+            self.presentReadyUpdate(handle)
         }
-        vm.onInstallRequested = { [weak self] handle in
-            self?.onInstallRequested?(handle)
+        vm.onCheckCompleted = { [weak self] update in
+            self?.presentUpdateCheckResult(update)
+        }
+        vm.onCheckFailed = { [weak self] error in
+            guard let self else { return }
+            self.log("Update check failed: \(error.localizedDescription)")
+            let alert = NSAlert()
+            alert.messageText = self.t("dialog.update_check_failed_title")
+            alert.informativeText = self.t("dialog.update_check_failed_body")
+            alert.addButton(withTitle: self.t("btn.ok"))
+            _ = self.alertRunner?(alert) ?? alert.runModal()
         }
         return vm
     }()
@@ -431,8 +438,8 @@ public final class MenuBarController: NSObject {
             "\(t("menu.check_updates")) — v\($0)"
         } ?? t("menu.check_updates")
         menu.addItem(item(updateTitle, #selector(onCheckUpdates), icon: "check-updates", id: "updates"))
-        if appUpdateViewModel.readyHandle != nil {
-            let installTitle = t("menu.update_ready")
+        if let stagedUpdate = appUpdateViewModel.readyHandle {
+            let installTitle = "\(t("menu.update_ready")) · v\(stagedUpdate.version)"
             let installItem = item(installTitle, #selector(onInstallStagedUpdate), icon: "check-updates", id: "install-update")
             menu.addItem(installItem)
         }
@@ -1380,41 +1387,41 @@ public final class MenuBarController: NSObject {
         fileDropPanel?.presentPanel()
     }
     @objc private func onCheckUpdates() {
-        Task {
-            do {
-                let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-                if let update = try await UpdateChecker.check(currentVersion: currentVersion) {
-                    let alert = NSAlert()
-                    alert.messageText = t("notify.update_available_title")
-                    alert.informativeText = t(
-                        "dialog.update_available_body",
-                        ["version": update.version]
-                    )
-                    alert.addButton(withTitle: t("btn.download"))
-                    alert.addButton(withTitle: t("btn.cancel"))
+        if let handle = appUpdateViewModel.readyHandle {
+            presentReadyUpdate(handle)
+            return
+        }
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        appUpdateViewModel.checkForUpdates(currentVersion: currentVersion)
+    }
 
-                    let response = alert.runModal()
-                    if response == .alertFirstButtonReturn {
-                        startAppUpdate(update: update)
-                    }
-                } else {
-                    let alert = NSAlert()
-                    alert.messageText = t("dialog.up_to_date_title")
-                    alert.informativeText = t(
-                        "dialog.up_to_date_body",
-                        ["version": currentVersion]
-                    )
-                    alert.addButton(withTitle: t("btn.ok"))
-                    alert.runModal()
-                }
-            } catch {
-                log("Update check failed: \(error)")
-                let alert = NSAlert()
-                alert.messageText = t("dialog.update_check_failed_title")
-                alert.informativeText = t("dialog.update_check_failed_body")
-                alert.addButton(withTitle: t("btn.ok"))
-                alert.runModal()
+    private func presentUpdateCheckResult(_ update: AppUpdate?) {
+        let alert = NSAlert()
+        if let update {
+            alert.messageText = t("notify.update_available_title")
+            alert.informativeText = t("dialog.update_available_body", ["version": update.version])
+            alert.addButton(withTitle: t("btn.download"))
+            alert.addButton(withTitle: t("btn.cancel"))
+            if (alertRunner?(alert) ?? alert.runModal()) == .alertFirstButtonReturn {
+                startAppUpdate(update: update)
             }
+        } else {
+            let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+            alert.messageText = t("dialog.up_to_date_title")
+            alert.informativeText = t("dialog.up_to_date_body", ["version": currentVersion])
+            alert.addButton(withTitle: t("btn.ok"))
+            _ = alertRunner?(alert) ?? alert.runModal()
+        }
+    }
+
+    private func presentReadyUpdate(_ handle: StagedUpdateHandle) {
+        let alert = NSAlert()
+        alert.messageText = t("dialog.update_ready_title")
+        alert.informativeText = t("dialog.update_ready_body")
+        alert.addButton(withTitle: t("btn.restart_now"))
+        alert.addButton(withTitle: t("btn.later"))
+        if (alertRunner?(alert) ?? alert.runModal()) == .alertFirstButtonReturn {
+            onInstallRequested?(handle)
         }
     }
 

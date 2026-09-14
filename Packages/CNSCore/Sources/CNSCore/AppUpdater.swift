@@ -13,7 +13,12 @@ public enum AppUpdaterError: LocalizedError, Sendable, Equatable {
     case candidateIdentityMissing
     case invalidLaunchAcknowledgement
     case helperMissing
+    case helperNotReady
     case unsafePath
+    case downloadInProgress
+    case installationInProgress
+    case installationHandleMismatch
+    case helperDidNotExit
 
     public var errorDescription: String? {
         switch self {
@@ -28,7 +33,12 @@ public enum AppUpdaterError: LocalizedError, Sendable, Equatable {
         case .candidateIdentityMissing: "The update candidate has no version or build identity"
         case .invalidLaunchAcknowledgement: "The update launch acknowledgement is invalid"
         case .helperMissing: "The signed update helper is missing from the application bundle"
+        case .helperNotReady: "The update helper exited before it became ready"
         case .unsafePath: "The update attempted to use a path outside its controlled directory"
+        case .downloadInProgress: "An application update download is already in progress"
+        case .installationInProgress: "An application update installation is already in progress"
+        case .installationHandleMismatch: "The active update installation does not match this request"
+        case .helperDidNotExit: "The update helper did not exit after cancellation"
         }
     }
 }
@@ -265,6 +275,8 @@ public actor AppUpdater {
     private let verifier: any UpdateCandidateVerifying
     private let diskCapacity: @Sendable (URL) -> Int64
     private let currentVersion: @Sendable () -> String
+    private let targetApplicationURL: URL
+    private let helperExecutableURL: URL
     private var staged: StagedUpdate?
 
     private struct ActiveInstallation {
@@ -272,10 +284,13 @@ public actor AppUpdater {
         let process: Process
         let preparedCandidate: URL
         let backup: URL
+        let record: URL
     }
     private var activeInstallation: ActiveInstallation?
+    private var installationPreparationOperationID: UUID?
 
     private var operationGeneration = 0
+    private var activeDownloadOperationID: UUID?
 
     public init(
         paths: Paths,
@@ -285,7 +300,9 @@ public actor AppUpdater {
         diskCapacity: @escaping @Sendable (URL) -> Int64 = ModelManager.availableDiskCapacity,
         currentVersion: @escaping @Sendable () -> String = {
             Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
-        }
+        },
+        targetApplicationURL: URL = Bundle.main.bundleURL,
+        helperExecutableURL: URL? = nil
     ) {
         self.paths = paths
         self.archiveDownloader = archiveDownloader
@@ -293,6 +310,9 @@ public actor AppUpdater {
         self.verifier = verifier
         self.diskCapacity = diskCapacity
         self.currentVersion = currentVersion
+        self.targetApplicationURL = targetApplicationURL
+        self.helperExecutableURL = helperExecutableURL
+            ?? targetApplicationURL.appendingPathComponent("Contents/MacOS/CNSUpdateHelper")
     }
 
 
@@ -302,6 +322,12 @@ public actor AppUpdater {
         operationID: UUID,
         progress: @escaping @Sendable (AppUpdateProgress) -> Void
     ) async throws -> StagedUpdateHandle {
+        try Task.checkCancellation()
+        guard activeDownloadOperationID == nil else { throw AppUpdaterError.downloadInProgress }
+        activeDownloadOperationID = operationID
+        defer {
+            if activeDownloadOperationID == operationID { activeDownloadOperationID = nil }
+        }
         operationGeneration += 1
         let generation = operationGeneration
         try paths.ensureUpdatesDirectory()
@@ -388,47 +414,87 @@ public actor AppUpdater {
 
     public func cancelPendingInstallation(handle: UpdateInstallationHandle) async throws {
         guard let installation = activeInstallation, installation.handle == handle else {
-            return
+            throw AppUpdaterError.installationHandleMismatch
         }
-        
         let process = installation.process
         if process.isRunning {
             process.terminate()
         }
-        
-        // Wait for it to exit
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while process.isRunning {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard ContinuousClock.now < deadline else { throw AppUpdaterError.helperDidNotExit }
+            try await Task.sleep(for: .milliseconds(100))
         }
-        
-        // Clean up temporary files
-        try? FileManager.default.removeItem(at: installation.preparedCandidate)
-        try? FileManager.default.removeItem(at: installation.backup)
-        
+        guard !FileManager.default.fileExists(atPath: installation.backup.path) else {
+            throw AppUpdaterError.unsafePath
+        }
+        try markCancelledTransaction(installation)
+        if FileManager.default.fileExists(atPath: installation.preparedCandidate.path) {
+            try FileManager.default.removeItem(at: installation.preparedCandidate)
+        }
         activeInstallation = nil
     }
 
+    public func pendingInstallationHandle() -> UpdateInstallationHandle? {
+        activeInstallation?.handle
+    }
+
+    public func isPendingInstallationReady(handle: UpdateInstallationHandle) -> Bool {
+        guard let installation = activeInstallation, installation.handle == handle else { return false }
+        guard installation.process.isRunning,
+              let record = try? FileUpdateTransactionStore().load(from: installation.record) else {
+            return false
+        }
+        return record.transactionID == handle.transactionID.uuidString
+            && (record.phase == .prepared || record.phase == .installing)
+    }
+
+    private func markCancelledTransaction(_ installation: ActiveInstallation) throws {
+        guard FileManager.default.fileExists(atPath: installation.record.path) else { return }
+        let store = FileUpdateTransactionStore()
+        var record = try store.load(from: installation.record)
+        guard record.transactionID == installation.handle.transactionID.uuidString,
+              record.phase == .prepared || record.phase == .installing || record.phase == .rolledBack else {
+            throw AppUpdaterError.unsafePath
+        }
+        if record.phase != .rolledBack {
+            record.phase = .rolledBack
+            record.failure = .parentDidNotExit
+            try store.save(record, to: installation.record)
+        }
+    }
+
     public func cancelAndCleanUp(operationID: UUID) {
+        guard activeDownloadOperationID == operationID || staged?.operationID == operationID else {
+            return
+        }
         if staged?.operationID == operationID {
             if let staged {
                 try? FileManager.default.removeItem(at: staged.sessionDirectory)
             }
             staged = nil
         }
-        // Increment generation to cancel active tasks
-        operationGeneration += 1
+        if activeDownloadOperationID == operationID {
+            operationGeneration += 1
+        }
     }
 
     /// Copy the validated candidate beside the installed application, verify the
     /// copy again, then launch the signed helper. No hard-coded `/Applications`
     /// path is used.
     public func beginInstallation(handle: StagedUpdateHandle) async throws -> UpdateInstallationHandle {
+        guard activeInstallation == nil, installationPreparationOperationID == nil else {
+            throw AppUpdaterError.installationInProgress
+        }
         guard let staged,
               staged.operationID == handle.operationID,
+              staged.update.version == handle.version,
               FileManager.default.fileExists(atPath: staged.candidateURL.path) else {
             throw AppUpdaterError.stagedCandidateMissing
         }
-        let target = Bundle.main.bundleURL.standardizedFileURL
+        installationPreparationOperationID = handle.operationID
+        defer { installationPreparationOperationID = nil }
+        let target = targetApplicationURL.standardizedFileURL
         let parent = target.deletingLastPathComponent()
         let transactionID = UUID()
         let preparedCandidate = parent.appendingPathComponent(
@@ -439,8 +505,10 @@ public actor AppUpdater {
             ".Click-n-speak.backup-\(transactionID.uuidString).app",
             isDirectory: true
         )
-        try FileManager.default.copyItem(at: staged.candidateURL, to: preparedCandidate)
+        var launchedProcess: Process?
+        var launchedRecord: URL?
         do {
+            try FileManager.default.copyItem(at: staged.candidateURL, to: preparedCandidate)
             try await verifier.verify(
                 candidateURL: preparedCandidate,
                 policy: CandidateVerificationPolicy(
@@ -450,37 +518,28 @@ public actor AppUpdater {
                     architecture: .current
                 )
             )
-        } catch {
-            try FileManager.default.removeItem(at: preparedCandidate)
-            throw error
-        }
-
-        let helper = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/CNSUpdateHelper")
-        guard FileManager.default.isExecutableFile(atPath: helper.path) else {
-            try FileManager.default.removeItem(at: preparedCandidate)
-            throw AppUpdaterError.helperMissing
-        }
-        let token = UUID().uuidString
-        guard let candidateBundle = Bundle(url: preparedCandidate),
-              let candidateVersion = candidateBundle.object(
-                  forInfoDictionaryKey: "CFBundleShortVersionString"
-              ) as? String,
-              let candidateBuild = candidateBundle.object(
-                  forInfoDictionaryKey: "CFBundleVersion"
-              ) as? String,
-              let candidateExecutable = candidateBundle.executableURL,
-              !candidateVersion.isEmpty,
-              !candidateBuild.isEmpty else {
-            try FileManager.default.removeItem(at: preparedCandidate)
-            throw AppUpdaterError.candidateIdentityMissing
-        }
-        let candidateExecutableSHA256 = try await ArtifactIntegrity.sha256(of: candidateExecutable)
-        let ack = paths.updatesDirectory.appendingPathComponent("ack-\(transactionID.uuidString)")
-        let record = paths.updatesDirectory.appendingPathComponent("transaction-\(transactionID.uuidString).json")
-        let process = Process()
-        process.executableURL = helper
-        process.arguments = [
+            guard FileManager.default.isExecutableFile(atPath: helperExecutableURL.path) else {
+                throw AppUpdaterError.helperMissing
+            }
+            let token = UUID().uuidString
+            guard let candidateBundle = Bundle(url: preparedCandidate),
+                  let candidateVersion = candidateBundle.object(
+                      forInfoDictionaryKey: "CFBundleShortVersionString"
+                  ) as? String,
+                  let candidateBuild = candidateBundle.object(
+                      forInfoDictionaryKey: "CFBundleVersion"
+                  ) as? String,
+                  let candidateExecutable = candidateBundle.executableURL,
+                  !candidateVersion.isEmpty,
+                  !candidateBuild.isEmpty else {
+                throw AppUpdaterError.candidateIdentityMissing
+            }
+            let candidateExecutableSHA256 = try await ArtifactIntegrity.sha256(of: candidateExecutable)
+            let ack = paths.updatesDirectory.appendingPathComponent("ack-\(transactionID.uuidString)")
+            let record = paths.updatesDirectory.appendingPathComponent("transaction-\(transactionID.uuidString).json")
+            let process = Process()
+            process.executableURL = helperExecutableURL
+            process.arguments = [
             "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
             "--staged", preparedCandidate.path,
             "--target", target.path,
@@ -493,14 +552,83 @@ public actor AppUpdater {
             "--candidate-executable-sha256", candidateExecutableSHA256,
             "--ack", ack.path,
             "--record", record.path,
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        
-        let outHandle = UpdateInstallationHandle(transactionID: transactionID, operationID: handle.operationID)
-        self.activeInstallation = ActiveInstallation(handle: outHandle, process: process, preparedCandidate: preparedCandidate, backup: backup)
-        return outHandle
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            launchedProcess = process
+            launchedRecord = record
+            try await waitForHelperReadiness(
+                process: process,
+                record: record,
+                transactionID: transactionID
+            )
+            let outHandle = UpdateInstallationHandle(transactionID: transactionID, operationID: handle.operationID)
+            self.activeInstallation = ActiveInstallation(
+                handle: outHandle,
+                process: process,
+                preparedCandidate: preparedCandidate,
+                backup: backup,
+                record: record
+            )
+            return outHandle
+        } catch {
+            if let launchedProcess, let launchedRecord {
+                let outHandle = UpdateInstallationHandle(transactionID: transactionID, operationID: handle.operationID)
+                let installation = ActiveInstallation(
+                    handle: outHandle,
+                    process: launchedProcess,
+                    preparedCandidate: preparedCandidate,
+                    backup: backup,
+                    record: launchedRecord
+                )
+                if launchedProcess.isRunning {
+                    launchedProcess.terminate()
+                    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                    while launchedProcess.isRunning, ContinuousClock.now < deadline {
+                        await Task.detached {
+                            try? await Task.sleep(for: .milliseconds(100))
+                        }.value
+                    }
+                    if launchedProcess.isRunning {
+                        activeInstallation = installation
+                        throw AppUpdaterError.helperDidNotExit
+                    }
+                }
+                do {
+                    guard !FileManager.default.fileExists(atPath: backup.path) else {
+                        throw AppUpdaterError.unsafePath
+                    }
+                    try markCancelledTransaction(installation)
+                } catch {
+                    activeInstallation = installation
+                    throw error
+                }
+            }
+            if FileManager.default.fileExists(atPath: preparedCandidate.path) {
+                try? FileManager.default.removeItem(at: preparedCandidate)
+            }
+            throw error
+        }
+    }
+
+    private func waitForHelperReadiness(
+        process: Process,
+        record: URL,
+        transactionID: UUID
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            guard process.isRunning else { throw AppUpdaterError.helperNotReady }
+            if FileManager.default.fileExists(atPath: record.path),
+               let transaction = try? FileUpdateTransactionStore().load(from: record),
+               transaction.transactionID == transactionID.uuidString,
+               transaction.phase == .prepared || transaction.phase == .installing {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw AppUpdaterError.helperNotReady
     }
 
 

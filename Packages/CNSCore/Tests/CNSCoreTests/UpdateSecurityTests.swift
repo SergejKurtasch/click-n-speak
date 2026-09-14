@@ -259,8 +259,46 @@ private struct FixtureMounter: DiskImageMounting {
     func unmount(_ mountPoint: URL) {}
 }
 
+private struct BundleFixtureMounter: DiskImageMounting {
+    let bundle: URL
+
+    func mount(image: URL, at mountPoint: URL) throws {
+        try FileManager.default.copyItem(
+            at: bundle,
+            to: mountPoint.appendingPathComponent("Click-n-speak.app", isDirectory: true)
+        )
+    }
+
+    func unmount(_ mountPoint: URL) {}
+}
+
 private struct AcceptingCandidateVerifier: UpdateCandidateVerifying {
     func verify(candidateURL: URL, policy: CandidateVerificationPolicy) async throws {}
+}
+
+private actor SuspendedCandidateVerifier: UpdateCandidateVerifying {
+    private var verification: CheckedContinuation<Void, Never>?
+    private var observer: CheckedContinuation<Void, Never>?
+
+    func verify(candidateURL: URL, policy: CandidateVerificationPolicy) async throws {
+        observer?.resume()
+        observer = nil
+        await withCheckedContinuation { continuation in
+            verification = continuation
+        }
+    }
+
+    func waitUntilStarted() async {
+        if verification != nil { return }
+        await withCheckedContinuation { continuation in
+            observer = continuation
+        }
+    }
+
+    func release() {
+        verification?.resume()
+        verification = nil
+    }
 }
 
 private final class StreamingUpdateURLProtocol: URLProtocol, @unchecked Sendable {
@@ -448,7 +486,7 @@ final class AppUpdaterStagingTests: XCTestCase {
             diskCapacity: { _ in 10_000_000_000 },
             currentVersion: { "1.0.0" }
         )
-        let handle = try await updater.downloadAndStage(
+        _ = try await updater.downloadAndStage(
             update: fixtureUpdate(data: data),
             operationID: UUID(),
             progress: { _ in }
@@ -497,6 +535,116 @@ final class AppUpdaterStagingTests: XCTestCase {
         } catch is CancellationError {}
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: paths.updatesDirectory.path)) ?? []
         XCTAssertTrue(entries.isEmpty)
+    }
+
+    func testStaleCancellationDoesNotInvalidateAnotherDownload() async throws {
+        let data = Data("fixture-dmg".utf8)
+        let paths = temporaryPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        let verifier = SuspendedCandidateVerifier()
+        let updater = AppUpdater(
+            paths: paths,
+            archiveDownloader: FixtureArchiveDownloader(data: data),
+            mounter: FixtureMounter(),
+            verifier: verifier,
+            diskCapacity: { _ in 10_000_000_000 },
+            currentVersion: { "1.0.0" }
+        )
+        let currentOperationID = UUID()
+        let update = fixtureUpdate(data: data)
+        let download = Task {
+            try await updater.downloadAndStage(
+                update: update,
+                operationID: currentOperationID,
+                progress: { _ in }
+            )
+        }
+        await verifier.waitUntilStarted()
+        await updater.cancelAndCleanUp(operationID: UUID())
+        await verifier.release()
+
+        let handle = try await download.value
+        XCTAssertEqual(handle.operationID, currentOperationID)
+    }
+
+    func testMissingInstallHelperKeepsValidatedStagingForRetry() async throws {
+        let data = Data("fixture-dmg".utf8)
+        let paths = temporaryPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        try paths.ensureDataDirectory()
+        let target = paths.dataDirectory.appendingPathComponent("Click-n-speak.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let updater = AppUpdater(
+            paths: paths,
+            archiveDownloader: FixtureArchiveDownloader(data: data),
+            mounter: FixtureMounter(),
+            verifier: AcceptingCandidateVerifier(),
+            diskCapacity: { _ in 10_000_000_000 },
+            currentVersion: { "1.0.0" },
+            targetApplicationURL: target,
+            helperExecutableURL: paths.dataDirectory.appendingPathComponent("missing-helper")
+        )
+        let handle = try await updater.downloadAndStage(
+            update: fixtureUpdate(data: data),
+            operationID: UUID(),
+            progress: { _ in }
+        )
+
+        do {
+            _ = try await updater.beginInstallation(handle: StagedUpdateHandle(
+                operationID: handle.operationID,
+                version: "3.0.0"
+            ))
+            XCTFail("A mismatched version must not install the staged candidate")
+        } catch let error as AppUpdaterError {
+            XCTAssertEqual(error, .stagedCandidateMissing)
+        }
+
+        do {
+            _ = try await updater.beginInstallation(handle: handle)
+            XCTFail("Expected a missing helper error")
+        } catch let error as AppUpdaterError {
+            XCTAssertEqual(error, .helperMissing)
+        }
+        let staging = paths.updatesDirectory.appendingPathComponent("staging-\(handle.operationID.uuidString)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staging.path))
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: paths.dataDirectory.path)
+        XCTAssertFalse(siblings.contains { $0.hasPrefix(".Click-n-speak.update-") })
+    }
+
+    func testHelperThatExitsBeforeReadinessDoesNotTerminateParent() async throws {
+        let data = Data("fixture-dmg".utf8)
+        let paths = temporaryPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        try paths.ensureDataDirectory()
+        let candidate = try makeBundle(version: "2.0.0", build: "20")
+        defer { try? FileManager.default.removeItem(at: candidate) }
+        let target = paths.dataDirectory.appendingPathComponent("Click-n-speak.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let updater = AppUpdater(
+            paths: paths,
+            archiveDownloader: FixtureArchiveDownloader(data: data),
+            mounter: BundleFixtureMounter(bundle: candidate),
+            verifier: AcceptingCandidateVerifier(),
+            diskCapacity: { _ in 10_000_000_000 },
+            currentVersion: { "1.0.0" },
+            targetApplicationURL: target,
+            helperExecutableURL: URL(fileURLWithPath: "/usr/bin/false")
+        )
+        let handle = try await updater.downloadAndStage(
+            update: fixtureUpdate(data: data),
+            operationID: UUID(),
+            progress: { _ in }
+        )
+
+        do {
+            _ = try await updater.beginInstallation(handle: handle)
+            XCTFail("A helper that exits before readiness must not authorize termination")
+        } catch let error as AppUpdaterError {
+            XCTAssertEqual(error, .helperNotReady)
+        }
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: paths.dataDirectory.path)
+        XCTAssertFalse(siblings.contains { $0.hasPrefix(".Click-n-speak.update-") })
     }
 
     private func temporaryPaths() -> Paths {
