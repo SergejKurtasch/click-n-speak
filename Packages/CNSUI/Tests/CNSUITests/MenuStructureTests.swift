@@ -57,9 +57,9 @@ struct MenuStructureTests {
         fatalError("Could not locate repo locales/ from \(#filePath)")
     }
 
-    private func makeController(configJSON: String = "{}") throws -> MenuBarController {
+    private func makeController(configJSON: String = "{}", language: String = "en") throws -> MenuBarController {
         let resources = repoResources()
-        let i18n = I18n.load("en", localesDirectory: resources.localesDirectory)
+        let i18n = I18n.load(language, localesDirectory: resources.localesDirectory)
         let value = try JSONValue.parse(configJSON)
         let config = Config.migrated(value.objectValue ?? JSONObject())
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -111,6 +111,29 @@ struct MenuStructureTests {
             "---",
             "Quit Click-n-speak",
         ])
+    }
+
+    @Test("Russian and English menu trees expose all screenshot commands without empty labels")
+    func localizedCompleteMenuTrees() throws {
+        for language in ["ru", "en"] {
+            let controller = try makeController(language: language)
+            let commands = controller.menu.items.filter { !$0.isSeparatorItem }
+            #expect(commands.count == 16, "\(language) top-level commands")
+            #expect(commands.first?.title == I18n.load(
+                language,
+                localesDirectory: repoResources().localesDirectory
+            ).t("menu.permissions"))
+            for item in commands {
+                #expect(!item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                #expect(!item.title.contains("▶▶"))
+                if let submenu = item.submenu {
+                    for child in submenu.items where !child.isSeparatorItem {
+                        #expect(!child.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        #expect(!child.title.contains("▶▶"))
+                    }
+                }
+            }
+        }
     }
 
     @Test("Permissions submenu has two items because Carbon needs no Input Monitoring")
