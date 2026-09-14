@@ -124,6 +124,7 @@ struct AppResourcesTests {
     func updateProgressLocalization() {
         let root = repositoryRoot()
         let keys = [
+            "download.app_checking",
             "download.app_downloading",
             "download.app_downloading_percent",
             "download.app_verifying_archive",

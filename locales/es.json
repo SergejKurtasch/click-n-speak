@@ -67,6 +67,7 @@
     "dialog.update_failed_body": "No se pudo instalar la actualización.",
     "dialog.update_cancel_failed_body": "No se pudo confirmar la detención del asistente de actualización. Click-n-speak permanecerá abierto hasta que se cancele correctamente.",
     "download.app_update": "Actualización de la app {version}",
+    "download.app_checking": "Buscando actualizaciones…",
     "download.app_downloading": "Descargando actualización…",
     "download.app_downloading_percent": "Descargado el {percent}%",
     "download.app_verifying_archive": "Verificando el archivo de actualización…",

@@ -67,6 +67,7 @@
     "dialog.update_failed_body": "The update could not be installed. Try again later.",
     "dialog.update_cancel_failed_body": "The update helper could not be stopped. Click-n-speak remains open and will not quit until cancellation succeeds.",
     "download.app_update": "App Update {version}",
+    "download.app_checking": "Checking for updates…",
     "download.app_downloading": "Downloading update…",
     "download.app_downloading_percent": "Downloaded {percent}%",
     "download.app_verifying_archive": "Verifying update archive…",

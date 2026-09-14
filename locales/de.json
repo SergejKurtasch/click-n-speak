@@ -67,6 +67,7 @@
     "dialog.update_failed_body": "Das Update konnte nicht installiert werden.",
     "dialog.update_cancel_failed_body": "Der Update-Helfer konnte nicht nachweislich beendet werden. Click-n-speak bleibt bis zur erfolgreichen Abbrechung geöffnet.",
     "download.app_update": "App-Update {version}",
+    "download.app_checking": "Updates werden gesucht…",
     "download.app_downloading": "Update wird geladen…",
     "download.app_downloading_percent": "{percent}% heruntergeladen",
     "download.app_verifying_archive": "Update-Archiv wird geprüft…",

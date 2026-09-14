@@ -517,7 +517,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               !terminationStarted,
               restartPreparationTask == nil,
               !restartCoordinator.isPending,
-              updateInstallationIntent.beginPreparation() else { return }
+              updateInstallationIntent.beginPreparation() else {
+            menuController?.restoreStagedUpdateAfterFailedInstallation()
+            return
+        }
         Task { await self.logger?.info("App update installation requested") }
 
         Task { @MainActor [weak self] in
@@ -533,6 +536,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.updateCancellationFailed = true
                 } else {
                     self.updateInstallationIntent.abortPreparation()
+                }
+                if (error as? AppUpdaterError) == .stagedCandidateMissing {
+                    if self.menuController?.clearStagedUpdate(handle) == true {
+                        await AppUpdater.shared.cancelAndCleanUp(operationID: handle.operationID)
+                    }
+                } else if self.updateInstallationIntent.pendingHandle == nil {
+                    self.menuController?.restoreStagedUpdateAfterFailedInstallation()
                 }
                 await self.logger?.info("Update installation failed: \(error.localizedDescription)")
                 self.presentUpdateFailure(error)
@@ -554,10 +564,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func cancelUpdateHandoffAfterRefusal() async {
         do {
+            let hadPendingHandoff = updateInstallationIntent.pendingHandle != nil
             try await updateInstallationIntent.cancelPending { handle in
                 try await AppUpdater.shared.cancelPendingInstallation(handle: handle)
             }
             updateCancellationFailed = false
+            if hadPendingHandoff {
+                menuController?.restoreStagedUpdateAfterFailedInstallation()
+            }
         } catch {
             updateCancellationFailed = true
             await logger?.info("Update helper cancellation could not be confirmed: \(error.localizedDescription)")

@@ -86,8 +86,14 @@ public final class MenuBarController: NSObject {
         let vm = AppUpdateViewModel(updater: AppUpdater.shared, panel: appUpdatePanel, i18n: i18n)
         vm.onReady = { [weak self] handle in
             guard let self = self else { return }
-            self.apply(self.state)
             self.presentReadyUpdate(handle)
+        }
+        vm.onStateChanged = { [weak self] _ in
+            guard let self else { return }
+            self.apply(self.state)
+        }
+        vm.onInstallRequested = { [weak self] handle in
+            self?.onInstallRequested?(handle)
         }
         vm.onCheckCompleted = { [weak self] update in
             self?.presentUpdateCheckResult(update)
@@ -95,11 +101,6 @@ public final class MenuBarController: NSObject {
         vm.onCheckFailed = { [weak self] error in
             guard let self else { return }
             self.log("Update check failed: \(error.localizedDescription)")
-            let alert = NSAlert()
-            alert.messageText = self.t("dialog.update_check_failed_title")
-            alert.informativeText = self.t("dialog.update_check_failed_body")
-            alert.addButton(withTitle: self.t("btn.ok"))
-            _ = self.alertRunner?(alert) ?? alert.runModal()
         }
         return vm
     }()
@@ -438,7 +439,9 @@ public final class MenuBarController: NSObject {
             "\(t("menu.check_updates")) — v\($0)"
         } ?? t("menu.check_updates")
         menu.addItem(item(updateTitle, #selector(onCheckUpdates), icon: "check-updates", id: "updates"))
-        if let stagedUpdate = appUpdateViewModel.readyHandle {
+        if case let .installing(handle) = appUpdateViewModel.state {
+            menu.addItem(sectionHeader("\(t("menu.update_installing")) · v\(handle.version)"))
+        } else if let stagedUpdate = appUpdateViewModel.readyHandle {
             let installTitle = "\(t("menu.update_ready")) · v\(stagedUpdate.version)"
             let installItem = item(installTitle, #selector(onInstallStagedUpdate), icon: "check-updates", id: "install-update")
             menu.addItem(installItem)
@@ -1421,7 +1424,7 @@ public final class MenuBarController: NSObject {
         alert.addButton(withTitle: t("btn.restart_now"))
         alert.addButton(withTitle: t("btn.later"))
         if (alertRunner?(alert) ?? alert.runModal()) == .alertFirstButtonReturn {
-            onInstallRequested?(handle)
+            appUpdateViewModel.requestInstallation(handle: handle)
         }
     }
 
@@ -1429,9 +1432,20 @@ public final class MenuBarController: NSObject {
         appUpdateViewModel.startUpdate(update: update)
     }
 
+    @discardableResult
+    public func clearStagedUpdate(_ handle: StagedUpdateHandle) -> Bool {
+        guard appUpdateViewModel.clearReadyHandle(matching: handle) else { return false }
+        return true
+    }
+
+    public func restoreStagedUpdateAfterFailedInstallation() {
+        guard let handle = appUpdateViewModel.readyHandle else { return }
+        appUpdateViewModel.installationFailed(handle: handle)
+    }
+
     @objc private func onInstallStagedUpdate() {
         guard let handle = appUpdateViewModel.readyHandle else { return }
-        onInstallRequested?(handle)
+        appUpdateViewModel.requestInstallation(handle: handle)
     }
 
     @objc private func onToggleAutostart() {

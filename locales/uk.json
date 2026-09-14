@@ -67,6 +67,7 @@
     "dialog.update_failed_body": "Не вдалося встановити оновлення.",
     "dialog.update_cancel_failed_body": "Не вдалося підтвердити зупинку помічника оновлення. Click-n-speak залишається відкритим до успішного скасування.",
     "download.app_update": "Оновлення застосунку {version}",
+    "download.app_checking": "Перевірка оновлень…",
     "download.app_downloading": "Завантаження оновлення…",
     "download.app_downloading_percent": "Завантажено {percent}%",
     "download.app_verifying_archive": "Перевірка архіву оновлення…",

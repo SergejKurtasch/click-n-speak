@@ -2,6 +2,15 @@ import Foundation
 import AppKit
 import CNSCore
 
+public enum AppUpdateViewState: Equatable {
+    case idle
+    case checking(UUID)
+    case downloading(UUID)
+    case readyToInstall(StagedUpdateHandle)
+    case installing(StagedUpdateHandle)
+    case failed(UUID, String)
+}
+
 @MainActor
 public class AppUpdateViewModel {
     private let updater: AppUpdater
@@ -12,12 +21,18 @@ public class AppUpdateViewModel {
     private var activeTask: Task<Void, Never>?
     private var panelGeneration: Int?
     private var cancellationRequested = false
+    private var checkCancellationRequested = false
     
     public private(set) var activeOperationID: UUID?
     public private(set) var readyHandle: StagedUpdateHandle?
     public private(set) var checkOperationID: UUID?
+    public private(set) var state: AppUpdateViewState = .idle {
+        didSet { onStateChanged?(state) }
+    }
 
     public var onReady: ((StagedUpdateHandle) -> Void)?
+    public var onStateChanged: ((AppUpdateViewState) -> Void)?
+    public var onInstallRequested: ((StagedUpdateHandle) -> Void)?
     public var onCheckCompleted: ((AppUpdate?) -> Void)?
     public var onCheckFailed: ((Error) -> Void)?
 
@@ -35,7 +50,38 @@ public class AppUpdateViewModel {
         self.checker = checker
     }
 
-    public var isBusy: Bool { checkOperationID != nil || activeOperationID != nil }
+    deinit {
+        checkTask?.cancel()
+        activeTask?.cancel()
+    }
+
+    public var isBusy: Bool {
+        switch state {
+        case .checking, .downloading, .installing: true
+        case .idle, .readyToInstall, .failed: false
+        }
+    }
+
+    @discardableResult
+    public func clearReadyHandle(matching handle: StagedUpdateHandle) -> Bool {
+        guard readyHandle == handle else { return false }
+        readyHandle = nil
+        state = .idle
+        return true
+    }
+
+    @discardableResult
+    public func requestInstallation(handle: StagedUpdateHandle) -> Bool {
+        guard readyHandle == handle, state == .readyToInstall(handle) else { return false }
+        state = .installing(handle)
+        onInstallRequested?(handle)
+        return true
+    }
+
+    public func installationFailed(handle: StagedUpdateHandle) {
+        guard readyHandle == handle, state == .installing(handle) else { return }
+        state = .readyToInstall(handle)
+    }
 
     public func checkForUpdates(currentVersion: String) {
         guard !isBusy, readyHandle == nil else {
@@ -44,20 +90,60 @@ public class AppUpdateViewModel {
         }
         let operationID = UUID()
         checkOperationID = operationID
-        checkTask = Task {
+        checkCancellationRequested = false
+        panelGeneration = panel.show(
+            modelName: i18n.t("menu.check_updates"),
+            onCancel: { [weak self] in self?.cancelCheck(operationID: operationID) },
+            onRetry: { [weak self] in self?.checkForUpdates(currentVersion: currentVersion) }
+        )
+        panel.update(
+            fraction: nil,
+            message: i18n.t("download.app_checking"),
+            generation: panelGeneration
+        )
+        state = .checking(operationID)
+        let checker = self.checker
+        checkTask = Task { [weak self] in
             do {
                 let update = try await checker(currentVersion)
-                guard checkOperationID == operationID else { return }
-                checkOperationID = nil
-                checkTask = nil
-                onCheckCompleted?(update)
+                guard let self, self.checkOperationID == operationID else { return }
+                if self.checkCancellationRequested {
+                    self.finishCheckCancelled(operationID: operationID)
+                    return
+                }
+                self.checkOperationID = nil
+                self.checkTask = nil
+                self.panel.close()
+                self.state = .idle
+                self.onCheckCompleted?(update)
             } catch {
-                guard checkOperationID == operationID else { return }
-                checkOperationID = nil
-                checkTask = nil
-                onCheckFailed?(error)
+                guard let self, self.checkOperationID == operationID else { return }
+                if self.checkCancellationRequested || error is CancellationError {
+                    self.finishCheckCancelled(operationID: operationID)
+                    return
+                }
+                self.checkOperationID = nil
+                self.checkTask = nil
+                self.state = .failed(operationID, error.localizedDescription)
+                self.panel.showError(error.localizedDescription, generation: self.panelGeneration)
+                self.onCheckFailed?(error)
             }
         }
+    }
+
+    private func cancelCheck(operationID: UUID) {
+        guard checkOperationID == operationID, !checkCancellationRequested else { return }
+        checkCancellationRequested = true
+        checkTask?.cancel()
+    }
+
+    private func finishCheckCancelled(operationID: UUID) {
+        guard checkOperationID == operationID else { return }
+        checkOperationID = nil
+        checkTask = nil
+        checkCancellationRequested = false
+        state = .idle
+        panel.showCancelled(generation: panelGeneration)
     }
 
     public func startUpdate(update: AppUpdate) {
@@ -73,13 +159,19 @@ public class AppUpdateViewModel {
         }, onRetry: { [weak self] in
             self?.startUpdate(update: update)
         })
+        state = .downloading(operationID)
 
-        activeTask = Task {
+        let updater = self.updater
+        activeTask = Task { [weak self] in
             do {
                 let handle = try await updater.downloadAndStage(update: update, operationID: operationID) { [weak self] progress in
                     Task { @MainActor in
                         self?.receiveProgress(progress, operationID: operationID)
                     }
+                }
+                guard let self else {
+                    await updater.cancelAndCleanUp(operationID: operationID)
+                    return
                 }
                 guard self.activeOperationID == operationID else { return }
                 if self.cancellationRequested {
@@ -90,12 +182,15 @@ public class AppUpdateViewModel {
                 self.activeOperationID = nil
                 self.activeTask = nil
                 self.readyHandle = handle
+                self.state = .readyToInstall(handle)
                 self.panel.showCompleted(generation: self.panelGeneration)
                 self.onReady?(handle)
             } catch is CancellationError {
+                guard let self else { return }
                 guard self.activeOperationID == operationID else { return }
                 self.finishCancelled(operationID: operationID)
             } catch {
+                guard let self else { return }
                 guard self.activeOperationID == operationID else { return }
                 if self.cancellationRequested {
                     self.finishCancelled(operationID: operationID)
@@ -103,6 +198,7 @@ public class AppUpdateViewModel {
                 }
                 self.activeOperationID = nil
                 self.activeTask = nil
+                self.state = .failed(operationID, error.localizedDescription)
                 self.panel.showError(error.localizedDescription, generation: self.panelGeneration)
             }
         }
@@ -113,6 +209,7 @@ public class AppUpdateViewModel {
         activeOperationID = nil
         activeTask = nil
         cancellationRequested = false
+        state = .idle
         panel.showCancelled(generation: panelGeneration)
     }
 
@@ -153,6 +250,7 @@ public class AppUpdateViewModel {
         guard self.activeOperationID == operationID, !cancellationRequested else { return }
         cancellationRequested = true
         activeTask?.cancel()
+        let updater = self.updater
         Task { await updater.cancelAndCleanUp(operationID: operationID) }
     }
 }

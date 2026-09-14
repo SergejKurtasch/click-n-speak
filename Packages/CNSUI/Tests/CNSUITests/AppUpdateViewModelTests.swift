@@ -31,6 +31,18 @@ private actor SuspendedUpdateCheck {
     }
 }
 
+private actor FailingOnceUpdateCheck {
+    private var calls = 0
+
+    func run(version: String) async throws -> AppUpdate? {
+        calls += 1
+        if calls == 1 { throw AppUpdaterError.invalidHTTPResponse }
+        return nil
+    }
+
+    func count() -> Int { calls }
+}
+
 private actor UpdateArchiveFixture: UpdateArchiveDownloading {
     let data: Data
     private var downloads = 0
@@ -105,20 +117,77 @@ final class AppUpdateViewModelTests: XCTestCase {
             "CNS_DATA_DIR": FileManager.default.temporaryDirectory
                 .appendingPathComponent("update-check-\(UUID().uuidString)").path,
         ]))
+        let panel = ModelDownloadPanel(i18n: makeI18n())
         let viewModel = AppUpdateViewModel(
             updater: updater,
-            panel: ModelDownloadPanel(i18n: makeI18n()),
+            panel: panel,
             i18n: makeI18n(),
             checker: { version in await gate.run(version: version) }
         )
         viewModel.checkForUpdates(currentVersion: "1.0.0")
         let firstOperation = viewModel.checkOperationID
         await gate.waitUntilCalled()
+        XCTAssertEqual(viewModel.state, .checking(firstOperation!))
+        XCTAssertTrue(panel.isVisible)
         viewModel.checkForUpdates(currentVersion: "1.0.0")
         XCTAssertEqual(viewModel.checkOperationID, firstOperation)
         let count = await gate.count()
         XCTAssertEqual(count, 1)
         await gate.finish()
+        panel.close()
+    }
+
+    func testDiscardingViewModelDoesNotRetainItsCheckingTask() async {
+        let gate = SuspendedUpdateCheck()
+        let updater = AppUpdater(paths: Paths(mode: .dev, environment: [
+            "CNS_DATA_DIR": FileManager.default.temporaryDirectory
+                .appendingPathComponent("update-check-release-\(UUID().uuidString)").path,
+        ]))
+        var viewModel: AppUpdateViewModel? = AppUpdateViewModel(
+            updater: updater,
+            panel: ModelDownloadPanel(i18n: makeI18n()),
+            i18n: makeI18n(),
+            checker: { version in await gate.run(version: version) }
+        )
+        weak let retainedViewModel = viewModel
+        viewModel?.checkForUpdates(currentVersion: "1.0.0")
+        await gate.waitUntilCalled()
+        viewModel = nil
+        XCTAssertNil(retainedViewModel)
+        await gate.finish()
+    }
+
+    func testFailedCheckShowsCauseAndRetryUsesNewOperation() async {
+        let checker = FailingOnceUpdateCheck()
+        let i18n = makeI18n()
+        let panel = ModelDownloadPanel(i18n: i18n)
+        let updater = AppUpdater(paths: Paths(mode: .dev, environment: [
+            "CNS_DATA_DIR": FileManager.default.temporaryDirectory
+                .appendingPathComponent("update-check-retry-\(UUID().uuidString)").path,
+        ]))
+        let viewModel = AppUpdateViewModel(
+            updater: updater,
+            panel: panel,
+            i18n: i18n,
+            checker: { version in try await checker.run(version: version) }
+        )
+        let failed = expectation(description: "first check fails")
+        viewModel.onCheckFailed = { _ in failed.fulfill() }
+        viewModel.checkForUpdates(currentVersion: "1.0.0")
+        let failedOperation = viewModel.checkOperationID
+        await fulfillment(of: [failed], timeout: 3)
+        XCTAssertEqual(viewModel.state, .failed(failedOperation!, AppUpdaterError.invalidHTTPResponse.localizedDescription))
+        XCTAssertTrue(panel.statusForTesting?.contains("invalid response") == true)
+
+        let completed = expectation(description: "retry completes")
+        viewModel.onCheckCompleted = { _ in completed.fulfill() }
+        viewModel.checkForUpdates(currentVersion: "1.0.0")
+        XCTAssertNotEqual(viewModel.checkOperationID, failedOperation)
+        await fulfillment(of: [completed], timeout: 3)
+        XCTAssertEqual(viewModel.state, .idle)
+        let calls = await checker.count()
+        XCTAssertEqual(calls, 2)
+        panel.close()
     }
 
     func testRepeatedStartAndCancelKeepOneOperationUntilDownloadExits() {
@@ -198,10 +267,27 @@ final class AppUpdateViewModelTests: XCTestCase {
         viewModel.startUpdate(update: update)
         await fulfillment(of: [ready], timeout: 3)
         XCTAssertEqual(viewModel.readyHandle, deliveredHandle)
+        XCTAssertEqual(viewModel.state, .readyToInstall(deliveredHandle!))
         XCTAssertEqual(deliveredHandle?.version, "2.0.0")
         viewModel.startUpdate(update: update)
         let count = await archive.count()
         XCTAssertEqual(count, 1)
+        var installRequests = 0
+        viewModel.onInstallRequested = { _ in installRequests += 1 }
+        XCTAssertTrue(viewModel.requestInstallation(handle: deliveredHandle!))
+        XCTAssertEqual(viewModel.state, .installing(deliveredHandle!))
+        XCTAssertFalse(viewModel.requestInstallation(handle: deliveredHandle!))
+        XCTAssertEqual(installRequests, 1)
+        viewModel.installationFailed(handle: deliveredHandle!)
+        XCTAssertEqual(viewModel.state, .readyToInstall(deliveredHandle!))
+        let wrongVersion = StagedUpdateHandle(
+            operationID: deliveredHandle!.operationID,
+            version: "3.0.0"
+        )
+        viewModel.clearReadyHandle(matching: wrongVersion)
+        XCTAssertEqual(viewModel.readyHandle, deliveredHandle)
+        viewModel.clearReadyHandle(matching: deliveredHandle!)
+        XCTAssertNil(viewModel.readyHandle)
         panel.close()
     }
 
