@@ -989,10 +989,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         runtime.activeEditorModel = active.aiEditor.modelID
     }
 
-    private func refreshMenuPermissions() {
+    func refreshMenuPermissions() {
         guard let permissionService else { return }
         let snapshot = permissionSnapshot(using: permissionService)
         mutateMenuState { $0.permissions = snapshot }
+        if snapshot.microphone == .granted && snapshot.accessibilityGranted {
+            reconcileHotkeyAvailability()
+        }
     }
 
     private func permissionSnapshot(

@@ -2,7 +2,7 @@ import XCTest
 @testable import ClickNSpeak
 @testable import CNSCore
 
-private final class FakePermissionService: PermissionServicing {
+final class FakePermissionService: PermissionServicing {
     var setupDoneURL: URL { URL(fileURLWithPath: "/tmp/setup") }
     
     var setupDone = false

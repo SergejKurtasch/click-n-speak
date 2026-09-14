@@ -15,6 +15,33 @@ struct AppDelegateStartupTests {
 
     private enum StorageFailure: Error { case write }
 
+    @Test("Refreshing newly granted permissions registers a ready hotkey exactly once")
+    func permissionRefreshRegistersHotkey() async throws {
+        let (app, runtime, _, dictionary, _, paths) = makeConfigurationBridge()
+        defer {
+            withExtendedLifetime(app) {}
+            try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent())
+        }
+        let permissions = FakePermissionService()
+        permissions.accessibility = false
+        app.permissionService = permissions
+        var registrations = 0
+        app.hotkeyRegistrar = {
+            registrations += 1
+            return true
+        }
+        await runtime.activateInitial(dictionary.snapshot)
+        #expect(runtime.canRecord)
+
+        app.refreshMenuPermissions()
+        #expect(registrations == 0)
+        permissions.accessibility = true
+        app.refreshMenuPermissions()
+        app.refreshMenuPermissions()
+        #expect(registrations == 1)
+        await runtime.shutdown()
+    }
+
     @Test("A storage recovery retries only the failed operation before unblocking startup")
     func storageRecoveryRetry() throws {
         var available = false
