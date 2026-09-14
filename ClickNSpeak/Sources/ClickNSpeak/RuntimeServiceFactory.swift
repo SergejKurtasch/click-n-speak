@@ -70,7 +70,17 @@ struct AccessTokenReleasingEditor: AiEditing {
     
     var descriptor: AiEditorDescriptor { inner.descriptor }
     var isReady: Bool { inner.isReady }
-    func prepare() async throws { try await inner.prepare() }
+    func prepare() async throws {
+        do {
+            try await inner.prepare()
+            guard inner.isReady else {
+                throw RuntimePreparationError.initializationFailed("Local editor is not ready")
+            }
+        } catch {
+            await stop()
+            throw error
+        }
+    }
     func refine(text: String, languages: [String]?, knownTerms: [String]?, misrecognitions: [(String, String)]?) async -> RefineResult {
         await inner.refine(text: text, languages: languages, knownTerms: knownTerms, misrecognitions: misrecognitions)
     }
@@ -250,7 +260,9 @@ guard config.aiEditorEnabled else {
             do {
                 try await editor.prepare()
             } catch {
-                await editor.stop()
+                if let preparationError = error as? RuntimePreparationError {
+                    throw preparationError
+                }
                 throw RuntimePreparationError.initializationFailed(error.localizedDescription)
             }
             
@@ -259,9 +271,6 @@ guard config.aiEditorEnabled else {
                     transcriber: .unavailable,
                     aiEditor: editor.descriptor
                 )))
-            }
-            guard editor.isReady else {
-                throw RuntimePreparationError.initializationFailed("Local editor is not ready")
             }
             return PreparedEditor(
                 service: editor,

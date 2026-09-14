@@ -443,6 +443,34 @@ struct ModelManagerTests {
 @MainActor
 @Suite("ModelDownloader durable state")
 struct ModelDownloaderPersistenceTests {
+    @Test("Validation cancellation reaches a terminal state and releases the artifact")
+    func validationCancellationCleansUp() async throws {
+        let paths = testPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        let registry = ModelArtifactAccessRegistry()
+        let bytes = Data("lmgg-cancel-fixture".utf8)
+        let model = singleFileModel(data: bytes)
+        try paths.ensureModelsDirectory()
+        try bytes.write(to: paths.modelsDirectory.appendingPathComponent(".fixture.bin.partial"))
+        let downloader = ModelDownloader(
+            paths: paths, registry: registry,
+            activateModel: { _, _, _ in throw CancellationError() }
+        )
+        var cancellations = 0
+        downloader.onCancelled = { cancellations += 1 }
+
+        downloader.start(model: model)
+        for _ in 0..<200 {
+            if downloader.state != .validating { break }
+            await Task.yield()
+        }
+
+        #expect(downloader.state == .cancelled)
+        #expect(cancellations == 1)
+        let reservation = try registry.reserveDeletion(modelID: model.id)
+        registry.finishDeletion(reservation)
+    }
+
     @Test("A deletion reservation reports download refusal to the UI")
     func reservationFailureIsVisible() throws {
         let paths = testPaths()

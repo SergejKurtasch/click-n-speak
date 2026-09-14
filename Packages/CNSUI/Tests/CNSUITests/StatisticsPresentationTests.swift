@@ -7,6 +7,28 @@ import CNSDictionary
 @Suite
 struct StatisticsPresentationTests {
     @MainActor
+    @Test("An unfinished statistics request does not retain its panel model")
+    func unfinishedRequestReleasesModel() async {
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: directory.appendingPathComponent("locales").path) {
+            directory = directory.deletingLastPathComponent()
+        }
+        let i18n = I18n.load("en", localesDirectory: directory.appendingPathComponent("locales"))
+        var model: StatisticsViewModel? = StatisticsViewModel(
+            i18n: i18n, openHistory: {},
+            fetchMetrics: { _ in
+                try await Task.sleep(for: .seconds(60))
+                return JSONObject()
+            }
+        )
+        weak let weakModel = model
+        model?.load()
+        model = nil
+        for _ in 0..<20 where weakModel != nil { await Task.yield() }
+        #expect(weakModel == nil)
+    }
+
+    @MainActor
     @Test("Statistics panel accepts a snapshot from the real metrics producer")
     func realProducerSnapshot() {
         var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()

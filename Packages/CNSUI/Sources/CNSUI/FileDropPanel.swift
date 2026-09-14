@@ -52,6 +52,7 @@ public final class FileTranscriptionViewModel: ObservableObject {
             isEditorAvailable = true
             editorUnavailableReason = nil
         }
+        if !isEditorAvailable { refine = false }
     }
 
     @discardableResult
@@ -66,7 +67,7 @@ public final class FileTranscriptionViewModel: ObservableObject {
         }
 
         let currentID = UUID()
-        let shouldRefine = refine
+        let shouldRefine = refine && isEditorAvailable
         jobID = currentID
         isProcessing = true
         isCancelling = false
@@ -217,10 +218,29 @@ struct FileDropView: View {
             }
 
             Toggle(i18n.t("dialog.file_refine"), isOn: $viewModel.refine)
-                .disabled(viewModel.isProcessing)
+                .disabled(viewModel.isProcessing || !viewModel.isEditorAvailable)
+
+            if let reason = viewModel.editorUnavailableReason {
+                Label(reason, systemImage: "info.circle")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("file-transcription.editor-unavailable")
+            }
 
             if !viewModel.transcriptionResult.isEmpty {
                 resultView
+            }
+
+            if let message = viewModel.refinementMessage {
+                Label(
+                    message,
+                    systemImage: refinementNeedsAttention ? "exclamationmark.triangle.fill" : "checkmark.circle"
+                )
+                .foregroundStyle(refinementNeedsAttention ? .orange : .secondary)
+                .font(.callout)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("file-transcription.refinement-status")
             }
 
             if let errorMessage = viewModel.errorMessage {
@@ -260,6 +280,13 @@ struct FileDropView: View {
         .frame(maxWidth: .infinity, minHeight: 150)
     }
 
+    private var refinementNeedsAttention: Bool {
+        switch viewModel.refinementOutcome {
+        case .unavailable, .skipped, .timedOut, .failed, .notRun: true
+        case .notRequested, .applied, .unchanged: false
+        }
+    }
+
     private var dropTarget: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
@@ -270,21 +297,28 @@ struct FileDropView: View {
                 .background(isTargeted ? Color.accentColor.opacity(0.1) : Color.clear)
 
             VStack(spacing: 10) {
-                Image(systemName: "arrow.down.doc")
-                    .font(.system(size: 40))
-                    .foregroundStyle(isTargeted ? Color.accentColor : Color.secondary)
-                Text(i18n.t("dialog.file_drop_hint"))
-                    .font(.headline)
-                Text(Self.formatDescription(i18n: i18n))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if viewModel.transcriptionResult.isEmpty {
+                    Image(systemName: "arrow.down.doc")
+                        .font(.system(size: 40))
+                        .foregroundStyle(isTargeted ? Color.accentColor : Color.secondary)
+                    Text(i18n.t("dialog.file_drop_hint"))
+                        .font(.headline)
+                    Text(Self.formatDescription(i18n: i18n))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(i18n.t("dialog.file_drop_hint"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 Button(i18n.t("dialog.file_browse")) { browse() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("file-transcription.browse")
             }
         }
-        .frame(minHeight: 180)
+        .frame(minHeight: viewModel.transcriptionResult.isEmpty ? 180 : 76)
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
             guard let provider = providers.first else { return false }
             provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in

@@ -46,7 +46,6 @@ public final class MenuBarController: NSObject {
 
     public var onModelDownloadCompleted: ((String) -> Void)?
     public var onPermissionRefreshRequested: (() -> Void)?
-    public var onRevertTermsRequested: (() -> Void)?
     public var onDownloadStateChanged: ((MenuDownloadSnapshot) -> Void)?
     public var onHistorySnapshotChanged: ((MenuHistorySnapshot) -> Void)?
     public var onLocalModelsChanged: (() -> Void)?
@@ -179,11 +178,7 @@ public final class MenuBarController: NSObject {
         replacementsPanel?.refresh()
         updateStatusItem(for: newState)
 
-        if let panel = fileDropPanel {
-            let isActive = newState.runtime.activeEditorBackend != nil
-            let isPreparing = newState.runtime.phase == .preparing
-            panel.updateEditorAvailability(isActive: isActive, isPreparing: isPreparing)
-        }
+        updateFilePanelAvailability(for: newState.runtime)
 
         if menuIsTracking {
             pendingState = newState
@@ -777,7 +772,7 @@ public final class MenuBarController: NSObject {
         sub.addItem(item(t("menu.edit_terms"), #selector(onEditTerms)))
         let revertItem = item(t("menu.revert_terms"), #selector(onRevertTerms))
         let snapshots = config.raw["prompt_snapshots"]?.objectValue ?? JSONObject()
-        revertItem.isEnabled = !snapshots.keys.isEmpty
+        revertItem.isEnabled = dictionaryCoordinator != nil && !snapshots.keys.isEmpty
         sub.addItem(revertItem)
         sub.addItem(.separator())
 
@@ -1255,6 +1250,7 @@ public final class MenuBarController: NSObject {
     }
 
     @objc private func onRevertTerms() {
+        guard let dictionaryCoordinator else { return }
         let snapshots = config.raw["prompt_snapshots"]?.objectValue ?? JSONObject()
         let availableLanguages = snapshots.keys.sorted()
         guard !availableLanguages.isEmpty else { return }
@@ -1282,13 +1278,8 @@ public final class MenuBarController: NSObject {
         
         if response == .alertFirstButtonReturn,
            let selected = popupButton.selectedItem?.representedObject as? String {
-            if let dictionaryCoordinator {
-                do { try dictionaryCoordinator.revert(language: selected) }
-                catch { log("Dictionary revert failed: \(error.localizedDescription)") }
-            } else {
-                onRevertTermsRequested?() // Assuming it uses primary? Wait, onRevertTermsRequested has no arguments.
-                // We shouldn't rely on it for language. But dictionaryCoordinator is almost always set.
-            }
+            do { try dictionaryCoordinator.revert(language: selected) }
+            catch { log("Dictionary revert failed: \(error.localizedDescription)") }
         }
     }
     @objc private func onModeSuggest() {
@@ -1405,8 +1396,17 @@ public final class MenuBarController: NSObject {
                 return await action(url, refine, progress)
             })
         }
+        updateFilePanelAvailability(for: state.runtime)
         fileDropPanel?.presentPanel()
     }
+
+    private func updateFilePanelAvailability(for runtime: MenuRuntimeSnapshot) {
+        fileDropPanel?.updateEditorAvailability(
+            isActive: runtime.activeEditorBackend != nil && runtime.activeEditorBackend != "disabled",
+            isPreparing: runtime.phase == .preparing
+        )
+    }
+
     @objc private func onCheckUpdates() {
         if let handle = appUpdateViewModel.readyHandle {
             presentReadyUpdate(handle)

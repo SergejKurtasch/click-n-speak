@@ -242,6 +242,7 @@ public final class ModelDownloader: NSObject {
     private let diskCapacity: @Sendable (URL) -> Int64
     private let sessionConfiguration: @Sendable () -> URLSessionConfiguration
     private let retrySleep: @Sendable (TimeInterval) async throws -> Void
+    private let activateModel: @Sendable (URL, ModelInfo, Paths) async throws -> Void
     private let log: (String) -> Void
 
     private var dataTask: URLSessionDataTask?
@@ -270,6 +271,12 @@ public final class ModelDownloader: NSObject {
         retrySleep: @escaping @Sendable (TimeInterval) async throws -> Void = { delay in
             try await Task.sleep(for: .seconds(delay))
         },
+        activateModel: @escaping @Sendable (URL, ModelInfo, Paths) async throws -> Void = {
+            stagingURL, model, paths in
+            try await ModelManager.validateAndActivate(
+                stagingURL: stagingURL, model: model, paths: paths
+            )
+        },
         log: @escaping (String) -> Void = { _ in }
     ) {
         self.paths = paths
@@ -278,6 +285,7 @@ public final class ModelDownloader: NSObject {
         self.diskCapacity = diskCapacity
         self.sessionConfiguration = sessionConfiguration
         self.retrySleep = retrySleep
+        self.activateModel = activateModel
         self.log = log
         super.init()
     }
@@ -635,21 +643,17 @@ public final class ModelDownloader: NSObject {
         preparationTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await ModelManager.validateAndActivate(
-                    stagingURL: stagingURL,
-                    model: model,
-                    paths: paths
-                )
-                try Task.checkCancellation()
+                try await activateModel(stagingURL, model, paths)
                 guard generation == currentGeneration else { return }
                 state = .completed
+                preparationTask = nil
                 downloadedBytes = totalBytes ?? downloadedBytes
                 removeResumeFiles(model: model)
                 invalidateTransferSession()
                 onProgress?(downloadedBytes, totalBytes)
                 onDone?()
             } catch is CancellationError {
-                return
+                applyCancelled(generation: currentGeneration)
             } catch {
                 do {
                     try ModelManager.quarantineInvalidArtifact(at: stagingURL, model: model, paths: paths)
@@ -712,6 +716,7 @@ public final class ModelDownloader: NSObject {
     private func applyCancelled(generation currentGeneration: Int) {
         guard currentGeneration == generation else { return }
         state = .cancelled
+        preparationTask = nil
         invalidateTransferSession()
         onCancelled?()
     }
@@ -721,6 +726,7 @@ public final class ModelDownloader: NSObject {
               state == .downloading || state == .validating else { return }
         log("ModelDownloader: error — \(message)")
         state = .failed(message)
+        preparationTask = nil
         dataTask?.cancel()
         invalidateTransferSession()
         onError?(message)

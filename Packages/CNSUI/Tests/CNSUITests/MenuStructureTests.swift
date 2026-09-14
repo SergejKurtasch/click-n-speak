@@ -8,6 +8,52 @@ import AppKit
 @MainActor
 @Suite("Menu structure")
 struct MenuStructureTests {
+    @Test("Revert is unavailable without a dictionary owner")
+    func revertNeedsDictionaryOwner() throws {
+        let controller = try makeController(
+            configJSON: #"{"prompt_snapshots":{"de":["Hallo"]}}"#
+        )
+        let dictionary = try #require(controller.menu.items.first { $0.title == "Initial Prompt" })
+        let revert = try #require(dictionary.submenu?.items.first { $0.title == "Revert Terms…" })
+        #expect(!revert.isEnabled)
+    }
+
+    @Test("A newly opened file panel inherits the current editor availability")
+    func filePanelStartsWithCurrentEditorState() throws {
+        let controller = try makeController()
+        var state = controller.state
+        state.runtime.phase = .ready
+        state.runtime.activeEditorBackend = "local"
+        controller.apply(state)
+
+        controller.perform(NSSelectorFromString("onTranscribeFile"))
+
+        let panel = try #require(NSApp.windows.compactMap { $0 as? FileDropPanel }.last)
+        defer { panel.close() }
+        #expect(panel.viewModelForTesting.isEditorAvailable)
+    }
+
+    @Test("A disabled runtime descriptor never enables file refinement")
+    func disabledEditorRemainsUnavailableInFilePanel() throws {
+        let controller = try makeController()
+        var state = controller.state
+        state.runtime.phase = .ready
+        state.runtime.activeEditorBackend = "disabled"
+        controller.apply(state)
+
+        controller.perform(NSSelectorFromString("onTranscribeFile"))
+
+        let panel = try #require(NSApp.windows.compactMap { $0 as? FileDropPanel }.last)
+        defer { panel.close() }
+        #expect(!panel.viewModelForTesting.isEditorAvailable)
+        state.runtime.activeEditorBackend = "local"
+        controller.apply(state)
+        #expect(panel.viewModelForTesting.isEditorAvailable)
+        state.runtime.activeEditorBackend = "disabled"
+        controller.apply(state)
+        #expect(!panel.viewModelForTesting.isEditorAvailable)
+    }
+
     @Test("A stale recovery action cannot replace a newer runtime selection")
     func staleRuntimeRecoveryIsIgnored() throws {
         let controller = try makeController()

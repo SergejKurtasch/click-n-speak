@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import CNSCore
 @testable import CNSDictionary
@@ -154,6 +155,27 @@ final class UIPanelsTests: XCTestCase {
             FileTranscriptionResult(text: "fixture result", status: .success)
         }
         XCTAssertEqual(panel.title, i18n.t("dialog.file_drop_title"))
+    }
+
+    func testCompletedFileStatusFitsDefaultPanelHeight() throws {
+        let model = FileTranscriptionViewModel(
+            i18n: i18n(),
+            onTranscribe: { _, _, _ in
+                try? await Task.sleep(for: .seconds(60))
+                return FileTranscriptionResult(text: "", status: .success)
+            }
+        )
+        XCTAssertTrue(model.start(URL(fileURLWithPath: "/tmp/fixture.wav")))
+        let id = try XCTUnwrap(model.jobID)
+        model.receiveResult(
+            FileTranscriptionResult(text: "Recognized words", status: .success, refinement: .timedOut),
+            jobID: id
+        )
+        let host = NSHostingView(rootView: FileDropView(viewModel: model))
+        host.frame = NSRect(x: 0, y: 0, width: 500, height: 440)
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertLessThanOrEqual(host.fittingSize.height, 440)
     }
 
     func testReusablePanelsRefreshFromLatestCoordinatorSnapshot() throws {

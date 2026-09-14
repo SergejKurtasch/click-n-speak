@@ -86,4 +86,19 @@ struct FileTranscriptionViewModelTests {
         #expect(sut.isEditorAvailable == true)
         #expect(sut.editorUnavailableReason == nil)
     }
+
+    @Test("Losing editor availability clears a pending refinement request")
+    func unavailableEditorClearsRefinement() {
+        let sut = FileTranscriptionViewModel(
+            i18n: i18n,
+            onTranscribe: { _, _, _ in FileTranscriptionResult(text: "", status: .success) }
+        )
+        sut.updateEditorAvailability(isActive: true, isPreparing: false)
+        sut.refine = true
+
+        sut.updateEditorAvailability(isActive: false, isPreparing: true)
+
+        #expect(sut.refine == false)
+        #expect(sut.editorUnavailableReason == i18n.t("dialog.editor_preparing_reason"))
+    }
 }

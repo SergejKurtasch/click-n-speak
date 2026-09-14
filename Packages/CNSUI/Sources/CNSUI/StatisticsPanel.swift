@@ -96,25 +96,27 @@ final class StatisticsViewModel: ObservableObject {
         self.openHistory = openHistory
         self.fetchMetrics = fetchMetrics
     }
+
+    deinit { currentTask?.cancel() }
     
     func load() {
         let requestID = UUID()
         state = .loading(requestID)
         currentTask?.cancel()
-        currentTask = Task {
+        currentTask = Task { [weak self, fetchMetrics] in
+            let result: Result<JSONObject, Error>
             do {
-                let metrics = try await fetchMetrics(requestID)
-                if !Task.isCancelled {
-                    if case .loading(let id) = state, id == requestID {
-                        state = .ready(requestID, metrics)
-                    }
-                }
+                result = .success(try await fetchMetrics(requestID))
             } catch {
-                if !Task.isCancelled {
-                    if case .loading(let id) = state, id == requestID {
-                        state = .failed(requestID)
-                    }
-                }
+                result = .failure(error)
+            }
+            guard let self else { return }
+            guard case .loading(let id) = state, id == requestID else { return }
+            currentTask = nil
+            guard !Task.isCancelled else { return }
+            switch result {
+            case .success(let metrics): state = .ready(requestID, metrics)
+            case .failure: state = .failed(requestID)
             }
         }
     }
