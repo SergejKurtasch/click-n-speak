@@ -83,6 +83,21 @@ bash scripts/swift_verify.sh
 Swift verification passed
 ```
 
+## Task 3 fix round 2
+
+- Moved the Python-specific cutover runbook to `docs/archive/`.
+- Replaced the active release runbook with Swift-only rollout and rollback
+  guidance targeting the previous signed Swift release.
+- Added an explicit link from the active guide to the historical context.
+
+Validation:
+
+```text
+/Users/sergej/Click-n-speak/venv/bin/python -m pytest tests/test_swift_only_layout.py -q
+3 passed
+active runbook Python-reference scan: passed
+```
+
 ## Risks
 
 - Full `scripts/swift_verify.sh` is still required for release-level coverage.
