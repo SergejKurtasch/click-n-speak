@@ -71,3 +71,22 @@ Task 4 checks.
 
 Swift compilation remains environment-bound by the existing sandbox restriction
 on `/Users/sergej/.cache/clang/ModuleCache`; no Swift build was claimed here.
+
+## Fix round 2
+
+Removed the workspace fallback from `swift_acceptance.scenario_gate_command`.
+Swift acceptance now resolves targets strictly below the `repo_root` supplied
+by the caller, which is the owning `swift-app/` root in production. Workspace
+parity tests pass `SWIFT_ROOT` for Swift scenario checks, and a nested
+`swift-app/...` target is explicitly rejected.
+
+### Fix round 2 validation
+
+- `venv/bin/python -m pytest tests -q` — 188 passed.
+- `venv/bin/python -m pytest tests/test_source_split_layout.py -q` — 9 passed;
+  this includes validation from an independent copied Swift tree.
+- `bash swift-app/scripts/verify_layout.sh` — passed.
+- `venv/bin/python legacy-python/scripts/verify_layout.py` — passed.
+- `venv/bin/python swift-app/scripts/swift_acceptance.py --validate-only` —
+  validated 60 scenarios.
+- `git diff --check` — passed.

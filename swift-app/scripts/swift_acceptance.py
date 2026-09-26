@@ -216,18 +216,12 @@ def scenario_gate_command(repo_root: Path, test_targets: Sequence[str]) -> list[
     if marker and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", selector):
         raise ValueError(f"Scenario target has an invalid test selector: {target}")
     root = repo_root.resolve()
-    target_root = root
     try:
         target_path = (root / path_text).resolve(strict=True)
     except OSError as error:
-        workspace_swift_root = root / "swift-app"
-        try:
-            target_path = (workspace_swift_root / path_text).resolve(strict=True)
-        except OSError:
-            raise ValueError(f"Scenario target does not exist: {target}") from error
-        target_root = workspace_swift_root
+        raise ValueError(f"Scenario target does not exist: {target}") from error
     try:
-        relative = target_path.relative_to(target_root)
+        relative = target_path.relative_to(root)
     except ValueError as error:
         raise ValueError(f"Scenario target escapes repository: {target}") from error
     if not target_path.is_file():
@@ -239,11 +233,11 @@ def scenario_gate_command(repo_root: Path, test_targets: Sequence[str]) -> list[
     if len(parts) >= 2 and parts[0] == "Packages":
         if len(parts) < 4 or parts[2] != "Tests" or target_path.suffix != ".swift":
             raise ValueError(f"Swift scenario target must be an exact test source: {target}")
-        package = target_root / parts[0] / parts[1]
+        package = root / parts[0] / parts[1]
     elif parts and parts[0] == "ClickNSpeak":
         if len(parts) < 3 or parts[1] != "Tests" or target_path.suffix != ".swift":
             raise ValueError(f"Swift scenario target must be an exact test source: {target}")
-        package = target_root / "ClickNSpeak"
+        package = root / "ClickNSpeak"
     else:
         raise ValueError(f"Unsupported scenario test target: {target}")
     return [

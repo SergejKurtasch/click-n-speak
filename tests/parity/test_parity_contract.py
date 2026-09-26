@@ -628,6 +628,7 @@ def test_passed_evidence_rejects_invalid_completion_time_and_empty_result(
     [
         "Packages/CNSCore/Tests/DoesNotExist.swift",
         "tests/../../pyproject.toml",
+        "swift-app/Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift",
     ],
 )
 def test_scenario_target_rejects_missing_or_escaping_path(target: str) -> None:
@@ -641,13 +642,13 @@ def test_swift_scenario_target_uses_exact_suite_filter() -> None:
     from swift_acceptance import scenario_gate_command
 
     command = scenario_gate_command(
-        REPO_ROOT,
+        SWIFT_ROOT,
         ["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift"],
     )
 
     assert command[-2:] == ["--filter", "RuntimeTelemetryTests"]
     selected = scenario_gate_command(
-        REPO_ROOT,
+        SWIFT_ROOT,
         [
             "Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames"
         ],
@@ -713,12 +714,12 @@ def test_scenario_gate_executes_every_declared_test_target(
     monkeypatch.setattr("swift_acceptance.subprocess.run", invocation)
 
     result = run_scenario_gate(
-        name="scenario.data.python_swift_roundtrip",
+        name="scenario.data.swift_roundtrip",
         test_targets=[
-            "tests/parity/test_parity_contract.py",
             "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift",
+            "Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift",
         ],
-        repo_root=REPO_ROOT,
+        repo_root=SWIFT_ROOT,
         environment={"CNS_RESET_TCC_AFTER_BUILD": "0"},
         log_path=tmp_path / "gates" / "scenario-data.log",
     )
@@ -737,7 +738,7 @@ def test_scenario_gate_rejects_successful_process_with_zero_selected_tests(
     result = run_scenario_gate(
         name="scenario.empty",
         test_targets=["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift"],
-        repo_root=REPO_ROOT,
+        repo_root=SWIFT_ROOT,
         environment={},
         log_path=tmp_path / "scenario-empty.log",
     )
