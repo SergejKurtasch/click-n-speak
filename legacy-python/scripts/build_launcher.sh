@@ -61,8 +61,12 @@ echo "  Python installed to ${PYTHON_DIR}"
 echo "Step 3: Copying application code..."
 rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='venv' --exclude='.git' \
     --exclude='.env' --exclude='dist' --exclude='build' --exclude='.eggs' \
-    "${PROJECT_ROOT}/main.py" "${PROJECT_ROOT}/src" "${PROJECT_ROOT}/config.json" \
-    "${APP_DIR}/"
+    "${PROJECT_ROOT}/main.py" "${PROJECT_ROOT}/src" "${APP_DIR}/"
+CONFIG_SOURCE="${PROJECT_ROOT}/config.json"
+if [ ! -f "${CONFIG_SOURCE}" ]; then
+    CONFIG_SOURCE="${PROJECT_ROOT}/config.example.json"
+fi
+cp "${CONFIG_SOURCE}" "${APP_DIR}/config.json"
 echo "  App code in ${APP_DIR}"
 
 # Step 4: Install dependencies into standalone Python
@@ -141,7 +145,7 @@ echo "  site-packages size after cleanup: ${SIZE_AFTER}"
 # (set by LaunchServices when the .app is opened) is preserved through execv.
 echo "Step 5: Compiling native launcher..."
 LAUNCHER="${MACOS}/${APP_NAME}"
-LAUNCHER_SRC="$(cd "$(dirname "$0")" && pwd)/launcher.c"
+LAUNCHER_SRC="${PROJECT_ROOT}/scripts/launcher.c"
 cc -arch arm64 -O2 -o "$LAUNCHER" "$LAUNCHER_SRC"
 chmod +x "$LAUNCHER"
 echo "  Compiled native launcher: $LAUNCHER"

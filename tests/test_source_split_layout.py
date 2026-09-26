@@ -37,3 +37,24 @@ def test_legacy_resource_resolver_uses_its_root_without_sibling_app() -> None:
     assert utils.ROOT == LEGACY_ROOT
     assert utils.get_menu_icon_path() == LEGACY_ROOT / "assets" / "CnS.png"
     assert utils.get_config_path().parent == LEGACY_ROOT
+
+
+def test_root_workspace_guides_and_transitional_parity_bridge_remain_available() -> None:
+    assert (WORKSPACE_ROOT / "src/AGENTS.md").is_file()
+    assert (WORKSPACE_ROOT / "tests/AGENTS.md").is_file()
+    assert (WORKSPACE_ROOT / "scripts/parity_config_bridge.py").is_file()
+
+
+def test_legacy_launcher_has_standalone_source_and_config_fallback() -> None:
+    launcher_script = (LEGACY_ROOT / "scripts/build_launcher.sh").read_text(encoding="utf-8")
+    launcher_source = LEGACY_ROOT / "scripts/launcher.c"
+    assert launcher_source.is_file()
+    assert "launcher.c" in launcher_script
+    assert "config.example.json" in launcher_script
+    assert "config.json" in launcher_script
+
+
+def test_swift_locales_do_not_reference_legacy_python_scripts() -> None:
+    for locale in (WORKSPACE_ROOT / "locales").glob("*.json"):
+        text = locale.read_text(encoding="utf-8")
+        assert "python scripts/download_" not in text
