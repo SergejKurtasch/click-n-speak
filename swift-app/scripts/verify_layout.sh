@@ -18,8 +18,15 @@ for path in "${required_paths[@]}"; do
   fi
 done
 
+native_scan_paths=(
+  "${SWIFT_APP_ROOT}/ClickNSpeak"
+  "${SWIFT_APP_ROOT}/Packages"
+  "${SWIFT_APP_ROOT}/scripts"
+  "${SWIFT_APP_ROOT}/tests"
+)
+
 for forbidden in "../legacy-python" "venv/bin/python" "root pyproject.toml"; do
-  if rg -n --hidden --glob '!/.build/**' --glob '!/.git/**' --glob '!verify_layout.sh' "${forbidden}" "${SWIFT_APP_ROOT}/ClickNSpeak" "${SWIFT_APP_ROOT}/Packages" "${SWIFT_APP_ROOT}/scripts"; then
+  if rg -n --hidden --glob '!/.build/**' --glob '!/.git/**' --glob '!verify_layout.sh' "${forbidden}" "${native_scan_paths[@]}"; then
     echo "Forbidden Swift application reference: ${forbidden}" >&2
     exit 1
   fi

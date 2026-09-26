@@ -61,7 +61,7 @@ def test_swift_application_layout_is_self_contained() -> None:
     )
     assert all((SWIFT_ROOT / path).exists() for path in required)
 
-    native_paths = tuple(SWIFT_ROOT / path for path in ("ClickNSpeak", "Packages", "scripts"))
+    native_paths = tuple(SWIFT_ROOT / path for path in ("ClickNSpeak", "Packages"))
     native_text = "\n".join(
         file.read_text(encoding="utf-8")
         for base in native_paths
@@ -70,6 +70,9 @@ def test_swift_application_layout_is_self_contained() -> None:
     )
     assert "../legacy-python" not in native_text
     assert "venv/bin/python" not in native_text
+    layout_script = (SWIFT_ROOT / "scripts/verify_layout.sh").read_text(encoding="utf-8")
+    assert 'for forbidden in' in layout_script
+    assert 'rg -n' in layout_script
 
 
 def test_legacy_launcher_has_standalone_source_and_config_fallback() -> None:

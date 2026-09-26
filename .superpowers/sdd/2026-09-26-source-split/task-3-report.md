@@ -48,3 +48,25 @@ Swift documentation, and Swift-owned fixtures are below the same movable root.
   while the mandatory CNSCore parity test is fully Swift-owned.
 - Model-backed tests remain environment-bound and require ignored model/vendor
   artifacts.
+
+## Fix round 1
+
+Commit: `fix: align split workspace validation` (final fix-round commit)
+
+- Updated the root agent-environment validator, its contract tests, and Codex
+  allow-rules for `swift-app/` and the relocated legacy scoped guides.
+- Added `legacy-python/scripts/AGENTS.md` so every owned script tree remains
+  covered by the workspace validator.
+- Reconciled the layout test with the policy scanner: the scanner itself is
+  excluded from runtime-text assertions, while the test asserts that the
+  scanner still contains its forbidden-reference policy and `rg` enforcement.
+- Expanded `verify_layout.sh` to scan `swift-app/tests` in addition to native
+  source, packages, and scripts; docs/design remain outside the runtime scan.
+
+Validation for fix round 1:
+
+- Initial RED: `tests/test_source_split_layout.py tests/test_agent_environment.py`
+  reported 2 failures (scanner self-match and stale root AGENTS paths).
+- `venv/bin/python -m pytest tests/test_source_split_layout.py tests/test_agent_environment.py -q` — 26 passed.
+- `bash swift-app/scripts/verify_layout.sh` — PASS.
+- `swift test --disable-index-store --package-path swift-app/Packages/CNSCore --filter ParityDataCompatibilityTests` — PASS, 2 tests.
