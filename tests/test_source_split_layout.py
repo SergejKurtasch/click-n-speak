@@ -62,6 +62,19 @@ def test_root_has_no_application_sources_or_runtime_resources() -> None:
         "requirements.txt",
         "setup.py",
         "config.example.json",
+        "spikes",
+        "add_locales.py",
+        "add_stats_locales.py",
+        "add_undo_locales.py",
+        "debug.swift",
+        "extract_gen.py",
+        "fix2.py",
+        "replace_func.py",
+        "revert_stats_test.py",
+        "test_cnsui.swift",
+        "test_print.py",
+        "patch_audio_recorder_debug.txt",
+        "walkthrough.md",
     )
     assert all(not (WORKSPACE_ROOT / path).exists() for path in forbidden)
 
@@ -172,6 +185,15 @@ def test_each_application_verifies_from_an_independent_copy(tmp_path: Path) -> N
         check=False,
     )
     assert swift_result.returncode == 0, swift_result.stderr
+
+    acceptance_result = subprocess.run(
+        [sys.executable, "scripts/swift_acceptance.py", "--validate-only"],
+        cwd=swift_copy,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert acceptance_result.returncode == 0, acceptance_result.stderr
 
     legacy_result = subprocess.run(
         [sys.executable, "scripts/verify_layout.py"],

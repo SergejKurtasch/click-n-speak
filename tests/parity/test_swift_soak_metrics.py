@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+SWIFT_ROOT = REPO_ROOT / "swift-app"
+sys.path.insert(0, str(SWIFT_ROOT / "scripts"))
 
 from analyze_swift_soak import delay_after_stop_ms, main, parse_runtime_events, summarize  # noqa: E402
 from compare_swift_parity_metrics import evaluate  # noqa: E402

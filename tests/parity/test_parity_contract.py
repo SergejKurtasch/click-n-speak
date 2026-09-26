@@ -14,8 +14,10 @@ from unittest.mock import Mock
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = REPO_ROOT / "scripts"
+SWIFT_ROOT = REPO_ROOT / "swift-app"
+SCRIPTS = SWIFT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(1, str(REPO_ROOT / "scripts"))
 
 from analyze_swift_soak import parse_runtime_events, summarize  # noqa: E402
 from compare_swift_parity_metrics import evaluate  # noqa: E402
@@ -156,7 +158,10 @@ def test_original_eleven_audit_probes_are_permanent_selected_tests() -> None:
     assert expected <= selected
     for target in expected:
         source, test_name = target.split("#", 1)
-        assert f"func {test_name}(" in (REPO_ROOT / source).read_text(encoding="utf-8")
+        source_path = REPO_ROOT / source
+        if not source_path.exists():
+            source_path = SWIFT_ROOT / source
+        assert f"func {test_name}(" in source_path.read_text(encoding="utf-8")
 
 
 def test_python_migrates_every_supported_schema_without_unknown_key_loss() -> None:
@@ -431,7 +436,7 @@ def test_stt_model_gate_accepts_an_explicitly_identified_model_before_corpus_val
     model.write_bytes(b"synthetic model path")
     missing_corpus = tmp_path / "missing-corpus"
     completed = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts/swift_verify_stt_model.sh")],
+        ["bash", str(SWIFT_ROOT / "scripts/swift_verify_stt_model.sh")],
         env={
             "PATH": "/usr/bin:/bin",
             "CNS_WHISPER_MODEL": str(model),
@@ -451,7 +456,7 @@ def test_stt_model_gate_requires_an_explicit_id_for_an_unknown_filename(tmp_path
     model = tmp_path / "ggml-model.bin"
     model.write_bytes(b"synthetic model path")
     completed = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts/swift_verify_stt_model.sh")],
+        ["bash", str(SWIFT_ROOT / "scripts/swift_verify_stt_model.sh")],
         env={"PATH": "/usr/bin:/bin", "CNS_WHISPER_MODEL": str(model)},
         check=False,
         capture_output=True,

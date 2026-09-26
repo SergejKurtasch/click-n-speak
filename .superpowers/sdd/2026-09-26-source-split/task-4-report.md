@@ -43,3 +43,31 @@ temporary directory before invoking that command.
 The two failing legacy watchdog tests and the Swift verification failure are
 environment-bound permission issues; no application assertion failed in the
 Task 4 checks.
+
+## Fix round 1
+
+- Repointed root parity tests to Swift-owned tooling under `swift-app/scripts`
+  while retaining the root parity bridge as explicit workspace automation.
+- Made `swift_acceptance.py` resolve Swift targets from either an independent
+  Swift root or the workspace root's `swift-app/` tree. The copied Swift
+  manifest now contains only local Swift test and fixture targets.
+- Routed root developer/debug files into `swift-app/scripts/dev`, historical
+  notes into `swift-app/docs/archive` and `swift-app/docs/migration`, and
+  retained experiments under `swift-app/spikes`.
+- Added root layout assertions preventing those application files from
+  returning to the workspace root.
+- Made the config validator test use the active interpreter when a worktree
+  does not contain a local virtualenv.
+
+### Fix validation
+
+- `venv/bin/python -m pytest tests -q` — 187 passed.
+- `venv/bin/python -m pytest tests/test_source_split_layout.py tests/test_agent_environment.py -q` — 28 passed.
+- `bash swift-app/scripts/verify_layout.sh` — passed.
+- `venv/bin/python legacy-python/scripts/verify_layout.py` — passed.
+- `venv/bin/python swift-app/scripts/swift_acceptance.py --validate-only` —
+  validated 60 scenarios.
+- `git diff --check` — passed.
+
+Swift compilation remains environment-bound by the existing sandbox restriction
+on `/Users/sergej/.cache/clang/ModuleCache`; no Swift build was claimed here.
