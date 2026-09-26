@@ -63,7 +63,14 @@ Commit message: `docs: define Swift and legacy source split`
 **Files:**
 - Move: `main.py`, `src/`, Python application tests, `pyproject.toml`,
   `requirements.txt`, `setup.py`, `config.example.json`
-- Move: legacy scripts from `scripts/`
+- Move: `scripts/build.sh`, `scripts/build_launcher.sh`, `scripts/install.sh`,
+  `scripts/make_dmg.sh`, `scripts/make_icons.sh`, `scripts/launcher_py2app.c`,
+  `scripts/requirements_app.txt`, `scripts/numba_stub/`,
+  `scripts/download_ai_model.py`, `scripts/download_whisper_model.py`,
+  `scripts/clean_corrections.py`, `scripts/print_metrics.py`,
+  `scripts/term_effectiveness.py`, `scripts/parity_config_bridge.py`,
+  `scripts/analyze_runtime_log.py`, `scripts/convert_icons.py`,
+  `scripts/convert_icons_template.py`, and `scripts/dev/`
 - Copy: `assets/`, `locales/`, `design/`, relevant historical `docs/`
 - Create: `tests/test_source_split_layout.py`
 
@@ -89,6 +96,11 @@ Expected: FAIL because the folder and resolver do not yet exist.
 Use `git mv` for the Python-owned files. Update Python root/resource lookup,
 test bootstrap, and py2app scripts to derive paths from `legacy-python/`.
 Copy rather than link runtime assets, locales, design history, and docs.
+Keep the root copies of shared resources and Swift-owned scripts for Task 3.
+Do not move `tests/parity/`, `test_agent_environment.py`,
+`test_audit_codex_sessions.py`, `test_audit_codex_sources.py`,
+`test_check_dev_environment.py`, `test_compare_codex_profiles.py`,
+`test_validate_codex_config.py`, or `test_swift_permission_reset_script.py`.
 
 - [ ] **Step 4: Run focused and full legacy checks**
 

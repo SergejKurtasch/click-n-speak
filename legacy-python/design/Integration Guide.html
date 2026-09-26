@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Claude Design → Claude Code: Инструкция интеграции иконок</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f0f10;
+    --surface: #1a1a1d;
+    --surface2: #232327;
+    --border: #2e2e34;
+    --accent: #7c6dfa;
+    --accent2: #3ecf8e;
+    --accent3: #f5a623;
+    --text: #e8e8ed;
+    --muted: #8888a0;
+    --code-bg: #141418;
+  }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 0 0 80px;
+  }
+
+  /* ── HERO ── */
+  .hero {
+    background: linear-gradient(135deg, #1a1030 0%, #0f1a28 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 52px 48px 44px;
+  }
+  .hero-tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: rgba(124,109,250,.12);
+    border: 1px solid rgba(124,109,250,.3);
+    border-radius: 4px;
+    padding: 3px 10px;
+    margin-bottom: 16px;
+  }
+  .hero h1 { font-size: 32px; font-weight: 700; line-height: 1.2; margin-bottom: 12px; }
+  .hero h1 span { color: var(--accent); }
+  .hero p { color: var(--muted); font-size: 15px; max-width: 580px; }
+
+  /* ── LAYOUT ── */
+  .content { max-width: 860px; margin: 0 auto; padding: 0 40px; }
+
+  /* ── SECTION ── */
+  .section { margin-top: 56px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 24px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .step-badge {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; flex-shrink: 0;
+    background: var(--accent);
+    color: #fff;
+  }
+  .step-badge.green { background: var(--accent2); }
+  .step-badge.orange { background: var(--accent3); }
+  .step-badge.purple { background: #b06ef5; }
+  .section-header h2 { font-size: 20px; font-weight: 600; }
+  .section-header .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+  /* ── CARDS ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+  }
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    margin-bottom: 10px;
+  }
+
+  /* ── FILE TREE ── */
+  .tree {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    line-height: 1.9;
+  }
+  .tree .dir { color: #7eb8f7; }
+  .tree .file { color: #b8d7a3; }
+  .tree .new { color: var(--accent2); }
+  .tree .new::after {
+    content: ' ← СЮДА';
+    font-size: 11px;
+    color: var(--accent2);
+    opacity: 0.7;
+  }
+  .tree .dim { color: var(--muted); }
+
+  /* ── CODE BLOCK ── */
+  .code-wrap {
+    position: relative;
+    margin: 12px 0;
+  }
+  .code-label {
+    position: absolute;
+    top: 10px; right: 12px;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--muted);
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    overflow-x: auto;
+  }
+  .kw { color: #c792ea; }
+  .fn { color: #82aaff; }
+  .st { color: #c3e88d; }
+  .cm { color: #546e7a; font-style: italic; }
+  .num { color: #f78c6c; }
+  .var { color: #ffcb6b; }
+
+  /* ── INLINE CODE ── */
+  code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--accent2);
+  }
+
+  /* ── ALERT BOX ── */
+  .alert {
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-size: 14px;
+    margin: 16px 0;
+    border-left: 3px solid;
+    display: flex;
+    gap: 10px;
+  }
+  .alert.info { background: rgba(124,109,250,.08); border-color: var(--accent); color: #c4c0f5; }
+  .alert.success { background: rgba(62,207,142,.08); border-color: var(--accent2); color: #a7e9cc; }
+  .alert.warning { background: rgba(245,166,35,.08); border-color: var(--accent3); color: #f5d08a; }
+  .alert-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+
+  /* ── MAP TABLE ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+  }
+  th {
+    text-align: left;
+    padding: 10px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 11px 14px;
+    border-bottom: 1px solid #1e1e24;
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  td:first-child { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #a8d8ff; }
+  td:nth-child(2) { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent2); }
+  td:last-child { color: var(--muted); }
+
+  /* ── DIVIDER ── */
+  hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
+
+  /* ── CHECKLIST ── */
+  .checklist { list-style: none; }
+  .checklist li {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 8px 0;
+    font-size: 14.5px;
+    border-bottom: 1px solid #1a1a1f;
+  }
+  .checklist li:last-child { border-bottom: none; }
+  .check { color: var(--accent2); font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+
+  /* ── TERMINAL ── */
+  .terminal {
+    background: #0a0a0b;
+    border: 1px solid #2a2a30;
+    border-radius: 8px;
+    padding: 16px 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  .terminal .prompt { color: var(--accent2); }
+  .terminal .cmd { color: var(--text); }
+  .terminal .out { color: var(--muted); }
+
+  /* ── FLOW DIAGRAM ── */
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: wrap;
+    margin: 20px 0;
+  }
+  .flow-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 18px;
+    font-size: 13px;
+    text-align: center;
+    min-width: 130px;
+  }
+  .flow-box .label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  .flow-box .val { font-weight: 600; color: var(--text); }
+  .flow-arrow { color: var(--border); font-size: 20px; padding: 0 10px; }
+
+  .footer {
+    margin-top: 64px;
+    padding: 24px 40px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="hero-tag">Click-n-Speak · Integration Guide</div>
+  <h1>Как перенести иконки из<br><span>Claude Design</span> в Claude Code</h1>
+  <p>Пошаговый план для интеграции SVG-иконок (menubar + меню) в Python/rumps macOS-приложение.</p>
+</div>
+
+<div class="content">
+
+  <!-- STEP 0: OVERVIEW -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge" style="background:#444">→</div>
+      <div>
+        <h2>Что было сделано в Claude Design</h2>
+        <div class="sub">Обзор созданных ассетов и их назначение</div>
+      </div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-box"><div class="label">Menubar иконки</div><div class="val">idle / recording / processing</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box"><div class="label">Используется в</div><div class="val">self.icon =</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box"><div class="label">Файл</div><div class="val">menu_bar.py</div></div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-box"><div class="label">Menu иконки (16шт)</div><div class="val">languages / model / etc</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box"><div class="label">Используется в</div><div class="val">rumps.MenuItem(icon=)</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box"><div class="label">Файл</div><div class="val">menu_bar.py → setup_menu()</div></div>
+    </div>
+
+    <div class="alert warning">
+      <span class="alert-icon">⚠️</span>
+      <span><strong>Важно:</strong> <code>rumps</code> принимает только <strong>PNG</strong>-файлы для иконок. SVG нужно конвертировать. Я покажу как это сделать одной командой.</span>
+    </div>
+  </div>
+
+  <!-- STEP 1: DOWNLOAD -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge">1</div>
+      <div>
+        <h2>Скачай ассеты из Claude Design</h2>
+        <div class="sub">Нажми кнопку Download в правом верхнем углу Claude Design</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Что скачать</div>
+      <div class="tree">
+        <span class="dim">Скачай весь проект как ZIP → распакуй → нужны только:</span><br><br>
+        <span class="dir">icons/</span><br>
+        <span class="dir">├── menubar/</span><br>
+        <span class="file">│   ├── idle.svg</span><br>
+        <span class="file">│   ├── recording.svg</span><br>
+        <span class="file">│   └── processing.svg</span><br>
+        <span class="dir">└── menu/</span><br>
+        <span class="file">    ├── accessibility-ok.svg</span><br>
+        <span class="file">    ├── accessibility-warn.svg</span><br>
+        <span class="file">    ├── advanced.svg</span><br>
+        <span class="file">    ├── ai-editor.svg</span><br>
+        <span class="file">    ├── check-permissions.svg</span><br>
+        <span class="file">    ├── check-updates.svg</span><br>
+        <span class="file">    ├── copy-phrase.svg</span><br>
+        <span class="file">    ├── download-model.svg</span><br>
+        <span class="file">    ├── initial-prompt.svg</span><br>
+        <span class="file">    ├── input-monitoring.svg</span><br>
+        <span class="file">    ├── languages.svg</span><br>
+        <span class="file">    ├── last-phrases.svg</span><br>
+        <span class="file">    ├── launch-at-login.svg</span><br>
+        <span class="file">    ├── model.svg</span><br>
+        <span class="file">    ├── restart.svg</span><br>
+        <span class="file">    └── transcribe-file.svg</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 2: COPY -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge green">2</div>
+      <div>
+        <h2>Скопируй в свой проект</h2>
+        <div class="sub">Папка assets/ в корне Click-n-speak</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Итоговая структура проекта</div>
+      <div class="tree">
+        <span class="dir">Click-n-speak/</span><br>
+        <span class="dir">├── assets/</span><br>
+        <span class="file">│   ├── CnS.png</span>  <span class="dim">← старая иконка (оставь как fallback)</span><br>
+        <span class="new">│   ├── icons/</span><br>
+        <span class="new">│   │   ├── menubar/</span><br>
+        <span class="new">│   │   │   ├── idle.svg</span><br>
+        <span class="new">│   │   │   ├── recording.svg</span><br>
+        <span class="new">│   │   │   └── processing.svg</span><br>
+        <span class="new">│   │   └── menu/</span><br>
+        <span class="new">│   │       ├── languages.svg</span><br>
+        <span class="new">│   │       ├── model.svg</span><br>
+        <span class="new">│   │       └── ... (все остальные)</span><br>
+        <span class="dir">├── src/</span><br>
+        <span class="file">│   ├── menu_bar.py</span><br>
+        <span class="file">│   └── utils.py</span>
+      </div>
+    </div>
+
+    <div class="terminal">
+      <span class="prompt">$</span> <span class="cmd">cd Click-n-speak</span><br>
+      <span class="prompt">$</span> <span class="cmd">mkdir -p assets/icons/menubar assets/icons/menu</span><br>
+      <span class="prompt">$</span> <span class="cmd">cp ~/Downloads/claude-design/icons/menubar/*.svg assets/icons/menubar/</span><br>
+      <span class="prompt">$</span> <span class="cmd">cp ~/Downloads/claude-design/icons/menu/*.svg assets/icons/menu/</span>
+    </div>
+  </div>
+
+  <!-- STEP 3: CONVERT SVG → PNG -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge orange">3</div>
+      <div>
+        <h2>Конвертируй SVG → PNG</h2>
+        <div class="sub">rumps принимает только PNG. Используем встроенный macOS инструмент.</div>
+      </div>
+    </div>
+
+    <div class="alert info">
+      <span class="alert-icon">💡</span>
+      <span>На macOS есть встроенный <code>rsvg-convert</code> или <code>qlmanage</code>. Проще всего использовать <strong>Homebrew + librsvg</strong> или Python с <strong>cairosvg</strong>.</span>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Вариант A — Скрипт Python (уже есть venv в проекте)</div>
+      <div class="code-wrap">
+        <span class="code-label">scripts/convert_icons.py</span>
+        <pre><span class="cm">#!/usr/bin/env python3
+"""Конвертирует все SVG иконки в PNG для rumps.
+Запуск: python scripts/convert_icons.py
+"""</span>
+<span class="kw">import</span> subprocess, sys
+<span class="kw">from</span> pathlib <span class="kw">import</span> Path
+
+<span class="cm"># Установи cairosvg если нет:
+# pip install cairosvg</span>
+<span class="kw">try</span>:
+    <span class="kw">import</span> cairosvg
+<span class="kw">except</span> ImportError:
+    subprocess.run([sys.executable, <span class="st">"-m"</span>, <span class="st">"pip"</span>, <span class="st">"install"</span>, <span class="st">"cairosvg"</span>])
+    <span class="kw">import</span> cairosvg
+
+ROOT = Path(__file__).parent.parent / <span class="st">"assets"</span> / <span class="st">"icons"</span>
+
+<span class="cm"># Menubar иконки — 22×22 px (retina = 44×44 логически @2x)</span>
+<span class="kw">for</span> svg <span class="kw">in</span> (ROOT / <span class="st">"menubar"</span>).glob(<span class="st">"*.svg"</span>):
+    out = svg.with_suffix(<span class="st">".png"</span>)
+    cairosvg.svg2png(url=str(svg), write_to=str(out), output_width=<span class="num">44</span>, output_height=<span class="num">44</span>)
+    print(<span class="st">f"✓ menubar/{svg.name} → {out.name}"</span>)
+
+<span class="cm"># Menu иконки — 16×16 px</span>
+<span class="kw">for</span> svg <span class="kw">in</span> (ROOT / <span class="st">"menu"</span>).glob(<span class="st">"*.svg"</span>):
+    out = svg.with_suffix(<span class="st">".png"</span>)
+    cairosvg.svg2png(url=str(svg), write_to=str(out), output_width=<span class="num">32</span>, output_height=<span class="num">32</span>)
+    print(<span class="st">f"✓ menu/{svg.name} → {out.name}"</span>)
+
+print(<span class="st">"Готово!"</span>)</pre>
+      </div>
+    </div>
+
+    <div class="terminal">
+      <span class="prompt">$</span> <span class="cmd">python scripts/convert_icons.py</span><br>
+      <span class="out">✓ menubar/idle.svg → idle.png</span><br>
+      <span class="out">✓ menubar/recording.svg → recording.png</span><br>
+      <span class="out">✓ menubar/processing.svg → processing.png</span><br>
+      <span class="out">✓ menu/languages.svg → languages.png</span><br>
+      <span class="out">... (16 файлов)</span><br>
+      <span class="out">Готово!</span>
+    </div>
+  </div>
+
+  <!-- STEP 4: utils.py -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge purple">4</div>
+      <div>
+        <h2>Обнови <code>utils.py</code></h2>
+        <div class="sub">Добавь функции для получения путей к новым иконкам</div>
+      </div>
+    </div>
+
+    <div class="code-wrap">
+      <span class="code-label">src/utils.py — добавить после get_menu_icon_path()</span>
+      <pre><span class="kw">def</span> <span class="fn">get_menubar_icon_path</span>(state: str = <span class="st">"idle"</span>) -> Path:
+    <span class="st">"""Возвращает путь к PNG иконке для menu bar.
+    state: 'idle' | 'recording' | 'processing'
+    """</span>
+    app_bundle = _get_app_bundle()
+    <span class="kw">if</span> app_bundle:
+        p = Path(app_bundle) / <span class="st">"Contents"</span> / <span class="st">"Resources"</span> / <span class="st">"icons"</span> / <span class="st">"menubar"</span> / <span class="st">f"{state}.png"</span>
+        <span class="kw">if</span> p.exists():
+            <span class="kw">return</span> p
+    <span class="cm"># Dev mode fallback</span>
+    p = ROOT / <span class="st">"assets"</span> / <span class="st">"icons"</span> / <span class="st">"menubar"</span> / <span class="st">f"{state}.png"</span>
+    <span class="kw">if</span> p.exists():
+        <span class="kw">return</span> p
+    <span class="cm"># Fallback к старой иконке</span>
+    <span class="kw">return</span> get_menu_icon_path()
+
+
+<span class="kw">def</span> <span class="fn">get_menu_item_icon_path</span>(name: str) -> Path | <span class="kw">None</span>:
+    <span class="st">"""Возвращает путь к PNG иконке пункта меню (или None если не найдена).
+    Пример: get_menu_item_icon_path('languages') → assets/icons/menu/languages.png
+    """</span>
+    app_bundle = _get_app_bundle()
+    <span class="kw">if</span> app_bundle:
+        p = Path(app_bundle) / <span class="st">"Contents"</span> / <span class="st">"Resources"</span> / <span class="st">"icons"</span> / <span class="st">"menu"</span> / <span class="st">f"{name}.png"</span>
+        <span class="kw">if</span> p.exists():
+            <span class="kw">return</span> p
+    p = ROOT / <span class="st">"assets"</span> / <span class="st">"icons"</span> / <span class="st">"menu"</span> / <span class="st">f"{name}.png"</span>
+    <span class="kw">return</span> p <span class="kw">if</span> p.exists() <span class="kw">else</span> <span class="kw">None</span></pre>
+    </div>
+  </div>
+
+  <!-- STEP 5: menu_bar.py -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge" style="background:#e05c7a">5</div>
+      <div>
+        <h2>Обнови <code>menu_bar.py</code></h2>
+        <div class="sub">Динамическая смена иконки menubar + иконки на пунктах меню</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">5а — Импорт новых функций (вверху файла)</div>
+      <div class="code-wrap">
+        <pre><span class="kw">from</span> .utils <span class="kw">import</span> (
+    ...
+    get_menu_icon_path,
+    <span class="var">get_menubar_icon_path</span>,   <span class="cm"># ← добавить</span>
+    <span class="var">get_menu_item_icon_path</span>, <span class="cm"># ← добавить</span>
+    ...
+)</pre>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">5б — Динамическая смена иконки menubar (idle / recording / processing)</div>
+      <div class="code-wrap">
+        <pre><span class="cm"># В классе ClickNSpeakApp добавь метод:</span>
+
+<span class="kw">def</span> <span class="fn">set_menubar_state</span>(self, state: str) -> <span class="kw">None</span>:
+    <span class="st">"""Меняет иконку в menu bar. state: 'idle'|'recording'|'processing'"""</span>
+    icon = get_menubar_icon_path(state)
+    self.icon = str(icon)
+
+<span class="cm"># Вызывай из app.py в нужных местах:</span>
+<span class="cm"># self.menu_bar_app.set_menubar_state("recording")</span>
+<span class="cm"># self.menu_bar_app.set_menubar_state("processing")</span>
+<span class="cm"># self.menu_bar_app.set_menubar_state("idle")</span></pre>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">5в — Иконки на пунктах меню в setup_menu()</div>
+      <div class="code-wrap">
+        <pre><span class="kw">def</span> <span class="fn">_icon</span>(name: str) -> dict:
+    <span class="st">"""Хелпер: возвращает kwargs с icon= если файл найден."""</span>
+    p = get_menu_item_icon_path(name)
+    <span class="kw">return</span> {<span class="st">"icon"</span>: str(p), <span class="st">"dimensions"</span>: [<span class="num">16</span>, <span class="num">16</span>]} <span class="kw">if</span> p <span class="kw">else</span> {}
+
+<span class="cm"># Затем в setup_menu() замени строки вида:</span>
+<span class="cm"># rumps.MenuItem("🌐 Languages") 
+# на:
+# rumps.MenuItem("Languages", **_icon("languages"))</span>
+
+<span class="cm"># Полная таблица замен ниже ↓</span></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ICON MAP TABLE -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge" style="background:#444">📋</div>
+      <div>
+        <h2>Таблица: эмодзи → иконка файл</h2>
+        <div class="sub">Что на что заменять в setup_menu()</div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+      <table>
+        <thead>
+          <tr>
+            <th>Было (emoji)</th>
+            <th>Файл иконки</th>
+            <th>Пункт меню</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>✅ / ⚠️ Accessibility</td><td>accessibility-ok.png / accessibility-warn.png</td><td>_accessibility_item</td></tr>
+          <tr><td>⌨️ Input Monitoring</td><td>input-monitoring.png</td><td>_input_monitoring_item</td></tr>
+          <tr><td>🔐 Check Permissions</td><td>check-permissions.png</td><td>Check Permissions</td></tr>
+          <tr><td>(без иконки) Model</td><td>model.png</td><td>Model submenu</td></tr>
+          <tr><td>🌐 Languages</td><td>languages.png</td><td>Languages submenu</td></tr>
+          <tr><td>✦ AI Editor</td><td>ai-editor.png</td><td>AI Editor toggle</td></tr>
+          <tr><td>↳ Download AI Model</td><td>download-model.png</td><td>Download AI Editor Model</td></tr>
+          <tr><td>📝 Initial Prompt</td><td>initial-prompt.png</td><td>Initial Prompt submenu</td></tr>
+          <tr><td>Last Phrases</td><td>last-phrases.png</td><td>Last Phrases submenu</td></tr>
+          <tr><td>📋 copy phrase</td><td>copy-phrase.png</td><td>фразы в истории</td></tr>
+          <tr><td>🎵 Transcribe Audio</td><td>transcribe-file.png</td><td>Transcribe Audio File</td></tr>
+          <tr><td>🔄 Check for Updates</td><td>check-updates.png</td><td>Check for Updates</td></tr>
+          <tr><td>🚀 Launch at Login</td><td>launch-at-login.png</td><td>Launch at Login</td></tr>
+          <tr><td>⚙️ Advanced</td><td>advanced.png</td><td>Advanced submenu</td></tr>
+          <tr><td>🔁 Restart</td><td>restart.png</td><td>Restart</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- STEP 6: BUILD -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge green">6</div>
+      <div>
+        <h2>Добавь иконки в сборку (.app bundle)</h2>
+        <div class="sub">Чтобы иконки попали в .app при py2app</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">В setup.py или build script — добавь в data_files</div>
+      <div class="code-wrap">
+        <pre><span class="cm"># setup.py</span>
+DATA_FILES = [
+    ...,
+    (<span class="st">"icons/menubar"</span>, glob(<span class="st">"assets/icons/menubar/*.png"</span>)),
+    (<span class="st">"icons/menu"</span>,    glob(<span class="st">"assets/icons/menu/*.png"</span>)),
+]</pre>
+      </div>
+    </div>
+
+    <div class="alert success">
+      <span class="alert-icon">✅</span>
+      <span>После этого <code>get_menubar_icon_path()</code> и <code>get_menu_item_icon_path()</code> автоматически найдут иконки как в dev-режиме, так и в собранном .app.</span>
+    </div>
+  </div>
+
+  <!-- SUMMARY CHECKLIST -->
+  <div class="section">
+    <div class="section-header">
+      <div class="step-badge" style="background:#444">✓</div>
+      <div><h2>Итоговый чеклист</h2></div>
+    </div>
+
+    <div class="card">
+      <ul class="checklist">
+        <li><span class="check">□</span> Скачать ZIP из Claude Design</li>
+        <li><span class="check">□</span> Скопировать <code>icons/</code> → <code>assets/icons/</code></li>
+        <li><span class="check">□</span> Запустить <code>python scripts/convert_icons.py</code> (SVG → PNG)</li>
+        <li><span class="check">□</span> Добавить <code>get_menubar_icon_path()</code> и <code>get_menu_item_icon_path()</code> в <code>utils.py</code></li>
+        <li><span class="check">□</span> Добавить <code>set_menubar_state()</code> в <code>ClickNSpeakApp</code></li>
+        <li><span class="check">□</span> Заменить emoji на иконки в <code>setup_menu()</code> (по таблице выше)</li>
+        <li><span class="check">□</span> Вызывать <code>set_menubar_state()</code> при смене состояния (idle/recording/processing)</li>
+        <li><span class="check">□</span> Добавить <code>data_files</code> в setup.py для сборки</li>
+        <li><span class="check">□</span> Протестировать в dev-режиме: <code>python -m src.app</code></li>
+        <li><span class="check">□</span> Собрать .app и проверить иконки в bundle</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">
+  Click-n-Speak · Integration Guide · Сгенерировано в Claude Design
+</div>
+
+</body>
+</html>

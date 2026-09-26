@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  
+  <rect width="1024" height="1024" rx="230" fill="#111111"></rect>
+
+  
+  <rect width="1024" height="1024" rx="230" fill="url(#grad)" opacity="0.4"></rect>
+
+  <defs>
+    <radialGradient id="grad" cx="35%" cy="28%" r="70%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.12"></stop>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"></stop>
+    </radialGradient>
+  </defs>
+
+  
+  <rect x="390" y="180" width="244" height="380" rx="122" fill="white"></rect>
+
+  
+  <path d="M220 470C220 650 356 780 512 780s292-130 292-310" stroke="white" stroke-width="44" stroke-linecap="round" fill="none"></path>
+
+  
+  <line x1="512" y1="780" x2="512" y2="870" stroke="white" stroke-width="44" stroke-linecap="round"></line>
+  
+  <line x1="340" y1="870" x2="684" y2="870" stroke="white" stroke-width="44" stroke-linecap="round"></line>
+
+  
+  <path d="M766 300C820 360 820 664 766 724" stroke="white" stroke-width="36" stroke-linecap="round" fill="none" opacity="0.88"></path>
+
+  
+  <path d="M836 230C920 320 920 704 836 794" stroke="white" stroke-width="28" stroke-linecap="round" fill="none" opacity="0.38"></path>
+
+  
+  
+</svg>
