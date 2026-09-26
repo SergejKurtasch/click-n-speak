@@ -25,19 +25,16 @@ for the staged migration contract.
 - Never commit secrets, `.env`, runtime transcripts, prompts, clipboard data,
   model artifacts, or user configuration.
 
-## Canonical verification commands
+## Workspace verification
 
-Python commands use the repository virtual environment directly; do not wrap
-Swift commands in `source venv/bin/activate`.
+The repository-contract check runs from the workspace root:
 
 ```bash
-venv/bin/python -m pytest <test-path> -q
-swift test --disable-index-store --package-path Packages/<Package>
-swift test --disable-index-store --package-path ClickNSpeak
-bash scripts/swift_verify.sh
-bash scripts/swift_build_app.sh release
+venv/bin/python -m pytest tests/test_agent_environment.py -q
 ```
 
-Scoped guides define commands relative to their application roots. Root CI and
+Application build and test commands are intentionally documented in the
+scoped guides and run from their owning roots: [`swift-app/AGENTS.md`](swift-app/AGENTS.md)
+and [`legacy-python/AGENTS.md`](legacy-python/AGENTS.md). Root automation and
 source-split checks are workspace concerns; application behavior belongs in
 the owning tree.

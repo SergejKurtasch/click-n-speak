@@ -43,18 +43,18 @@ cross-directory repository-path lookup.
 
 **Interfaces:**
 - Produces the directory ownership contract used by every later task.
-- [ ] **Step 1: Create the documentation contract**
+- [x] **Step 1: Create the documentation contract**
 
 Make the root a thin workspace map. State that `swift-app/` is production and
 `legacy-python/` is frozen/rollback-only. Do not create a legal license file.
 
-- [ ] **Step 2: Run documentation and repository-contract checks**
+- [x] **Step 2: Run documentation and repository-contract checks**
 
 Run: `venv/bin/python -m pytest tests/test_agent_environment.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Commit message: `docs: define Swift and legacy source split`
 

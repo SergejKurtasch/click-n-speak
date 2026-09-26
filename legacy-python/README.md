@@ -13,8 +13,16 @@ resources from `swift-app/`.
 
 ## Development
 
-Run Python commands from this directory with the repository virtual
-environment. Focused legacy checks use:
+Create an environment owned by this application tree, install its dependencies,
+then run commands from `legacy-python/`:
+
+```bash
+cd legacy-python
+python3.11 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
+```
+
+Focused legacy checks use:
 
 ```bash
 venv/bin/python -m pytest tests -q
