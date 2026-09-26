@@ -74,6 +74,9 @@ training2.md
 *.xcodeproj
 dist/swift/
 
+# Agent worktrees
+.worktrees/
+
 # STT bake-off spike artifacts
 spikes/stt-bakeoff/models/
 spikes/stt-bakeoff/whisperkit-src/
