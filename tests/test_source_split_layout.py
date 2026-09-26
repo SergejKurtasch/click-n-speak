@@ -45,9 +45,25 @@ def test_legacy_resource_resolver_uses_its_root_without_sibling_app() -> None:
 
 
 def test_root_workspace_guides_and_transitional_parity_bridge_remain_available() -> None:
-    assert (WORKSPACE_ROOT / "src/AGENTS.md").is_file()
+    assert not (WORKSPACE_ROOT / "src").exists()
     assert (WORKSPACE_ROOT / "tests/AGENTS.md").is_file()
     assert (WORKSPACE_ROOT / "scripts/parity_config_bridge.py").is_file()
+
+
+def test_root_has_no_application_sources_or_runtime_resources() -> None:
+    forbidden = (
+        "main.py",
+        "ClickNSpeak",
+        "Packages",
+        "assets",
+        "locales",
+        "design",
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "config.example.json",
+    )
+    assert all(not (WORKSPACE_ROOT / path).exists() for path in forbidden)
 
 
 def test_swift_application_layout_is_self_contained() -> None:
@@ -124,3 +140,44 @@ def test_swift_locales_do_not_reference_legacy_python_scripts() -> None:
     for locale in (SWIFT_ROOT / "locales").glob("*.json"):
         text = locale.read_text(encoding="utf-8")
         assert "python scripts/download_" not in text
+
+
+def _copy_application_tree(source: Path, destination: Path) -> None:
+    ignored = shutil.ignore_patterns(
+        ".build",
+        ".git",
+        "venv",
+        ".venv",
+        "dist",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "*.pyc",
+    )
+    shutil.copytree(source, destination, ignore=ignored)
+
+
+def test_each_application_verifies_from_an_independent_copy(tmp_path: Path) -> None:
+    swift_copy = tmp_path / "swift-app"
+    legacy_copy = tmp_path / "legacy-python"
+    _copy_application_tree(SWIFT_ROOT, swift_copy)
+    _copy_application_tree(LEGACY_ROOT, legacy_copy)
+
+    swift_result = subprocess.run(
+        ["bash", "scripts/verify_layout.sh"],
+        cwd=swift_copy,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert swift_result.returncode == 0, swift_result.stderr
+
+    legacy_result = subprocess.run(
+        [sys.executable, "scripts/verify_layout.py"],
+        cwd=legacy_copy,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert legacy_result.returncode == 0, legacy_result.stderr

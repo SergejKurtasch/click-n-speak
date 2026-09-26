@@ -173,25 +173,25 @@ Commit message: `refactor: isolate Swift production application`
 - Consumes both self-contained trees.
 - Produces a thin workspace root and reproducible independent verification.
 
-- [ ] **Step 1: Write failing relocation checks**
+- [x] **Step 1: Write failing relocation checks**
 
 Extend the layout check to copy each application tree to a temporary
 directory and assert that its focused verification command finds no sibling
 path.
 
-- [ ] **Step 2: Run the checks and verify failure**
+- [x] **Step 2: Run the checks and verify failure**
 
 Run: `venv/bin/python -m pytest tests/test_source_split_layout.py -q`
 
 Expected: FAIL until CI and residual paths are updated.
 
-- [ ] **Step 3: Complete CI and historical snapshots**
+- [x] **Step 3: Complete CI and historical snapshots**
 
 Make root CI delegate to independent app commands. Ensure copied docs clearly
 label legacy material as a frozen snapshot. Retain no application source or
 runtime assets at root; the workspace layout check remains root automation.
 
-- [ ] **Step 4: Run final verification**
+- [x] **Step 4: Run final verification**
 
 Run: `venv/bin/python -m pytest tests/test_source_split_layout.py -q`
 
@@ -199,6 +199,6 @@ Run: `bash swift-app/scripts/swift_verify.sh`
 
 Run: `venv/bin/python -m pytest legacy-python/tests -q`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit message: `ci: verify independent application roots`
