@@ -1070,8 +1070,8 @@
     {
       "id": "rollback.python_data_read",
       "area": "rollback",
-      "behavioral_expectation": "The retained established behavior release can reopen user data after a Swift trial.",
-      "expected_behavior": "Swift preserves the shared schema and unknown keys so established behavior rollback can load the copied acceptance dataset.",
+      "behavioral_expectation": "Swift configuration migration preserves supported user data across a Swift round-trip.",
+      "expected_behavior": "Swift migrates supported schema versions and preserves unknown keys when configuration is read, migrated, and written again.",
       "required": {
         "signed_app": false,
         "permissions": [],
@@ -1358,7 +1358,7 @@
       "classification": "automated",
       "release_critical": true,
       "evidence_gate": "scenario.regression.R11",
-      "evidence_location": "Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchestablished behaviorPickerAndCredentialValidationIsProviderSpecific",
+      "evidence_location": "Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific",
       "intentional_deviation": null
     },
     {

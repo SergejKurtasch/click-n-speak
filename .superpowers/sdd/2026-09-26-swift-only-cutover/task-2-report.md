@@ -63,6 +63,26 @@ bash scripts/swift_verify.sh
 Swift verification passed
 ```
 
+## Final review fix
+
+- Reframed the rollback scenario as Swift configuration migration with
+  unknown-key preservation through a Swift round-trip.
+- Updated the active release go/no-go template to use current Swift migration
+  evidence and removed the Python reload requirement.
+- Restored the exact `testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific`
+  evidence identifier and added focused manifest assertions.
+
+Final review validation:
+
+```text
+/Users/sergej/Click-n-speak/venv/bin/python -m pytest tests/test_swift_only_layout.py -q
+3 passed
+/Users/sergej/Click-n-speak/venv/bin/python scripts/swift_acceptance.py --validate-only
+Validated 60 parity scenarios
+bash scripts/swift_verify.sh
+Swift verification passed
+```
+
 ## Risks
 
 - Full `scripts/swift_verify.sh` is still required for release-level coverage.

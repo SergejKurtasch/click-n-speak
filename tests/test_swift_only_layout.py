@@ -74,3 +74,15 @@ def test_acceptance_manifest_is_swift_behavior_only() -> None:
         "python" not in f"{item['behavioral_expectation']} {item['expected_behavior']}".lower()
         for item in scenarios
     )
+    rollback = next(item for item in scenarios if item["id"] == "rollback.python_data_read")
+    assert rollback["behavioral_expectation"] == (
+        "Swift configuration migration preserves supported user data across a Swift round-trip."
+    )
+    assert rollback["expected_behavior"] == (
+        "Swift migrates supported schema versions and preserves unknown keys when configuration is read, "
+        "migrated, and written again."
+    )
+    ui_regression = next(item for item in scenarios if item["id"] == "regression.R11.ui_backend_formats")
+    assert ui_regression["evidence_location"].endswith(
+        "#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific"
+    )
