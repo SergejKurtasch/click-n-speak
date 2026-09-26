@@ -79,19 +79,19 @@ Commit message: `docs: define Swift and legacy source split`
 - Produces a runnable `legacy-python/` whose Python imports, packaging, and
   resources resolve below its own root.
 
-- [ ] **Step 1: Write failing legacy layout and resource tests**
+- [x] **Step 1: Write failing legacy layout and resource tests**
 
 Assert that `main.py`, `src/`, `assets/`, `locales/`, packaging metadata, and
 the legacy build entrypoint live below the legacy root. Assert that the
 resource resolver accepts the legacy root without a sibling application.
 
-- [ ] **Step 2: Run the tests and verify failure**
+- [x] **Step 2: Run the tests and verify failure**
 
 Run: `venv/bin/python -m pytest tests/test_source_split_layout.py -q`
 
 Expected: FAIL because the folder and resolver do not yet exist.
 
-- [ ] **Step 3: Move and adapt the legacy runtime**
+- [x] **Step 3: Move and adapt the legacy runtime**
 
 Use `git mv` for the Python-owned files. Update Python root/resource lookup,
 test bootstrap, and py2app scripts to derive paths from `legacy-python/`.
@@ -102,13 +102,13 @@ Do not move `tests/parity/`, `test_agent_environment.py`,
 `test_check_dev_environment.py`, `test_compare_codex_profiles.py`,
 `test_validate_codex_config.py`, or `test_swift_permission_reset_script.py`.
 
-- [ ] **Step 4: Run focused and full legacy checks**
+- [x] **Step 4: Run focused and full legacy checks**
 
 Run: `venv/bin/python -m pytest tests/test_source_split_layout.py legacy-python/tests/test_transcriber.py legacy-python/tests/test_app_context.py -q`
 
 Then run: `venv/bin/python -m pytest legacy-python/tests -q`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit message: `refactor: isolate legacy Python application`
 
@@ -127,38 +127,38 @@ Commit message: `refactor: isolate legacy Python application`
 - Produces a native tree with the same `ClickNSpeak/Package.swift` to
   `../Packages/` relationship, but no dependency on root runtime resources.
 
-- [ ] **Step 1: Write failing native layout checks**
+- [x] **Step 1: Write failing native layout checks**
 
 Add a shell check that requires `ClickNSpeak/`, `Packages/`, `assets/`,
 `locales/`, and `scripts/swift_verify.sh` beneath `swift-app/`, and rejects
 runtime references to `../legacy-python`, `venv/bin/python`, and root
 `pyproject.toml` in normal Swift build/test paths.
 
-- [ ] **Step 2: Run the check and verify failure**
+- [x] **Step 2: Run the check and verify failure**
 
 Run: `bash swift-app/scripts/verify_layout.sh`
 
 Expected: FAIL because the native root has not been moved.
 
-- [ ] **Step 3: Move and adapt the native tree**
+- [x] **Step 3: Move and adapt the native tree**
 
 Use `git mv` for Swift-owned paths. Keep `ClickNSpeak/` and `Packages/`
 siblings below `swift-app/`. Make build and resource discovery relative to
 the native root. Use `Info.plist` for native release version lookup.
 
-- [ ] **Step 4: Replace mandatory Python-dependent native tests**
+- [x] **Step 4: Replace mandatory Python-dependent native tests**
 
 Replace the Python parent process in restart-helper integration testing with
 a Swift helper. Replace Python live config bridging with frozen Swift-owned
 fixtures. Keep cross-app parity only as an optional workspace check.
 
-- [ ] **Step 5: Run native checks**
+- [x] **Step 5: Run native checks**
 
 Run: `bash swift-app/scripts/verify_layout.sh`
 
 Run: `bash swift-app/scripts/swift_verify.sh`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Commit message: `refactor: isolate Swift production application`
 

@@ -13,6 +13,7 @@ from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 LEGACY_ROOT = WORKSPACE_ROOT / "legacy-python"
+SWIFT_ROOT = WORKSPACE_ROOT / "swift-app"
 
 if str(LEGACY_ROOT) not in sys.path:
     sys.path.insert(0, str(LEGACY_ROOT))
@@ -47,6 +48,28 @@ def test_root_workspace_guides_and_transitional_parity_bridge_remain_available()
     assert (WORKSPACE_ROOT / "src/AGENTS.md").is_file()
     assert (WORKSPACE_ROOT / "tests/AGENTS.md").is_file()
     assert (WORKSPACE_ROOT / "scripts/parity_config_bridge.py").is_file()
+
+
+def test_swift_application_layout_is_self_contained() -> None:
+    required = (
+        "ClickNSpeak/Package.swift",
+        "Packages/CNSCore/Package.swift",
+        "assets",
+        "locales",
+        "scripts/swift_verify.sh",
+        "scripts/verify_layout.sh",
+    )
+    assert all((SWIFT_ROOT / path).exists() for path in required)
+
+    native_paths = tuple(SWIFT_ROOT / path for path in ("ClickNSpeak", "Packages", "scripts"))
+    native_text = "\n".join(
+        file.read_text(encoding="utf-8")
+        for base in native_paths
+        for file in base.rglob("*")
+        if file.is_file() and file.suffix in {".swift", ".sh", ".py"}
+    )
+    assert "../legacy-python" not in native_text
+    assert "venv/bin/python" not in native_text
 
 
 def test_legacy_launcher_has_standalone_source_and_config_fallback() -> None:
@@ -95,6 +118,6 @@ def test_standalone_launcher_selects_python311_fallback(tmp_path: Path) -> None:
 
 
 def test_swift_locales_do_not_reference_legacy_python_scripts() -> None:
-    for locale in (WORKSPACE_ROOT / "locales").glob("*.json"):
+    for locale in (SWIFT_ROOT / "locales").glob("*.json"):
         text = locale.read_text(encoding="utf-8")
         assert "python scripts/download_" not in text
