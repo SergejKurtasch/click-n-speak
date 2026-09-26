@@ -13,6 +13,8 @@ final class RuntimeSessionDouble: RuntimeSessionCoordinating {
     private(set) var runtimeMutationInProgress = false
     private(set) var runtimeAvailable = false
     private(set) var configs: [Config] = []
+    private(set) var cancelWarmupCount = 0
+    func cancelWarmup() { cancelWarmupCount += 1 }
 
     func beginRuntimeMutation() -> Bool {
         guard isRuntimeIdle, !runtimeMutationInProgress else { return false }
@@ -225,7 +227,11 @@ private final class RuntimeSessionRecorder: AudioCapturing, @unchecked Sendable 
 @MainActor
 private final class RuntimeSessionPanel: PopupPresenting {
     private(set) var isShowingInteractive = false
+    var currentText: String = ""
     private var onCancel: (() -> Void)?
+
+    func showPendingAppend(_ text: String, title: String) {}
+    func clearPendingAppend() {}
 
     func show(title: String) {}
     func updateStatus(_ title: String) {}
@@ -244,6 +250,7 @@ private final class RuntimeSessionPanel: PopupPresenting {
         onAddToDictionary: ((String) -> AddTermResult)?
     ) {
         isShowingInteractive = true
+        currentText = text
         self.onCancel = onCancel
     }
 
@@ -375,6 +382,20 @@ struct AppRuntimeCoordinatorTests {
         let record = DatasetRecord(rawWhisper: "словарь", userFinal: "словарь", lang: "ru")
         _ = await dictionary.recordConfirmation(.init(sessionID: id, datasetRecord: record,
             finalText: "словарь", date: Date(timeIntervalSince1970: 2_000_000_000)))
+    }
+
+    @Test("Runtime changes request warmup cancellation before waiting for idle")
+    func runtimeChangeCancelsWarmupBeforeIdleWait() async {
+        let initial = config(backend: "local")
+        let (runtime, _, session, _, directory) = makeRig(initial: initial)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        session.isRuntimeIdle = false
+        runtime.requestConfiguration(initial)
+        await settle(30)
+        #expect(session.cancelWarmupCount > 0)
+        session.isRuntimeIdle = true
+        await settle()
+        await runtime.shutdown()
     }
 
     @Test("App callback wiring retains dirty usage until an explicit confirmation then flush")

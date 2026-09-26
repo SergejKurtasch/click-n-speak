@@ -23,7 +23,7 @@ public struct ChunkingConfig: Sendable {
         self.maxSpeechDuration = maxSpeechDuration
         self.minSpeechDuration = minSpeechDuration
     }
-    
+
     public init(settings: RecordingSettings, sampleRate: Int = 16000) {
         self.sampleRate = sampleRate
         self.silenceDuration = settings.silenceDurationLimit
@@ -51,12 +51,25 @@ public enum ChunkDecision: Equatable, Sendable {
 ///   chunker.voiceFrame(isSpeech:seconds:)     // one or more times (VAD frames / RMS block)
 ///   let decision = chunker.endBlock()         // trigger check + reset on trigger
 public struct AudioChunker: Sendable {
+    /// A normal-pause split immediately before the micro-pause regime often
+    /// leaves the next real word in a sub-second final chunk. Keep that small
+    /// boundary window attached so the next speech frame or Stop can form one
+    /// decodable phrase instead.
+    private static let targetBoundaryGraceSeconds = 0.5
+    /// A 0.4 s hesitation after the target duration is too short to establish
+    /// an utterance boundary reliably. It used to split one phrase into a
+    /// decoded prefix and a short tail, creating serial Whisper work and
+    /// dropping or misrecognising the tail. Keep the early endpoint responsive
+    /// without cutting until the pause reaches this stable duration.
+    private static let stableTargetPauseSeconds = 0.8
+
     public let config: ChunkingConfig
 
     private var silenceCounter: Double = 0
     private var hasSpeechInChunk = false
     private var currentChunkDuration: Double = 0
     private var totalSamples: Int = 0
+    private var deferredNormalPause = false
 
     public init(config: ChunkingConfig = ChunkingConfig()) {
         self.config = config
@@ -76,6 +89,7 @@ public struct AudioChunker: Sendable {
         if isSpeech {
             silenceCounter = 0
             hasSpeechInChunk = true
+            deferredNormalPause = false
         } else {
             silenceCounter += seconds
         }
@@ -91,11 +105,34 @@ public struct AudioChunker: Sendable {
             effectiveSilence = 0
             triggerType = "FORCE (Max duration)"
         } else if currentChunkDuration >= config.targetSpeechDuration {
-            effectiveSilence = 0.4
+            // Never wait longer than the user's ordinary endpoint setting.
+            // With the default 1.0 s pause this changes the former 0.4 s
+            // micro-pause into a 0.8 s stable endpoint.
+            effectiveSilence = min(config.silenceDuration, Self.stableTargetPauseSeconds)
             triggerType = "MICRO (Target duration)"
         } else {
             effectiveSilence = config.silenceDuration
             triggerType = "Normal"
+        }
+
+        // A normal pause that reaches its threshold immediately before the
+        // target gets a short chance for speech to resume. Without this hold,
+        // the 0.4 s micro-pause rule fires on the next frame and strands the
+        // resumed word in a tiny final chunk.
+        if currentChunkDuration < config.targetSpeechDuration,
+           currentChunkDuration >= max(
+               0,
+               config.targetSpeechDuration - Self.targetBoundaryGraceSeconds
+           ),
+           silenceCounter >= effectiveSilence {
+            deferredNormalPause = true
+            return .continue
+        }
+
+        if currentChunkDuration < config.maxSpeechDuration,
+           deferredNormalPause,
+           silenceCounter < config.silenceDuration + Self.targetBoundaryGraceSeconds {
+            return .continue
         }
 
         guard silenceCounter >= effectiveSilence else {
@@ -119,6 +156,7 @@ public struct AudioChunker: Sendable {
         hasSpeechInChunk = false
         currentChunkDuration = 0
         totalSamples = 0
+        deferredNormalPause = false
     }
 
     /// Final-chunk guard from `recorder.stop`: discard a trailing chunk shorter

@@ -40,10 +40,14 @@ public struct DictionaryToasts: Sendable {
 @MainActor
 public protocol PopupPresenting: AnyObject {
     var isShowingInteractive: Bool { get }
+    var currentText: String { get }
     func show(title: String)
     func updateStatus(_ title: String)
     func updateText(_ text: String)
     func appendText(_ text: String)
+    func showPendingAppend(_ text: String, title: String)
+    func clearPendingAppend()
+
     /// Enables or disables confirm/cancel without destroying editor state.
     func setDecisionEnabled(_ enabled: Bool)
     /// Shows a persistent warning without replacing the editable transcript.

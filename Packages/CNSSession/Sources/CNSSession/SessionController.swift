@@ -4,6 +4,24 @@ import CNSTranscription
 import CryptoKit
 import Foundation
 
+/// Reasons for synthetic runtime preparation.
+public enum WarmupTrigger: String, Sendable {
+    case keepAlive = "keep_alive"
+    case wake
+    case startup
+}
+
+/// Factual outcomes from the two local runtime preparation phases.
+public struct RuntimeWarmupResult: Sendable {
+    public let transcriber: PrewarmResult
+    public let editor: PrewarmResult
+
+    public init(transcriber: PrewarmResult, editor: PrewarmResult) {
+        self.transcriber = transcriber
+        self.editor = editor
+    }
+}
+
 /// User-visible strings for one dictation cycle, resolved by the caller from
 /// `I18n` so the controller itself stays free of localisation lookups.
 public struct SessionStrings: Sendable {
@@ -12,6 +30,8 @@ public struct SessionStrings: Sendable {
     public var stillWorking: String
     public var ready: String
     public var popupTitle: String
+    public var refining: String
+    public var appendRefining: String
     public var transcriptionInstruction: String
     public var noSpeech: String
     public var recordError: String
@@ -27,6 +47,8 @@ public struct SessionStrings: Sendable {
         stillWorking: String = "Still working…",
         ready: String = "Ready",
         popupTitle: String = "Edit and press Enter",
+        refining: String = "Refining…",
+        appendRefining: String = "New recording · Refining…",
         transcriptionInstruction: String = "",
         noSpeech: String = "No speech detected",
         recordError: String = "Recording error",
@@ -41,6 +63,8 @@ public struct SessionStrings: Sendable {
         self.stillWorking = stillWorking
         self.ready = ready
         self.popupTitle = popupTitle
+        self.refining = refining
+        self.appendRefining = appendRefining
         self.transcriptionInstruction = transcriptionInstruction
         self.noSpeech = noSpeech
         self.recordError = recordError
@@ -141,6 +165,7 @@ public final class SessionController {
     }
 
     private var transcribedParts: [String] = []
+    private var transcribedPartsByLanguage: [String: [String]] = [:]
     private var rawChunks: [String] = []
     private var detectedLanguage = ""
     private var lastToggleAt: Date?
@@ -150,6 +175,7 @@ public final class SessionController {
     private var activeSessionRuntimeDescriptor: RuntimeDescriptor = .unavailable
     private var activeSessionPromptHash = ""
     private var lastTranscriptionError: String?
+    private var emittedFirstPreview = false
     private var fileJobID: UUID?
     private var fileJobActive: Bool { fileJobID != nil }
     private var stopRequestedUptime: TimeInterval?
@@ -168,7 +194,13 @@ public final class SessionController {
     private var hardAbortedSessionId: Int?
     private var reloadInProgress = false
     private var pendingPeriodicReload = false
-    private var warmupTask: Task<PrewarmResult, Never>?
+    private var warmupTask: Task<RuntimeWarmupResult, Never>?
+    private var warmupID: UUID?
+    private var warmupGeneration = 0
+    private enum WarmupPhase { case transcriber, editor }
+    private var warmupPhase: WarmupPhase?
+    public var onWarmupIntentCancelled: (() -> Void)?
+    public var onWarmupAvailabilityChanged: (() -> Void)?
     private var audioBacklog: SessionAudioBacklog?
 
     // MARK: - Collaborators
@@ -257,7 +289,9 @@ public final class SessionController {
     }
 
     public func setRuntimeAvailable(_ available: Bool) {
+        if !available { cancelWarmup() }
         runtimeAvailable = available
+        onWarmupAvailabilityChanged?()
     }
 
     /// Atomically reserves the idle session boundary for a runtime commit.
@@ -272,6 +306,7 @@ public final class SessionController {
         guard runtimeMutationInProgress else { return }
         runtimeMutationInProgress = false
         runDeferredReloadIfIdle()
+        onWarmupAvailabilityChanged?()
     }
 
     @discardableResult
@@ -289,15 +324,16 @@ public final class SessionController {
             chunkContinuation?.finish()
             chunkContinuation = nil
             recorderStartTask?.cancel()
-            warmupTask?.cancel()
+            cancelWarmup()
             overdueWatchdog?.cancel()
             workerTask?.cancel()
             injectionTask?.cancel()
             fileTask?.cancel()
             reloadTask?.cancel()
-            if workerTask != nil || fileJobActive || reloadInProgress || warmupTask != nil {
+            if workerTask != nil || fileJobActive || reloadInProgress {
                 transcriber.abortInFlight()
             }
+            panel.clearPendingAppend()
             panel.hide(delay: 0)
             transition(to: .idle, reason: "shutdown")
 
@@ -394,10 +430,7 @@ public final class SessionController {
             log("Recording settings are invalid; recording was not started.")
             return
         }
-        if warmupTask != nil {
-            warmupTask?.cancel()
-            transcriber.abortInFlight()
-        }
+        cancelWarmup()
         let hotkeyUptime = ProcessInfo.processInfo.systemUptime
         // A new recording owns a new identity even when it extends one draft.
         // Close the preceding segment before resetting its outcome guard.
@@ -407,11 +440,13 @@ public final class SessionController {
         sessionId += 1
         let id = sessionId
         transcribedParts = []
+        transcribedPartsByLanguage = [:]
         rawChunks = []
         detectedLanguage = ""
         sawFinalChunk = false
         sawFirstDecode = false
         lastTranscriptionError = nil
+        emittedFirstPreview = false
         completedOutcomeSessionId = nil
         activeSessionConfig = config
         activeSessionRuntimeDescriptor = runtimeDescriptorProvider()
@@ -654,6 +689,7 @@ public final class SessionController {
         }
         stopRequestedUptime = ProcessInfo.processInfo.systemUptime
         transition(to: .stopping(sessionID: id), reason: reason)
+        RuntimeTelemetry.emitRuntimeEvent("session_stop", fields: ["session_id": id])
         panel.updateStatus(strings.transcribing)
         recorderStartTask?.cancel()
         recorderStopTask = Task { [weak self] in
@@ -785,9 +821,12 @@ public final class SessionController {
             tokenCount: { [transcriber] text in await transcriber.tokenCount(text) }
         )
         guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
+        let languagePrompts = await initialPromptsByLanguage(for: sessionConfig)
+        guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
         let request = TranscriptionRequest(
             audio: chunk.audio,
             initialPrompt: context.isEmpty ? nil : context,
+            initialPromptsByLanguage: languagePrompts,
             allowedLanguages: allowedLanguages(for: sessionConfig),
             isFinalChunk: chunk.isFinal,
             decodeTimeout: sawFirstDecode
@@ -833,7 +872,11 @@ public final class SessionController {
         if !result.text.isEmpty {
             transcribedParts.append(result.text)
             rawChunks.append(result.text)
-            if !result.detectedLanguage.isEmpty { detectedLanguage = result.detectedLanguage }
+            if !result.detectedLanguage.isEmpty {
+                detectedLanguage = result.detectedLanguage
+                let language = LanguageCode.normalize(result.detectedLanguage)
+                transcribedPartsByLanguage[language, default: []].append(result.text)
+            }
         }
 
         if chunk.isFinal {
@@ -854,7 +897,13 @@ public final class SessionController {
                 processingStartedUptime: t0,
                 measuredDuration: duration
             )
-            panel.updateText(ChunkJoiner.join(transcribedParts))
+            let preview = ChunkJoiner.join(transcribedParts)
+            if appendToPopup, panel.isShowingInteractive {
+                panel.showPendingAppend(preview, title: strings.appendRefining)
+            } else {
+                panel.updateText(preview)
+            }
+            emitFirstPreviewPresentedIfNeeded(sessionID: id)
         } else {
             emitChunkTelemetry(
                 result: result,
@@ -887,6 +936,19 @@ public final class SessionController {
             return
         }
 
+        let isAppending = appendToPopup && panel.isShowingInteractive
+        if isAppending {
+            panel.showPendingAppend(fullText, title: strings.appendRefining)
+        } else {
+            panel.updateText(fullText)
+            panel.updateStatus(strings.refining)
+        }
+        emitFirstPreviewPresentedIfNeeded(sessionID: id)
+        emitDraftPreviewPresented(sessionID: id, appendMode: isAppending)
+
+        let raw = rawChunks.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        var refineLatencyMs: Int? = nil
+
         if sessionConfig.aiEditorEnabled, let editor = aiEditor {
             let langs = allowedLanguages(for: sessionConfig)
             let known = VocabProvider.collectKnownTerms(
@@ -908,17 +970,25 @@ public final class SessionController {
             )
             guard !isShuttingDown, sessionId == id, !Task.isCancelled else { return }
             lastRefineResult = result
+            refineLatencyMs = max(
+                0,
+                Int((ProcessInfo.processInfo.systemUptime - editorStartedAt) * 1000)
+            )
             RuntimeTelemetry.emitRuntimeEvent("editor_refine", fields: [
                 "session_id": id,
-                "duration_ms": (ProcessInfo.processInfo.systemUptime - editorStartedAt) * 1000,
-                "status": result.status.rawValue,
-                "backend": activeSessionRuntimeDescriptor.aiEditor.backend,
-                "model": activeSessionRuntimeDescriptor.aiEditor.modelID ?? "none"
+                "editor_latency_ms": refineLatencyMs!,
+                "outcome": result.status.rawValue,
+                "editor_backend": activeSessionRuntimeDescriptor.aiEditor.backend,
+                "editor_model": activeSessionRuntimeDescriptor.aiEditor.modelID ?? "none"
             ])
             if result.status == .ok {
                 fullText = result.text
             }
         } else {
+            RuntimeTelemetry.emitRuntimeEvent("editor_refine", fields: [
+                "session_id": id,
+                "outcome": "skipped"
+            ])
             lastRefineResult = nil
         }
 
@@ -934,7 +1004,6 @@ public final class SessionController {
             fullText = VocabProvider.applyReplacements(fullText, pairs: pairs)
         }
 
-        let raw = rawChunks.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         let segment = PopupDraft.Segment(
             sessionID: id,
             rawWhisper: raw,
@@ -943,7 +1012,8 @@ public final class SessionController {
             presentedText: fullText,
             runtime: activeSessionRuntimeDescriptor,
             promptHash: activeSessionPromptHash,
-            detectedLanguage: detectedLanguage.isEmpty ? nil : detectedLanguage
+            detectedLanguage: detectedLanguage.isEmpty ? nil : detectedLanguage,
+            editorLatencyMs: refineLatencyMs
         )
         if var draft = popupDraft {
             draft.append(segment)
@@ -954,7 +1024,8 @@ public final class SessionController {
             popupDraft = draft
         }
 
-        if appendToPopup, panel.isShowingInteractive {
+        if isAppending {
+            panel.clearPendingAppend()
             panel.appendText(fullText)
             appendToPopup = false
             panel.setDecisionEnabled(true)
@@ -1047,14 +1118,17 @@ public final class SessionController {
         let aiEdited: String?
         let aiStatus: String?
         let promptHash: String?
+        let editorLatencyMs: Int?
         if let draft {
             aiEdited = draft.aggregateAiEdited
             aiStatus = draft.aggregateAiStatus
             promptHash = draft.aggregatePromptHash
+            editorLatencyMs = draft.aggregateEditorLatencyMs
         } else {
             aiEdited = lastRefineResult?.status == .ok ? lastRefineResult?.text : nil
             aiStatus = lastRefineResult?.status.rawValue
             promptHash = activeSessionPromptHash
+            editorLatencyMs = nil
         }
         let runtime = draft?.aggregateRuntime ?? activeSessionRuntimeDescriptor
 
@@ -1066,6 +1140,7 @@ public final class SessionController {
             sttBackend: runtime.transcriber.backend,
             sttModel: runtime.transcriber.modelID,
             aiModel: runtime.aiEditor.modelID,
+            editorLatencyMs: editorLatencyMs,
             userFinal: userText,
             lang: lang,
             promptHash: promptHash,
@@ -1215,16 +1290,21 @@ public final class SessionController {
     private func emitSessionEndIfNeeded(sessionID: Int, reason: String) {
         guard completedOutcomeSessionId != sessionID else { return }
         completedOutcomeSessionId = sessionID
-        RuntimeTelemetry.emitRuntimeEvent(
-            "session_end",
-            fields: ["session_id": sessionID, "reason": reason]
-        )
+        var fields: [String: Any] = ["session_id": sessionID, "reason": reason]
+        if reason == "confirm", let stopRequestedUptime {
+            fields["stop_to_enter_ms"] = max(
+                0,
+                (ProcessInfo.processInfo.systemUptime - stopRequestedUptime) * 1000
+            )
+        }
+        RuntimeTelemetry.emitRuntimeEvent("session_end", fields: fields)
     }
 
     @discardableResult
     private func restoreDraftAfterEmptyAppendIfNeeded() -> Bool {
         guard appendToPopup, popupDraft != nil, panel.isShowingInteractive else { return false }
         appendToPopup = false
+        panel.clearPendingAppend()
         panel.setDecisionEnabled(true)
         showIncompleteWarningIfNeeded()
         return true
@@ -1287,47 +1367,134 @@ public final class SessionController {
         return [primary] + LanguageCode.dedupeList(config.additionalLanguages, primary: primary)
     }
 
-    /// Startup and lifecycle keepalive entry point. Synthetic work is accepted
-    /// only in true idle; the hotkey path never calls this method.
+    private func initialPromptsByLanguage(for config: Config) async -> [String: String] {
+        let languages = allowedLanguages(for: config)
+        guard languages.count > 1 else { return [:] }
+        let builder = InitialPromptBuilder()
+        var prompts: [String: String] = [:]
+        for language in languages {
+            var raw = config.raw
+            raw["primary_language"] = .string(language)
+            raw["additional_languages"] = .array([])
+            let prompt = await contextBuilder.build(
+                instruction: strings.transcriptionInstruction,
+                vocabPrompt: builder.build(config: raw),
+                transcribedParts: transcribedPartsByLanguage[language] ?? [],
+                tokenCount: { [transcriber] text in await transcriber.tokenCount(text) }
+            )
+            if !prompt.isEmpty { prompts[language] = prompt }
+        }
+        return prompts
+    }
+
+    /// Invalidate intent synchronously. Only the task's completion releases ownership.
+    public func cancelWarmup() {
+        warmupGeneration &+= 1
+        onWarmupIntentCancelled?()
+        let phase = warmupPhase
+        warmupPhase = nil
+        warmupTask?.cancel()
+        if phase == .transcriber { transcriber.abortInFlight() }
+    }
+
     @discardableResult
-    public func warmupIfIdle(full: Bool, language: String? = nil) async -> Bool {
+    public func warmupIfIdle(trigger: WarmupTrigger = .keepAlive, full: Bool = false, language: String? = nil) async -> Bool {
         guard isRuntimeIdle, runtimeAvailable, !restartPending else { return false }
-        let transcriber = self.transcriber
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        let task = Task {
+        let id = UUID()
+        let generation = warmupGeneration
+        let editor = aiEditor
+        let editorEnabled = config.aiEditorEnabled
+        let languages = language.map { [$0] } ?? allowedLanguages()
+        warmupID = id
+        let task = Task<RuntimeWarmupResult, Never> { [self] in
+            defer {
+                if warmupID == id {
+                    warmupID = nil
+                    warmupPhase = nil
+                    warmupTask = nil
+                    onWarmupAvailabilityChanged?()
+                }
+            }
+            guard canContinueWarmup(id: id, generation: generation) else {
+                return RuntimeWarmupResult(transcriber: .skipped, editor: .skipped)
+            }
+            warmupPhase = .transcriber
+            let transcriberStarted = ProcessInfo.processInfo.systemUptime
+            let transcriberOutcome: PrewarmResult
             if full {
                 await transcriber.warmup(language: language)
-                return PrewarmResult.warmed
+                transcriberOutcome = Task.isCancelled ? .skipped : .warmed
             } else {
-                return await transcriber.preWarm()
+                transcriberOutcome = await transcriber.preWarm()
             }
+            let transcriberDuration = ProcessInfo.processInfo.systemUptime - transcriberStarted
+            warmupPhase = nil
+            let continuing = canContinueWarmup(id: id, generation: generation)
+            let factualTranscriberOutcome: PrewarmResult = continuing ? transcriberOutcome : .skipped
+            RuntimeTelemetry.emitRuntimeEvent("transcriber_prewarm", fields: [
+                "operation_id": id.uuidString, "trigger": trigger.rawValue, "full": full,
+                "duration_ms": transcriberDuration * 1000,
+                "outcome": String(describing: factualTranscriberOutcome), "accepted_while_idle": true
+            ])
+            if continuing {
+                let decision = healthMonitor.recordPrewarm(durationSeconds: transcriberDuration, outcome: transcriberOutcome)
+                if decision.shouldRestart { restartTranscriberReason = decision.reason }
+            }
+            guard continuing else {
+                return RuntimeWarmupResult(transcriber: factualTranscriberOutcome, editor: .skipped)
+            }
+            var editorOutcome: PrewarmResult = .skipped
+            if trigger != .keepAlive {
+                let editorStarted = ProcessInfo.processInfo.systemUptime
+                let editorDescriptor = editor?.descriptor
+                var reason = "unavailable"
+                if editorEnabled, let editor, editor.isReady, editor.descriptor.kind == .local {
+                    warmupPhase = .editor
+                    editorOutcome = await editor.preWarm(languages: languages, force: trigger == .wake)
+                    reason = editorOutcome == .warmed ? "completed" : "editor_policy"
+                    warmupPhase = nil
+                }
+                if !canContinueWarmup(id: id, generation: generation) {
+                    editorOutcome = .skipped
+                    reason = "cancelled"
+                }
+                RuntimeTelemetry.emitRuntimeEvent("editor_prewarm", fields: [
+                    "operation_id": id.uuidString,
+                    "backend": editorDescriptor?.backend ?? "disabled",
+                    "model": editorDescriptor?.modelID ?? "",
+                    "trigger": trigger.rawValue, "outcome": String(describing: editorOutcome),
+                    "reason": reason,
+                    "duration_ms": (ProcessInfo.processInfo.systemUptime - editorStarted) * 1000
+                ])
+            }
+            return RuntimeWarmupResult(transcriber: factualTranscriberOutcome, editor: editorOutcome)
         }
         warmupTask = task
-        let result = await task.value
-        warmupTask = nil
-        guard !isShuttingDown, !Task.isCancelled else { return false }
-        let duration = ProcessInfo.processInfo.systemUptime - startedAt
-        let decision = healthMonitor.recordPrewarm(
-            durationSeconds: duration,
-            outcome: result
-        )
-        RuntimeTelemetry.emitRuntimeEvent("transcriber_prewarm", fields: [
-            "full": full,
-            "duration_ms": duration * 1000,
-            "outcome": String(describing: result),
-            "accepted_while_idle": true
-        ])
-        if decision.shouldRestart {
-            restartTranscriberReason = decision.reason
-            runDeferredReloadIfIdle()
+        let result = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+            Task { @MainActor [weak self] in
+                // A synchronous cancellation may already have installed a newer wake intent.
+                guard self?.warmupID == id, self?.warmupGeneration == generation else { return }
+                self?.cancelWarmup()
+            }
         }
-        return result == .warmed
+        runDeferredReloadIfIdle()
+        return !Task.isCancelled && generation == warmupGeneration && result.transcriber == .warmed
+    }
+
+    private func canContinueWarmup(id: UUID, generation: Int) -> Bool {
+        warmupID == id && warmupGeneration == generation && !Task.isCancelled
+            && state == .idle && runtimeAvailable && !isShuttingDown && !restartPending
+            && !fileJobActive && !reloadInProgress && !runtimeMutationInProgress
     }
 
     private func transition(to newState: SessionState, reason: String) {
         let oldState = state
         state = newState
         onStateChanged(newState)
+        onWarmupAvailabilityChanged?()
         log("Session state \(String(describing: oldState)) -> \(String(describing: newState)) (\(reason)).")
     }
 
@@ -1338,18 +1505,29 @@ public final class SessionController {
         processingStartedUptime: TimeInterval,
         measuredDuration: TimeInterval
     ) {
-        RuntimeTelemetry.emitRuntimeEvent("chunk_processed", fields: [
+        var fields: [String: Any] = [
             "session_id": sessionID,
             "chunk_index": chunk.index,
             "is_final": chunk.isFinal,
             "capture_to_enqueue_ms": max(0, chunk.enqueuedUptime - chunk.capturedUptime) * 1000,
             "queue_wait_ms": max(0, processingStartedUptime - chunk.enqueuedUptime) * 1000,
             "duration_ms": (result.durationSeconds > 0 ? result.durationSeconds : measuredDuration) * 1000,
+            "request_ms": measuredDuration * 1000,
+            "sample_count": chunk.audio.count,
             "outcome": result.outcome.telemetryValue,
             "stt_backend": result.backend ?? activeSessionRuntimeDescriptor.transcriber.backend,
             "stt_model": result.modelID ?? activeSessionRuntimeDescriptor.transcriber.modelID,
-            "retry_count": result.retryCount
-        ])
+            "retry_count": result.retryCount,
+        ]
+        if let stages = result.stageDurations {
+            if let langDetect = stages.languageDetectionSeconds {
+                fields["language_detection_ms"] = langDetect * 1000
+            }
+            if let decode = stages.decodeSeconds {
+                fields["decode_ms"] = decode * 1000
+            }
+        }
+        RuntimeTelemetry.emitRuntimeEvent("chunk_processed", fields: fields)
     }
 
     private func emitPopupPresentedTelemetry(sessionID: Int, appendMode: Bool) {
@@ -1365,6 +1543,30 @@ public final class SessionController {
         }
         RuntimeTelemetry.emitRuntimeEvent("popup_presented", fields: fields)
     }
+
+    private func emitFirstPreviewPresentedIfNeeded(sessionID: Int) {
+        guard !emittedFirstPreview else { return }
+        emittedFirstPreview = true
+        RuntimeTelemetry.emitRuntimeEvent("first_preview_presented", fields: [
+            "session_id": sessionID,
+            "append_mode": appendToPopup,
+        ])
+    }
+
+    private func emitDraftPreviewPresented(sessionID: Int, appendMode: Bool) {
+        var fields: [String: Any] = [
+            "session_id": sessionID,
+            "append_mode": appendMode,
+        ]
+        if let stopRequestedUptime {
+            fields["stop_to_preview_ms"] = max(
+                0,
+                (ProcessInfo.processInfo.systemUptime - stopRequestedUptime) * 1000
+            )
+        }
+        RuntimeTelemetry.emitRuntimeEvent("draft_preview_presented", fields: fields)
+    }
+
 
     private func runDeferredReloadIfIdle() {
         guard isRuntimeIdle else { return }
@@ -1393,7 +1595,10 @@ public final class SessionController {
             return
         }
         reloadInProgress = true
-        defer { reloadInProgress = false }
+        defer {
+            reloadInProgress = false
+            onWarmupAvailabilityChanged?()
+        }
         onBeforeTranscriberReload()
         log("Reloading transcriber (reason: \(reason), session: \(id)).")
         await transcriber.reload()
@@ -1414,6 +1619,10 @@ public final class SessionController {
         refine: Bool = false,
         progress: @escaping @Sendable (FileTranscriptionProgress) -> Void = { _ in }
     ) async -> FileTranscriptionResult {
+        let previousWarmup = warmupTask
+        cancelWarmup()
+        _ = await previousWarmup?.value
+        guard !Task.isCancelled else { return FileTranscriptionResult(text: "", status: .cancelled) }
         guard isRuntimeIdle, runtimeAvailable, !restartPending else {
             return .failed(.init(kind: .unavailable, message: "Another transcription is already running"))
         }

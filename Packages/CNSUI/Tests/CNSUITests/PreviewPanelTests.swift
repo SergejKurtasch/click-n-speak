@@ -229,7 +229,7 @@ struct PreviewPanelTests {
         let panel = makePanel()
         panel.show(title: "Recording")
         panel.updateText("живой текст")
-        #expect(panel.currentText == nil)  // HUD mode has no editor
+        #expect(panel.currentText == "")  // HUD mode has no editor
 
         panel.showInteractive(text: "итог", title: "Edit", onConfirm: { _ in })
         #expect(panel.currentText == "итог")
@@ -237,7 +237,7 @@ struct PreviewPanelTests {
         _ = panel.handleKey(keyCode: keyEscape, hasCommand: false, characters: nil)
         // Back to the HUD layout without a stale editor.
         panel.show(title: "Ready")
-        #expect(panel.currentText == nil)
+        #expect(panel.currentText == "")
         panel.close()
     }
 
@@ -375,14 +375,171 @@ struct PreviewPanelTests {
         panel.close()
     }
 
+    @Test("Pending append is a separate read-only scrolling surface capped at 100 points")
+    func pendingAppendSurface() {
+        let panel = makePanel()
+        let marker = "Pending surface draft"
+        panel.showInteractive(text: marker, title: "Edit", onConfirm: { _ in })
+        panel.setSelectionForTesting(NSRange(location: 7, length: 3))
+
+        panel.showPendingAppend(
+            String(repeating: "new wrapped words ", count: 80),
+            title: "New recording · Refining…"
+        )
+
+        let window = editorWindow(containing: marker)
+        let scrollViews = descendants(of: window?.contentView).compactMap { $0 as? NSScrollView }
+        let pending = scrollViews.first { scroll in
+            guard let textView = scroll.documentView as? NSTextView else { return false }
+            return textView.string.contains("new wrapped words")
+        }
+        #expect(scrollViews.count == 2)
+        #expect(pending != nil)
+        #expect(pending?.hasVerticalScroller == true)
+        #expect((pending?.frame.height ?? .infinity) <= 100)
+        #expect((pending?.documentView as? NSTextView)?.isEditable == false)
+        #expect((pending?.documentView as? NSTextView)?.textContainer?.widthTracksTextView == true)
+        #expect((pending?.documentView as? NSTextView)?.string.contains("New recording · Refining…") == true)
+        #expect(panel.currentText == marker)
+        #expect(panel.selectionForTesting == NSRange(location: 7, length: 3))
+
+        panel.clearPendingAppend()
+        #expect(descendants(of: window?.contentView).compactMap { $0 as? NSScrollView }.count == 1)
+        panel.close()
+    }
+
+    @Test("Compact pending layout keeps both editors below the title")
+    func compactPendingLayoutFrames() throws {
+        let panel = makePanel()
+        let marker = "Short draft"
+        panel.showInteractive(text: marker, title: "Edit", onConfirm: { _ in })
+        panel.showPendingAppend("Short append", title: "New recording · Refining…")
+
+        let window = try #require(editorWindow(containing: marker))
+        let views = descendants(of: window.contentView)
+        let title = try #require(views.compactMap { $0 as? NSTextField }.first {
+            $0.accessibilityIdentifier() == "preview.status"
+        })
+        let main = try #require(views.compactMap { $0 as? NSScrollView }.first {
+            ($0.documentView as? DictionaryAwareTextView)?.string == marker
+        })
+        let pending = try #require(views.compactMap { $0 as? NSScrollView }.first {
+            ($0.documentView as? NSTextView)?.string.contains("Short append") == true
+        })
+
+        #expect(pending.frame.height <= 100)
+        #expect(main.frame.height >= 44)
+        #expect(pending.frame.maxY + 6 <= main.frame.minY)
+        #expect(main.frame.maxY + 10 <= title.frame.minY)
+        panel.close()
+    }
+
+    @Test("Interactive popup text resolves dark in Aqua and light in Dark Aqua")
+    func interactiveColorsFollowAppearance() throws {
+        for (appearanceName, expectsLightForeground) in [
+            (NSAppearance.Name.aqua, false),
+            (.darkAqua, true),
+        ] {
+            let panel = makePanel()
+            panel.showInteractive(text: "Draft", title: "Edit", onConfirm: { _ in })
+            panel.showPendingAppend("Pending body", title: "Pending title")
+
+            let window = try #require(editorWindow(containing: "Draft"))
+            let appearance = try #require(NSAppearance(named: appearanceName))
+            window.appearance = appearance
+            let views = descendants(of: window.contentView)
+            let title = try #require(views.compactMap { $0 as? NSTextField }.first {
+                $0.accessibilityIdentifier() == "preview.status"
+            })
+            let editor = try #require(views.compactMap { $0 as? DictionaryAwareTextView }.first)
+            let pending = try #require(views.compactMap { $0 as? NSTextView }.first {
+                !($0 is DictionaryAwareTextView) && $0.string.contains("Pending body")
+            })
+
+            let pendingTitleIndex = 0
+            let pendingBodyIndex = ("Pending title\n" as NSString).length
+            let colors = [
+                try #require(title.textColor),
+                try foregroundColor(in: editor, at: 0),
+                try #require(editor.insertionPointColor),
+                try foregroundColor(in: pending, at: pendingTitleIndex),
+                try foregroundColor(in: pending, at: pendingBodyIndex),
+            ]
+            for color in colors {
+                let luminance = try resolvedLuminance(color, appearance: appearance)
+                if expectsLightForeground {
+                    #expect(luminance > 0.6)
+                } else {
+                    #expect(luminance < 0.4)
+                }
+            }
+            panel.close()
+        }
+    }
+
+    @Test("Recording HUD text resolves dark in Aqua and light in Dark Aqua")
+    func hudColorsFollowAppearance() throws {
+        for (appearanceName, expectsLightForeground) in [
+            (NSAppearance.Name.aqua, false),
+            (.darkAqua, true),
+        ] {
+            let panel = makePanel()
+            panel.show(title: "Recording")
+            panel.updateText("Live text")
+
+            let window = try #require(NSApp.windows.first { window in
+                window.isVisible && descendants(of: window.contentView).contains { view in
+                    (view as? NSTextField)?.accessibilityIdentifier() == "preview.live-text"
+                }
+            })
+            let appearance = try #require(NSAppearance(named: appearanceName))
+            window.appearance = appearance
+            let fields = descendants(of: window.contentView).compactMap { $0 as? NSTextField }
+            let title = try #require(fields.first { $0.accessibilityIdentifier() == "preview.status" })
+            let live = try #require(fields.first { $0.accessibilityIdentifier() == "preview.live-text" })
+
+            for color in [try #require(title.textColor), try #require(live.textColor)] {
+                let luminance = try resolvedLuminance(color, appearance: appearance)
+                if expectsLightForeground {
+                    #expect(luminance > 0.6)
+                } else {
+                    #expect(luminance < 0.4)
+                }
+            }
+            panel.close()
+        }
+    }
+
     private func editorWindow(containing marker: String) -> NSWindow? {
         NSApp.windows.first { window in
-            guard let scroll = window.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first,
+            guard window.isVisible,
+                  let scroll = window.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first,
                   let editor = scroll.documentView as? DictionaryAwareTextView else {
                 return false
             }
             return editor.string.contains(marker)
         }
+    }
+
+    private func descendants(of view: NSView?) -> [NSView] {
+        guard let view else { return [] }
+        return view.subviews + view.subviews.flatMap { descendants(of: $0) }
+    }
+
+    private func foregroundColor(in textView: NSTextView, at index: Int) throws -> NSColor {
+        let value = textView.textStorage?.attribute(.foregroundColor, at: index, effectiveRange: nil)
+        return try #require(value as? NSColor)
+    }
+
+    private func resolvedLuminance(_ color: NSColor, appearance: NSAppearance) throws -> CGFloat {
+        var resolved: NSColor?
+        appearance.performAsCurrentDrawingAppearance {
+            resolved = color.usingColorSpace(.deviceRGB)
+        }
+        let rgb = try #require(resolved)
+        return 0.2126 * rgb.redComponent
+            + 0.7152 * rgb.greenComponent
+            + 0.0722 * rgb.blueComponent
     }
 
     @Test("Interactive editor exposes a stable VoiceOver identifier")

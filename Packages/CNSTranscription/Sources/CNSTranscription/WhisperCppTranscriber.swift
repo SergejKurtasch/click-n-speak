@@ -103,18 +103,68 @@ public actor WhisperCppTranscriber: Transcribing {
         // contaminates later sessions and duplicates that bounded context.
         params.no_context = true
 
-        // Force the language only when exactly one is allowed (matches the
-        // Python rule); otherwise auto-detect.
-        let language: String? = request.allowedLanguages.count == 1 ? request.allowedLanguages[0] : nil
+        guard !Task.isCancelled else {
+            return TranscriptionResult(text: "", outcome: .aborted)
+        }
 
-        let result = runDecode(ctx: ctx, audio: request.audio, params: &params,
-                               language: language, prompt: request.initialPrompt)
+        // Whisper's ordinary auto-detection considers every supported language.
+        // For a configured multilingual set, rank only those languages using
+        // audio-only probabilities before decoding the transcript.
+        let detectStartedAt = ProcessInfo.processInfo.systemUptime
+        let language = detectAllowedLanguage(
+            ctx: ctx,
+            audio: request.audio,
+            allowedLanguages: request.allowedLanguages
+        )
+        let detectDuration = request.allowedLanguages.count > 1
+            ? (ProcessInfo.processInfo.systemUptime - detectStartedAt)
+            : nil
+
+        let prompt = AllowedLanguageSelection.prompt(
+            for: language,
+            overrides: request.initialPromptsByLanguage,
+            fallback: request.initialPrompt
+        )
+        var result = runDecode(ctx: ctx, audio: request.audio, params: &params,
+                               language: language, prompt: prompt)
+        result.stageDurations?.languageDetectionSeconds = detectDuration
         lastDecodeAt = Date()
 
-        guard let retried = languageRetryIfNeeded(ctx: ctx, request: request, result: result) else {
+        guard let retried = languageRetryIfNeeded(
+            ctx: ctx, request: request, result: result,
+            language: language, prompt: prompt
+        ) else {
             return result
         }
         return retried
+    }
+
+    private func detectAllowedLanguage(
+        ctx: OpaquePointer,
+        audio: [Float],
+        allowedLanguages: [String]
+    ) -> String? {
+        if allowedLanguages.count == 1 { return allowedLanguages[0] }
+        guard !allowedLanguages.isEmpty else { return nil }
+
+        let melStatus = audio.withUnsafeBufferPointer { samples in
+            whisper_pcm_to_mel(ctx, samples.baseAddress, Int32(samples.count), threadCount)
+        }
+        guard melStatus == 0 else { return nil }
+
+        var probabilities = [Float](
+            repeating: 0,
+            count: Int(whisper_lang_max_id()) + 1
+        )
+        let detectionStatus = probabilities.withUnsafeMutableBufferPointer { buffer in
+            whisper_lang_auto_detect(ctx, 0, threadCount, buffer.baseAddress)
+        }
+        guard detectionStatus >= 0 else { return nil }
+        return AllowedLanguageSelection.select(
+            allowedLanguages: allowedLanguages,
+            probabilities: probabilities,
+            languageID: { language in language.withCString { whisper_lang_id($0) } }
+        )
     }
 
     public func transcribeFile(
@@ -202,10 +252,12 @@ public actor WhisperCppTranscriber: Transcribing {
     /// When a non-final, non-trivial chunk decodes into a language outside the
     /// allowed set, pad it with 0.1 s of silence on both ends to shift the
     /// decoding window and try once more. The retry text is kept regardless of
-    /// its language (losing the chunk is worse); only an empty retry drops it.
+    /// its language (losing the chunk is worse); an empty retry remains a
+    /// no-speech outcome while retaining the timing from both attempts.
     /// Returns nil when no retry applies.
     private func languageRetryIfNeeded(
-        ctx: OpaquePointer, request: TranscriptionRequest, result: TranscriptionResult
+        ctx: OpaquePointer, request: TranscriptionRequest, result: TranscriptionResult,
+        language: String?, prompt: String?
     ) -> TranscriptionResult? {
         guard !request.isFinalChunk, !request.allowedLanguages.isEmpty, !result.text.isEmpty else { return nil }
 
@@ -223,14 +275,27 @@ public actor WhisperCppTranscriber: Transcribing {
         let pad = [Float](repeating: 0, count: 1600) // 0.1 s at 16 kHz
         let padded = pad + request.audio + pad
         var params = makeParams()
-        let language: String? = request.allowedLanguages.count == 1 ? request.allowedLanguages[0] : nil
         let retry = runDecode(ctx: ctx, audio: padded, params: &params,
-                              language: language, prompt: request.initialPrompt)
-        guard !retry.text.isEmpty else { return retry }
-        var retried = retry
-        retried.retryCount = result.retryCount + 1
-        retried.durationSeconds += result.durationSeconds
-        return retried
+                              language: language, prompt: prompt)
+        return Self.aggregateLanguageRetry(original: result, retry: retry)
+    }
+
+    static func aggregateLanguageRetry(
+        original: TranscriptionResult,
+        retry: TranscriptionResult
+    ) -> TranscriptionResult {
+        var aggregated = retry
+        aggregated.retryCount = original.retryCount + 1
+        aggregated.durationSeconds += original.durationSeconds
+
+        let languageDetection = original.stageDurations?.languageDetectionSeconds
+        let firstDecode = original.stageDurations?.decodeSeconds ?? 0
+        let decode2 = retry.stageDurations?.decodeSeconds ?? 0
+        aggregated.stageDurations = TranscriptionStageDurations(
+            languageDetectionSeconds: languageDetection,
+            decodeSeconds: firstDecode + decode2
+        )
+        return aggregated
     }
 
     private func makeParams() -> whisper_full_params {
@@ -307,7 +372,8 @@ public actor WhisperCppTranscriber: Transcribing {
                             outcome: .aborted,
                             backend: "local",
                             modelID: modelID,
-                            durationSeconds: duration
+                            durationSeconds: duration,
+                            stageDurations: TranscriptionStageDurations(decodeSeconds: duration)
                         )
                     }
                     return TranscriptionResult(
@@ -315,7 +381,8 @@ public actor WhisperCppTranscriber: Transcribing {
                         outcome: .failed(.init(kind: .decode, message: "Local speech decoding failed")),
                         backend: "local",
                         modelID: modelID,
-                        durationSeconds: duration
+                        durationSeconds: duration,
+                        stageDurations: TranscriptionStageDurations(decodeSeconds: duration)
                     )
                 }
 
@@ -339,7 +406,8 @@ public actor WhisperCppTranscriber: Transcribing {
                     outcome: text.isEmpty ? .noSpeech : .success,
                     backend: "local",
                     modelID: modelID,
-                    durationSeconds: duration
+                    durationSeconds: duration,
+                    stageDurations: TranscriptionStageDurations(decodeSeconds: duration)
                 )
             }
         }

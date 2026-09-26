@@ -12,6 +12,7 @@
     "hud.recording_body": "Jetzt sprechen. Hotkey erneut drücken zum Beenden.",
     "hud.transcribing_title": "Transkribieren...",
     "hud.transcribing_body": "Erkennung läuft. Bitte warten.",
+    "hud.refining_title": "Überarbeitung…",
     "hud.still_working_title": "Transkribieren... noch in Arbeit",
     "hud.still_working_body": "Erkennung läuft noch. Bitte warten.",
     "hud.ready_title": "Bereit",
@@ -533,5 +534,6 @@
     "dialog.refinement_timeout": "Refinement timed out.",
     "dialog.refinement_failed": "Refinement failed.",
     "dialog.editor_disabled_reason": "Disabled in settings",
-    "dialog.editor_preparing_reason": "Starting up..."
+    "dialog.editor_preparing_reason": "Starting up...",
+    "preview.refining_append": "Neue Aufnahme · Überarbeitung…"
 }

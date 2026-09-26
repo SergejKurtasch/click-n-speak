@@ -1,4 +1,5 @@
 #if CNS_MODEL_TESTS
+import CNSCore
 import Darwin
 import Foundation
 import Testing
@@ -7,6 +8,7 @@ import Testing
 private struct GoldenThresholds: Decodable {
     let source: String
     let initialPrompt: String
+    let benchmarkUserTerms: [String: [String]]
     let maximumOverallWER: Double
     let maximumRussianWER: Double
     let maximumEnglishWER: Double
@@ -23,6 +25,7 @@ private struct GoldenThresholds: Decodable {
     enum CodingKeys: String, CodingKey {
         case source
         case initialPrompt = "initial_prompt"
+        case benchmarkUserTerms = "benchmark_user_terms"
         case maximumOverallWER = "maximum_overall_wer"
         case maximumRussianWER = "maximum_russian_wer"
         case maximumEnglishWER = "maximum_english_wer"
@@ -123,13 +126,64 @@ private enum GoldenScoring {
     }
 }
 
-@Suite("WhisperCpp real-model golden parity")
+@Suite("WhisperCpp real-model golden parity", .serialized)
 struct WhisperCppTranscriberTests {
+    @Test("A Russian-primary bilingual profile preserves each spoken language")
+    func bilingualSpokenLanguages() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        let modelPath = try #require(environment["CNS_WHISPER_MODEL"])
+        let modelID = try #require(environment["CNS_WHISPER_MODEL_ID"])
+        let corpusRoot = environment["CNS_STT_GOLDEN_DIR"].map(URL.init(fileURLWithPath:))
+            ?? Self.repositoryRoot.appendingPathComponent("spikes/stt-bakeoff/golden")
+        let manifest = try Self.loadManifest(
+            corpusRoot.appendingPathComponent("manifest.jsonl")
+        )
+        let englishRow = try #require(manifest.first { $0.id == "040" })
+        let russianRow = try #require(manifest.first { $0.id == "001" })
+        let audioRoot = corpusRoot.appendingPathComponent("audio_16k")
+        let englishAudio = try Self.readWAV(audioRoot.appendingPathComponent(englishRow.audio))
+        let russianAudio = try Self.readWAV(audioRoot.appendingPathComponent(russianRow.audio))
+        let modelURL = URL(fileURLWithPath: modelPath)
+        try Self.validateModelIdentity(modelURL, modelID: modelID)
+        let engine = WhisperCppTranscriber(
+            modelURL: modelURL,
+            modelID: modelID
+        )
+        let prompts = [
+            "ru": "Русский язык. Это разговорная речь.",
+            "en": "English language. This is spoken language with professional and technical vocabulary."
+        ]
+        let english = await engine.transcribe(.init(
+            audio: englishAudio,
+            initialPrompt: "Расставляй знаки препинания. Пиши с заглавной буквы. Русский язык. English language. Это разговорная речь.",
+            initialPromptsByLanguage: prompts,
+            allowedLanguages: ["ru", "en"],
+            isFinalChunk: true
+        ))
+        let russian = await engine.transcribe(.init(
+            audio: russianAudio,
+            initialPrompt: "Расставляй знаки препинания. Пиши с заглавной буквы. Русский язык. English language. Это разговорная речь.",
+            initialPromptsByLanguage: prompts,
+            allowedLanguages: ["ru", "en"],
+            isFinalChunk: true
+        ))
+        await engine.stop()
+
+        #expect(english.outcome == .success)
+        #expect(english.detectedLanguage == "en")
+        #expect(english.text.lowercased().contains("please review"))
+        #expect(russian.outcome == .success)
+        #expect(russian.detectedLanguage == "ru")
+        #expect(russian.text.contains("Останови"))
+    }
+
     @Test("42-phrase corpus meets declared quality, latency, and RSS thresholds")
     func goldenCorpus() async throws {
         let environment = ProcessInfo.processInfo.environment
         let modelPath = try #require(environment["CNS_WHISPER_MODEL"])
+        let modelID = try #require(environment["CNS_WHISPER_MODEL_ID"])
         let modelURL = URL(fileURLWithPath: modelPath)
+        try Self.validateModelIdentity(modelURL, modelID: modelID)
         let corpusRoot = environment["CNS_STT_GOLDEN_DIR"].map(URL.init(fileURLWithPath:))
             ?? Self.repositoryRoot.appendingPathComponent("spikes/stt-bakeoff/golden")
         let thresholds = try Self.loadThresholds()
@@ -138,7 +192,7 @@ struct WhisperCppTranscriberTests {
 
         let engine = WhisperCppTranscriber(
             modelURL: modelURL,
-            modelID: "ggml-large-v3-turbo"
+            modelID: modelID
         )
         let guarded = GuardedTranscriber(wrapping: engine)
         let context = await ChunkContextBuilder().build(
@@ -248,6 +302,100 @@ struct WhisperCppTranscriberTests {
         #expect(peakRSS <= thresholds.maximumPeakRSSMB)
     }
 
+    @Test("Bilingual session request meets the corpus quality gates")
+    func bilingualSessionRequestCorpus() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["CNS_RUN_BILINGUAL_SESSION_PROMPT_MODEL_TESTS"] == "1" else { return }
+        let modelPath = try #require(environment["CNS_WHISPER_MODEL"])
+        let modelID = try #require(environment["CNS_WHISPER_MODEL_ID"])
+        let modelURL = URL(fileURLWithPath: modelPath)
+        try Self.validateModelIdentity(modelURL, modelID: modelID)
+        let corpusRoot = environment["CNS_STT_GOLDEN_DIR"].map(URL.init(fileURLWithPath:))
+            ?? Self.repositoryRoot.appendingPathComponent("spikes/stt-bakeoff/golden")
+        let thresholds = try Self.loadThresholds()
+        let rows = try Self.loadManifest(corpusRoot.appendingPathComponent("manifest.jsonl"))
+        let config = Self.benchmarkConfig(thresholds: thresholds)
+        let engine = WhisperCppTranscriber(modelURL: modelURL, modelID: modelID)
+        let context = await ChunkContextBuilder().build(
+            instruction: "",
+            vocabPrompt: thresholds.initialPrompt,
+            transcribedParts: [],
+            tokenCount: { text in await engine.tokenCount(text) }
+        )
+        let languagePrompts = await Self.languagePrompts(config: config, engine: engine)
+        let guarded = GuardedTranscriber(wrapping: engine)
+        var overall = WERAccumulator()
+        var warmDurations: [Double] = []
+
+        for (index, row) in rows.enumerated() {
+            let audio = try Self.readWAV(
+                corpusRoot.appendingPathComponent("audio_16k").appendingPathComponent(row.audio)
+            )
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            let result = await guarded.transcribe(TranscriptionRequest(
+                audio: audio,
+                initialPrompt: context,
+                initialPromptsByLanguage: languagePrompts,
+                allowedLanguages: ["ru", "en"],
+                isFinalChunk: true
+            ))
+            #expect(result.outcome == .success)
+            overall.add(
+                reference: GoldenScoring.normalize(row.text),
+                hypothesis: GoldenScoring.normalize(result.text)
+            )
+            if index > 0 {
+                warmDurations.append(ProcessInfo.processInfo.systemUptime - startedAt)
+            }
+        }
+        await engine.stop()
+
+        let warmP50 = GoldenScoring.percentile(warmDurations, 0.50)
+        print(String(
+            format: "Bilingual session-request WER %.3f warm p50 %.2f",
+            overall.value,
+            warmP50
+        ))
+        #expect(overall.value <= thresholds.maximumOverallWER)
+        #expect(warmP50 <= thresholds.maximumWarmP50Seconds)
+    }
+
+    private static func benchmarkConfig(thresholds: GoldenThresholds) -> Config {
+        var raw = JSONObject()
+        raw["schema_version"] = .int(10)
+        raw["primary_language"] = .string("ru")
+        raw["additional_languages"] = .array([.string("en")])
+        raw["language_auto_detect"] = .bool(false)
+        raw["initial_prompt"] = .string(thresholds.initialPrompt)
+        var userTerms = JSONObject()
+        for (language, terms) in thresholds.benchmarkUserTerms {
+            userTerms[language] = .array(terms.map(JSONValue.string))
+        }
+        raw["user_terms"] = .object(userTerms)
+        return Config(raw: raw)
+    }
+
+    private static func languagePrompts(
+        config: Config,
+        engine: WhisperCppTranscriber
+    ) async -> [String: String] {
+        let builder = InitialPromptBuilder()
+        var prompts: [String: String] = [:]
+        for language in ["ru", "en"] {
+            var raw = config.raw
+            raw["primary_language"] = .string(language)
+            raw["additional_languages"] = .array([])
+            let prompt = await ChunkContextBuilder().build(
+                instruction: "",
+                vocabPrompt: builder.build(config: raw),
+                transcribedParts: [],
+                tokenCount: { text in await engine.tokenCount(text) }
+            )
+            if !prompt.isEmpty { prompts[language] = prompt }
+        }
+        return prompts
+    }
+
     private static var repositoryRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -272,6 +420,14 @@ struct WhisperCppTranscriberTests {
         try String(contentsOf: url, encoding: .utf8)
             .split(whereSeparator: \.isNewline)
             .map { try JSONDecoder().decode(GoldenRow.self, from: Data($0.utf8)) }
+    }
+
+    private static func validateModelIdentity(_ modelURL: URL, modelID: String) throws {
+        guard let model = ModelRegistry.whisperModel(id: modelID) else { return }
+        #expect(modelURL.lastPathComponent == model.fileName)
+        guard modelURL.lastPathComponent == model.fileName else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
     }
 
     private static func readWAV(_ url: URL) throws -> [Float] {

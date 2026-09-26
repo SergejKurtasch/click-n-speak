@@ -12,6 +12,7 @@
     "hud.recording_body": "Говори зараз. Натисни гарячу клавішу ще раз, щоб зупинити.",
     "hud.transcribing_title": "Транскрипція...",
     "hud.transcribing_body": "Розпізнавання триває. Зачекай, будь ласка.",
+    "hud.refining_title": "Редагування…",
     "hud.still_working_title": "Транскрипція... ще обробляється",
     "hud.still_working_body": "Розпізнавання ще триває. Зачекай, будь ласка.",
     "hud.ready_title": "Готово",
@@ -535,5 +536,6 @@
     "dialog.refinement_timeout": "Refinement timed out.",
     "dialog.refinement_failed": "Refinement failed.",
     "dialog.editor_disabled_reason": "Disabled in settings",
-    "dialog.editor_preparing_reason": "Starting up..."
+    "dialog.editor_preparing_reason": "Starting up...",
+    "preview.refining_append": "Новий запис · Редагування…"
 }

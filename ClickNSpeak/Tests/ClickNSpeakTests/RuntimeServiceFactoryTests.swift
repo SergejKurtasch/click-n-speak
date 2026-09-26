@@ -6,6 +6,7 @@ import Testing
 private actor UnreadyEditor: AiEditing {
     nonisolated let isReady = false
     private(set) var stopCount = 0
+    private(set) var prewarmCount = 0
 
     func refine(
         text: String,
@@ -25,6 +26,11 @@ private actor UnreadyEditor: AiEditing {
         RefineResult(text: text, status: .unchanged)
     }
 
+    func preWarm(languages: [String]?, force: Bool) async -> PrewarmResult {
+        prewarmCount += 1
+        return .warmed
+    }
+
     func stop() async { stopCount += 1 }
 }
 
@@ -39,5 +45,14 @@ struct EditorPreparationCleanupTests {
             try await service.prepare()
         }
         #expect(await inner.stopCount == 1)
+    }
+
+    @Test("The production editor wrapper forwards local prewarm")
+    func editorWrapperForwardsPrewarm() async {
+        let inner = UnreadyEditor()
+        let service = AccessTokenReleasingEditor(inner: inner, tokens: [])
+
+        #expect(await service.preWarm(languages: ["ru", "en"], force: true) == .warmed)
+        #expect(await inner.prewarmCount == 1)
     }
 }

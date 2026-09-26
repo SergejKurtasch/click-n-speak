@@ -14,6 +14,7 @@ public struct PopupDraft: Sendable, Equatable {
         public let runtime: RuntimeDescriptor
         public let promptHash: String
         public let detectedLanguage: String?
+        public let editorLatencyMs: Int?
 
         public init(
             sessionID: Int,
@@ -23,7 +24,8 @@ public struct PopupDraft: Sendable, Equatable {
             presentedText: String,
             runtime: RuntimeDescriptor,
             promptHash: String,
-            detectedLanguage: String?
+            detectedLanguage: String?,
+            editorLatencyMs: Int? = nil
         ) {
             self.sessionID = sessionID
             self.rawWhisper = rawWhisper
@@ -33,6 +35,7 @@ public struct PopupDraft: Sendable, Equatable {
             self.runtime = runtime
             self.promptHash = promptHash
             self.detectedLanguage = detectedLanguage
+            self.editorLatencyMs = editorLatencyMs
         }
 
         var datasetSegment: DatasetSegment {
@@ -86,6 +89,11 @@ public struct PopupDraft: Sendable, Equatable {
         guard let first = segments.first?.aiStatus,
               segments.allSatisfy({ $0.aiStatus == first }) else { return nil }
         return first
+    }
+
+    public var aggregateEditorLatencyMs: Int? {
+        let latencies = segments.compactMap(\.editorLatencyMs)
+        return latencies.isEmpty ? nil : latencies.reduce(0, +)
     }
 
     var aggregateRuntime: RuntimeDescriptor {

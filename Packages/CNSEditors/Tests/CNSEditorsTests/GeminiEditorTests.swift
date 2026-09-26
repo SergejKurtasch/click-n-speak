@@ -5,6 +5,14 @@ import Testing
 
 @Suite("Gemini AI editor")
 struct GeminiEditorTests {
+    @Test("Default cloud prewarm never sends HTTP")
+    func prewarmNeverSendsHTTP() async {
+        let client = ScriptedEditorHTTPClient(responses: [])
+        let editor = GeminiEditor(modelName: "gemini-test", apiKey: "key", realtimeClient: client, fileClient: client)
+        #expect(await editor.preWarm(languages: ["ru", "en"], force: true) == .skipped)
+        #expect(client.callCount == 0)
+    }
+
     @Test("Initialization and every HTTP result preserve the original on fallback")
     func statusMatrix() async {
         let disabled = GeminiEditor(modelName: "gemini-test", apiKey: "")

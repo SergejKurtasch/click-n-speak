@@ -137,8 +137,7 @@ def _build_chunk_context(
     base_tokens = _count_prompt_tokens(base)
     if base_tokens > token_limit:
         log_info(
-            f"_build_chunk_context: base exceeds token limit "
-            f"({base_tokens} > {token_limit}); recent_text skipped"
+            f"_build_chunk_context: base exceeds token limit " f"({base_tokens} > {token_limit}); recent_text skipped"
         )
 
     available_chars = min(
@@ -183,6 +182,7 @@ def _apply_candidates_to_user_terms(config: dict, candidates: dict) -> None:
     build_initial_prompt enforces the final length via _MAX_PROMPT_CHARS.
     """
     from datetime import datetime, timezone
+
     now_iso = datetime.now(timezone.utc).isoformat()
     user_terms = dict(config.get("user_terms") or {})
     for lang, items in candidates.items():
@@ -196,13 +196,15 @@ def _apply_candidates_to_user_terms(config: dict, candidates: dict) -> None:
             if term_key not in existing_lower:
                 raw_source = item.get("source", "auto")
                 source = raw_source if raw_source in ("manual", "auto", "correction") else "auto"
-                current.append({
-                    "term": clean_term,
-                    "source": source,
-                    "added_at": now_iso,
-                    "last_seen": now_iso,
-                    "use_count": item.get("frequency_count", 0),
-                })
+                current.append(
+                    {
+                        "term": clean_term,
+                        "source": source,
+                        "added_at": now_iso,
+                        "last_seen": now_iso,
+                        "use_count": item.get("frequency_count", 0),
+                    }
+                )
                 existing_lower.add(term_key)
         user_terms[lang] = current
     config["user_terms"] = user_terms
@@ -337,7 +339,9 @@ class SVoiceRecApp:
         self.debounce_interval = 0.3  # seconds
 
         # Streaming state
-        self.chunk_queue = queue.Queue(maxsize=30)  # ~4 min of 8s chunks; prevents unbounded growth if transcriber hangs
+        self.chunk_queue = queue.Queue(
+            maxsize=30
+        )  # ~4 min of 8s chunks; prevents unbounded growth if transcriber hangs
         self.transcribed_parts = []
         self.worker_thread = None  # type: threading.Thread | None
         self.stop_worker = threading.Event()
@@ -386,6 +390,7 @@ class SVoiceRecApp:
         self._raw_whisper_chunks = []  # raw Whisper output per chunk, before AI editing
         self._ai_edited_text = None
         self._ai_editor_status: Optional[str] = None
+        self._ai_editor_latency_ms: Optional[float] = None
         self._detected_transcription_lang: str = ""
         self._needs_buffered_finalization: bool = False
         self._buffered_final_text: Optional[str] = None
@@ -410,6 +415,7 @@ class SVoiceRecApp:
     def _ensure_preview_panel(self):
         if self._preview_panel is None:
             from .preview_panel import TranscriptionPreviewPanel
+
             self._preview_panel = TranscriptionPreviewPanel()
 
     def _run_local_mlx(self, operation: Callable[[], Any]) -> Any:
@@ -422,6 +428,7 @@ class SVoiceRecApp:
 
     def _start_injection_worker(self, text: str) -> None:
         """Inject outside the AppKit main thread after focus is confirmed."""
+
         def _worker() -> None:
             emit_runtime_event("injection_started", char_count=len(text))
             result: InjectionResult = inject_text(text)
@@ -587,7 +594,9 @@ class SVoiceRecApp:
                 return
             editor.load()
             if editor.is_ready():
-                self.notify(i18n.t("notify.ai_ready_title"), i18n.t("notify.ai_ready_body_gemini", model=editor.model_name))
+                self.notify(
+                    i18n.t("notify.ai_ready_title"), i18n.t("notify.ai_ready_body_gemini", model=editor.model_name)
+                )
                 log_info(f"GeminiEditor loaded and ready (model={editor.model_name}).")
             else:
                 log_error("GeminiEditor failed to initialise — editor will be skipped.")
@@ -606,18 +615,14 @@ class SVoiceRecApp:
         self._model_warming = True
         self._ensure_preview_panel()
         self._preview_panel.show(i18n.t("hud.preparing_title"), self._main_thread_queue)
-        self._model_warmup_thread = threading.Thread(
-            target=self._model_warmup_worker, daemon=True
-        )
+        self._model_warmup_thread = threading.Thread(target=self._model_warmup_worker, daemon=True)
         self._model_warmup_thread.start()
 
     def _model_warmup_worker(self) -> None:
         try:
             log_info("Starting Whisper warm-up in background thread.")
             primary_lang = get_primary_language(self.config)
-            self._run_local_mlx(
-                lambda: self.transcriber.warmup(language=primary_lang)
-            )
+            self._run_local_mlx(lambda: self.transcriber.warmup(language=primary_lang))
             # Wait for warmup_done with a hard deadline so a crashed child process
             # does not leave _model_warming=True and permanently block all recordings.
             deadline = time.monotonic() + 60.0
@@ -647,11 +652,7 @@ class SVoiceRecApp:
             self._model_warming = False
             # Whisper owns startup GPU priority. Only after its warmup resolves
             # (success or bounded failure) may local Qwen load and warm Metal.
-            if (
-                self.config.get("ai_editor_enabled", False)
-                and self.ai_editor is None
-                and self.gemini_editor is None
-            ):
+            if self.config.get("ai_editor_enabled", False) and self.ai_editor is None and self.gemini_editor is None:
                 self._init_ai_editor()
 
     def load_config(self, path):
@@ -739,10 +740,7 @@ class SVoiceRecApp:
 
             self.last_toggle_time = current_time
 
-            log_info(
-                f"Hotkey pressed. is_recording={self.is_recording}, "
-                f"is_processing={self.is_processing}"
-            )
+            log_info(f"Hotkey pressed. is_recording={self.is_recording}, " f"is_processing={self.is_processing}")
 
             if self.is_processing:
                 log_info("Still processing previous recording. Please wait.")
@@ -753,11 +751,7 @@ class SVoiceRecApp:
                 return
 
             # Do not start a new recording cycle while warm-up is in progress.
-            if (
-                not self.is_recording
-                and self._model_warming
-                and not self.model_ready_event.is_set()
-            ):
+            if not self.is_recording and self._model_warming and not self.model_ready_event.is_set():
                 log_info("Ignoring hotkey: model warm-up in progress.")
                 self._ensure_preview_panel()
                 self._preview_panel.show(i18n.t("hud.preparing_wait_title"), self._main_thread_queue)
@@ -767,10 +761,7 @@ class SVoiceRecApp:
             if not self.is_recording:
                 # Set immediately to prevent rapid double-triggers
                 self.is_recording = True
-                self._append_to_popup = (
-                    self._preview_panel is not None
-                    and self._preview_panel._is_interactive
-                )
+                self._append_to_popup = self._preview_panel is not None and self._preview_panel._is_interactive
                 if self._append_to_popup:
                     log_info("Popup is open — new recording will append to existing text.")
                 threading.Thread(target=self.start_recording, daemon=True).start()
@@ -914,9 +905,7 @@ class SVoiceRecApp:
         self._schedule_pending_transcriber_restart()
         if self._session_had_cold_start:
             self._session_had_cold_start = False
-            threading.Thread(
-                target=self._do_post_cold_start_warmup, daemon=True, name="post-cold-warmup"
-            ).start()
+            threading.Thread(target=self._do_post_cold_start_warmup, daemon=True, name="post-cold-warmup").start()
 
     def _do_post_cold_start_warmup(self) -> None:
         """Send an extra warmup after a cold-start session to pre-heat GPU for the next session.
@@ -927,6 +916,7 @@ class SVoiceRecApp:
         2-3 consecutive recordings because GPU weights are only partially reloaded.
         """
         import time as _time
+
         _time.sleep(50)
         if self.is_recording or self.is_processing:
             return
@@ -934,11 +924,7 @@ class SVoiceRecApp:
         started_at = time.monotonic()
         success = False
         try:
-            success = bool(
-                self._run_local_mlx(
-                    lambda: self.transcriber.pre_warm(wait=True)
-                )
-            )
+            success = bool(self._run_local_mlx(lambda: self.transcriber.pre_warm(wait=True)))
             if success:
                 log_info("Post-cold-start Whisper prewarm confirmed.")
             else:
@@ -969,6 +955,7 @@ class SVoiceRecApp:
         stop_recording_and_process (when Recorder.stop() returns None but partial
         chunks were already transcribed and buffered).
         """
+
         def _on_confirm(user_text):
             def _run_injection():
                 try:
@@ -981,16 +968,12 @@ class SVoiceRecApp:
                         for t in self.config.get("user_terms", {}).get(_detected_lang, [])
                         if _term_is_active(t)
                     ]
-                    _prompt_hash = hashlib.md5(
-                        self.config.get("initial_prompt", "").encode()
-                    ).hexdigest()[:12]
+                    _prompt_hash = hashlib.md5(self.config.get("initial_prompt", "").encode()).hexdigest()[:12]
 
                     # Cloud backends (gemini, openai) both use stt_cloud_model
                     _stt_backend = self.config.get("stt_backend", "local")
                     _stt_model = (
-                        self.config.get("model_name")
-                        if _stt_backend == "local"
-                        else self.config.get("stt_cloud_model")
+                        self.config.get("model_name") if _stt_backend == "local" else self.config.get("stt_cloud_model")
                     )
 
                     # Only log ai_model when AI Editor is actually enabled
@@ -1011,8 +994,12 @@ class SVoiceRecApp:
                         lang=_detected_lang,
                         user_terms_for_lang=_active_terms,
                         prompt_hash=_prompt_hash,
+                        stt_backend=_stt_backend,
                         stt_model=_stt_model,
                         ai_model=_ai_model,
+                        editor_latency_ms=(
+                            int(self._ai_editor_latency_ms) if self._ai_editor_latency_ms is not None else None
+                        ),
                     )
                     log_info("_run_injection: dataset saved")
 
@@ -1058,9 +1045,7 @@ class SVoiceRecApp:
             additional = list(self.config.get("additional_languages") or [])
             term_script = detect_term_script(term)
             target_lang = (
-                target_lang_for_script_bucket(term_script, primary, additional)
-                if term_script is not None
-                else primary
+                target_lang_for_script_bucket(term_script, primary, additional) if term_script is not None else primary
             )
             added = add_term_to_user_terms(self.config, target_lang, term, source="manual")
             if not added:
@@ -1077,7 +1062,7 @@ class SVoiceRecApp:
                 mb._sync_prompt_file(target_lang)
             log_info(f"Added term to dictionary via popup: {term} -> {target_lang}")
             lang_name = LANG_NAMES.get(target_lang, target_lang.upper())
-            return f'„{term}“ → {lang_name}'
+            return f"„{term}“ → {lang_name}"
 
         return _on_confirm, _on_cancel, _on_add_to_dictionary
 
@@ -1094,6 +1079,7 @@ class SVoiceRecApp:
         last_check = int(self.config.get("last_analysis_phrase_count", 0))
         try:
             from .phrase_history import count_phrases
+
             current = count_phrases()
         except Exception:
             return
@@ -1109,9 +1095,7 @@ class SVoiceRecApp:
             ):
                 if not self._analysis_lock.acquire(blocking=False):
                     return
-                self._last_fast_path_processed_rows = int(
-                    corrections_index.get("processed_rows", 0)
-                )
+                self._last_fast_path_processed_rows = int(corrections_index.get("processed_rows", 0))
                 threading.Thread(
                     target=self._run_prompt_analysis,
                     kwargs={
@@ -1179,8 +1163,7 @@ class SVoiceRecApp:
 
             skipped_raw = self.config.get("skipped_terms") or {}
             skipped: dict[str, dict[str, int]] = {
-                lang: {canonical_term_key(t): cnt for t, cnt in terms.items()}
-                for lang, terms in skipped_raw.items()
+                lang: {canonical_term_key(t): cnt for t, cnt in terms.items()} for lang, terms in skipped_raw.items()
             }
 
             primary_lang = get_primary_language(self.config)
@@ -1253,6 +1236,7 @@ class SVoiceRecApp:
             mode = self.config.get("prompt_update_mode", "suggest")
 
             if mode == "auto" and candidates:
+
                 def _commit_auto(candidates=candidates, on_complete=on_complete):
                     _apply_candidates_to_user_terms(self.config, candidates)
                     self.config["initial_prompt"] = build_initial_prompt(self.config)
@@ -1267,8 +1251,10 @@ class SVoiceRecApp:
                     log_info(f"Auto-applied {total} prompt candidates to user_terms.")
                     if on_complete is not None:
                         on_complete()
+
                 self._submit_for_main_thread(_commit_auto)
             elif mode == "suggest" and candidates:
+
                 def _commit_suggest(candidates=candidates, on_complete=on_complete):
                     # Merge with existing pending: update count for known terms, add new ones.
                     existing_pending = dict(self.config.get("pending_suggestions") or {})
@@ -1298,11 +1284,7 @@ class SVoiceRecApp:
                                 )
                                 prev_source = by_lower[lower].get("source", "frequency")
                                 new_source = item.get("source", "frequency")
-                                by_lower[lower]["source"] = (
-                                    "both"
-                                    if prev_source != new_source
-                                    else prev_source
-                                )
+                                by_lower[lower]["source"] = "both" if prev_source != new_source else prev_source
                             else:
                                 new_item = dict(item)
                                 new_item["term"] = term
@@ -1316,6 +1298,7 @@ class SVoiceRecApp:
                         mb.update_suggest_menu_badge()
                     if on_complete is not None:
                         on_complete()
+
                 self._submit_for_main_thread(_commit_suggest)
             else:
                 save_config_to_disk(self.config)
@@ -1333,6 +1316,7 @@ class SVoiceRecApp:
     def run_decay_if_due(self) -> None:
         """Run apply_decay() at most once per 24 h; called by menu-bar hourly timer."""
         from datetime import datetime, timedelta, timezone
+
         last_run = self.config.get("last_decay_run_ts")
         now = datetime.now(timezone.utc)
         if last_run:
@@ -1466,9 +1450,7 @@ class SVoiceRecApp:
                 backend=backend,
                 model_name=config.get("stt_cloud_model", DEFAULT_CLOUD_STT_MODEL),
             )
-        return TranscriberProcessWrapper(
-            model_name=config.get("model_name", "mlx-community/whisper-large-v3-turbo")
-        )
+        return TranscriberProcessWrapper(model_name=config.get("model_name", "mlx-community/whisper-large-v3-turbo"))
 
     def update_transcriber(self, model_name):
         log_info(f"Updating transcriber to {model_name}...")
@@ -1498,14 +1480,13 @@ class SVoiceRecApp:
             return
         log_info("Starting recording...")
         # is_recording already set to True in toggle_recording() before this thread started
-        self._submit_for_main_thread(
-            lambda: self.menu_bar.set_status(recording=True) if self.menu_bar else None
-        )
+        self._submit_for_main_thread(lambda: self.menu_bar.set_status(recording=True) if self.menu_bar else None)
         self.transcribed_parts = []
         self._raw_whisper_text = ""
         self._raw_whisper_chunks = []
         self._ai_edited_text = None
         self._ai_editor_status = None
+        self._ai_editor_latency_ms = None
         self._last_final_text_for_restart_fallback = None
         self._detected_transcription_lang = ""
         self._needs_buffered_finalization = False
@@ -1528,10 +1509,12 @@ class SVoiceRecApp:
         if not self._append_to_popup:
             self._previous_app_pid = None
             if NSWorkspace is not None:
+
                 def _capture_app():
                     app = NSWorkspace.sharedWorkspace().frontmostApplication()
                     if app:
                         self._previous_app_pid = app.processIdentifier()
+
                 self._submit_for_main_thread(_capture_app)
 
         # Clear the queue just in case
@@ -1574,9 +1557,7 @@ class SVoiceRecApp:
             self.is_recording = False
             log_exception(f"Failed to start AudioRecorder: {e}")
             self._submit_for_main_thread(
-                lambda: self.menu_bar.set_status(recording=False, processing=False)
-                if self.menu_bar
-                else None
+                lambda: self.menu_bar.set_status(recording=False, processing=False) if self.menu_bar else None
             )
             self.notify(i18n.t("notify.record_error_title"), i18n.t("notify.record_error_body"))
 
@@ -1636,11 +1617,7 @@ class SVoiceRecApp:
                 audio_chunk = chunk.audio
                 is_final_chunk = chunk.is_final
                 remaining = self.chunk_queue.qsize()
-                drain_note = (
-                    " (draining queue after stop)"
-                    if self.stop_worker.is_set()
-                    else ""
-                )
+                drain_note = " (draining queue after stop)" if self.stop_worker.is_set() else ""
                 log_info(
                     f"Chunk worker received audio chunk of length={len(audio_chunk)}, "
                     f"is_final={is_final_chunk}, chunks_remaining_in_queue={remaining}{drain_note}"
@@ -1686,16 +1663,13 @@ class SVoiceRecApp:
         full_text = _join_chunks(self.transcribed_parts)
         if full_text:
             _active_editor = (
-                self.gemini_editor if (
+                self.gemini_editor
+                if (
                     self.config.get("ai_editor_backend", "local") == "gemini"
                     and self.gemini_editor is not None
                     and self.gemini_editor.is_ready()
-                ) else (
-                    self.ai_editor if (
-                        self.ai_editor is not None
-                        and self.ai_editor.is_ready()
-                    ) else None
                 )
+                else (self.ai_editor if (self.ai_editor is not None and self.ai_editor.is_ready()) else None)
             )
             apply_direct_replacements = True
             if _active_editor is not None and self.config.get("ai_editor_enabled", False):
@@ -1713,6 +1687,7 @@ class SVoiceRecApp:
                         if is_external_api_editor:
                             known_terms = collect_known_terms(self.config, languages)
                             misrecognitions = collect_misrecognitions(languages, config=self.config)
+
                         def refine_call() -> str:
                             return _active_editor.refine(
                                 full_text,
@@ -1720,11 +1695,10 @@ class SVoiceRecApp:
                                 known_terms=known_terms,
                                 misrecognitions=misrecognitions,
                             )
-                        refined = (
-                            refine_call()
-                            if is_external_api_editor
-                            else self._run_local_mlx(refine_call)
-                        )
+
+                        t0 = time.monotonic()
+                        refined = refine_call() if is_external_api_editor else self._run_local_mlx(refine_call)
+                        self._ai_editor_latency_ms = (time.monotonic() - t0) * 1000
                         self._ai_edited_text = refined
                         self._ai_editor_status = _active_editor.last_refine_status
                         apply_direct_replacements = _should_apply_direct_replacements_after_refine(
@@ -1809,9 +1783,7 @@ class SVoiceRecApp:
             context = _build_chunk_context(instruction, vocab_prompt, self.transcribed_parts)
 
             allowed_languages = get_allowed_languages(self.config)
-            condition_on_previous_text = self.config.get(
-                "condition_on_previous_text", True
-            )
+            condition_on_previous_text = self.config.get("condition_on_previous_text", True)
 
             # Detect cold start: first chunk of this session after long idle or under memory
             # pressure — GPU weights may be paged out and need extra time to reload.
@@ -1820,8 +1792,7 @@ class SVoiceRecApp:
             last_returned = getattr(self.transcriber, "_last_transcribe_returned_at", 0.0)
             idle_since_last = time.time() - (last_returned if isinstance(last_returned, (int, float)) else 0.0)
             is_cold_start = len(self.transcribed_parts) == 0 and (
-                idle_since_last > _COLD_START_IDLE_THRESHOLD
-                or self._is_memory_pressure_high()
+                idle_since_last > _COLD_START_IDLE_THRESHOLD or self._is_memory_pressure_high()
             )
             timeout_override = TRANSCRIBER_COLD_START_TIMEOUT_SECONDS if is_cold_start else None
             if is_cold_start:
@@ -1834,7 +1805,11 @@ class SVoiceRecApp:
                 f"condition_on_previous_text={condition_on_previous_text}, "
                 f"context_len={len(context)}"
                 + (", is_final_chunk=True" if is_final_chunk else "")
-                + (f", cold_start_timeout={timeout_override:.0f}s (idle {idle_since_last:.0f}s)" if is_cold_start else "")
+                + (
+                    f", cold_start_timeout={timeout_override:.0f}s (idle {idle_since_last:.0f}s)"
+                    if is_cold_start
+                    else ""
+                )
             )
 
             transcribe_started = time.monotonic()
@@ -1857,6 +1832,7 @@ class SVoiceRecApp:
                     is_final_chunk=is_final_chunk,
                     timeout_override=timeout_override,
                 )
+
             text = (
                 self._run_local_mlx(transcribe_call)
                 if self.config.get("stt_backend", "local") == "local"
@@ -1879,10 +1855,7 @@ class SVoiceRecApp:
                 success=bool(text),
             )
             health_monitor = getattr(self, "_transcriber_health", None)
-            if (
-                self.config.get("stt_backend", "local") == "local"
-                and health_monitor is not None
-            ):
+            if self.config.get("stt_backend", "local") == "local" and health_monitor is not None:
                 self._apply_health_decision(
                     health_monitor.record_decode(
                         decode_duration,
@@ -1913,9 +1886,8 @@ class SVoiceRecApp:
                 if is_final_chunk:
                     # Build raw_whisper_text from pure Whisper output, not AI-edited parts
                     self._raw_whisper_text = " ".join(self._raw_whisper_chunks).strip()
-                    self._detected_transcription_lang = (
-                        self.transcriber.last_detected_language
-                        or get_primary_language(self.config)
+                    self._detected_transcription_lang = self.transcriber.last_detected_language or get_primary_language(
+                        self.config
                     )
 
                 self.transcribed_parts.append(text)
@@ -1928,16 +1900,13 @@ class SVoiceRecApp:
                     # so partial chunks (which make up most of the content) are also
                     # punctuated and capitalized.
                     _active_editor = (
-                        self.gemini_editor if (
+                        self.gemini_editor
+                        if (
                             self.config.get("ai_editor_backend", "local") == "gemini"
                             and self.gemini_editor is not None
                             and self.gemini_editor.is_ready()
-                        ) else (
-                            self.ai_editor if (
-                                self.ai_editor is not None
-                                and self.ai_editor.is_ready()
-                            ) else None
                         )
+                        else (self.ai_editor if (self.ai_editor is not None and self.ai_editor.is_ready()) else None)
                     )
                     apply_direct_replacements = True
                     if _active_editor is not None and self.config.get("ai_editor_enabled", False):
@@ -1953,18 +1922,21 @@ class SVoiceRecApp:
                         else:
                             word_count = len(full_text.split())
                             if word_count <= 3 or len(full_text) <= 60:
-                                log_info(f"AiEditor: skipping refinement for short text ({word_count} word(s), {len(full_text)} chars).")
+                                log_info(
+                                    f"AiEditor: skipping refinement for short text ({word_count} word(s), {len(full_text)} chars)."
+                                )
                             elif not is_external_api_editor and self.ai_editor.is_hallucination(full_text):
-                                log_info("AiEditor: skipping refinement due to hallucination filter (keeping original text).")
+                                log_info(
+                                    "AiEditor: skipping refinement due to hallucination filter (keeping original text)."
+                                )
                             else:
                                 languages = get_allowed_languages(self.config)
                                 known_terms = None
                                 misrecognitions = None
                                 if is_external_api_editor:
                                     known_terms = collect_known_terms(self.config, languages)
-                                    misrecognitions = collect_misrecognitions(
-                                        languages, config=self.config
-                                    )
+                                    misrecognitions = collect_misrecognitions(languages, config=self.config)
+
                                 def refine_call() -> str:
                                     return _active_editor.refine(
                                         full_text,
@@ -1972,11 +1944,10 @@ class SVoiceRecApp:
                                         known_terms=known_terms,
                                         misrecognitions=misrecognitions,
                                     )
-                                refined = (
-                                    refine_call()
-                                    if is_external_api_editor
-                                    else self._run_local_mlx(refine_call)
-                                )
+
+                                t0 = time.monotonic()
+                                refined = refine_call() if is_external_api_editor else self._run_local_mlx(refine_call)
+                                self._ai_editor_latency_ms = (time.monotonic() - t0) * 1000
                                 # Always capture what the AI produced and its status so the
                                 # dataset record distinguishes "AI ran but unchanged" from
                                 # "AI was disabled / skipped / timed out".
@@ -2003,6 +1974,7 @@ class SVoiceRecApp:
                                 except Exception:
                                     pass
                                 self._delayed_transcribing_timer = None
+
                     self._submit_for_main_thread(_cancel_delayed_timer)
 
                     _on_confirm, _on_cancel, _on_add_to_dictionary = self._build_confirm_cancel_callbacks()
@@ -2061,9 +2033,7 @@ class SVoiceRecApp:
                         if self._append_to_popup and self._preview_panel._is_interactive:
                             self._preview_panel.append_text(full_text, self._main_thread_queue)
                             self._append_to_popup = False
-                            log_info(
-                                f"process_chunk: appended buffered partials to popup, len={len(full_text)}"
-                            )
+                            log_info(f"process_chunk: appended buffered partials to popup, len={len(full_text)}")
                         else:
                             _on_confirm, _on_cancel, _on_add_to_dictionary = self._build_confirm_cancel_callbacks()
                             self._append_to_popup = False
@@ -2082,7 +2052,9 @@ class SVoiceRecApp:
                                 toast_invalid_term=i18n.t("toast.invalid_term"),
                                 toast_exists=i18n.t("toast.exists"),
                             )
-                            log_info("process_chunk: show_interactive queued (final chunk empty, using buffered partials)")
+                            log_info(
+                                "process_chunk: show_interactive queued (final chunk empty, using buffered partials)"
+                            )
         except TranscriberRestartedError as e:
             log_error(f"Transcription interrupted by watchdog restart: {e}")
             if self._session_id == session_id and self.transcribed_parts:
@@ -2104,10 +2076,7 @@ class SVoiceRecApp:
         if self._session_id != session_id or self._transcription_cycle_id != cycle_id:
             return
 
-        log_error(
-            f"Chunk worker exceeded hard timeout ({hard_timeout:.1f}s); "
-            "restarting transcriber process."
-        )
+        log_error(f"Chunk worker exceeded hard timeout ({hard_timeout:.1f}s); " "restarting transcriber process.")
         emit_runtime_event(
             "transcriber_restart_requested",
             session_id=session_id,
@@ -2160,9 +2129,7 @@ class SVoiceRecApp:
             self.is_recording = False
             self.is_processing = True
             self._submit_for_main_thread(
-                lambda: self.menu_bar.set_status(recording=False, processing=True)
-                if self.menu_bar
-                else None
+                lambda: self.menu_bar.set_status(recording=False, processing=True) if self.menu_bar else None
             )
 
             if self._preview_panel:
@@ -2201,9 +2168,7 @@ class SVoiceRecApp:
                         )
                     except Exception as e:
                         log_error(f"Failed to emit final chunk telemetry: {e}")
-                    log_info(
-                        "Final audio chunk added to queue (worker will process it in order)."
-                    )
+                    log_info("Final audio chunk added to queue (worker will process it in order).")
             elif self._session_id == my_session_id:
                 self._needs_buffered_finalization = True
 
@@ -2230,7 +2195,9 @@ class SVoiceRecApp:
                         return
                     if self.worker_thread is not None and self.worker_thread.is_alive():
                         if self._preview_panel:
-                            self._preview_panel.update_status(i18n.t("hud.still_working_title"), self._main_thread_queue)
+                            self._preview_panel.update_status(
+                                i18n.t("hud.still_working_title"), self._main_thread_queue
+                            )
                 except Exception as e:
                     log_exception(f"Delayed transcription notify failed: {e}")
 
@@ -2240,9 +2207,7 @@ class SVoiceRecApp:
                         self._delayed_transcribing_timer.cancel()
                     except Exception:
                         pass
-                self._delayed_transcribing_timer = threading.Timer(
-                    self._still_working_delay_seconds, _delayed_notify
-                )
+                self._delayed_transcribing_timer = threading.Timer(self._still_working_delay_seconds, _delayed_notify)
                 self._delayed_transcribing_timer.daemon = True
                 self._delayed_transcribing_timer.start()
 
@@ -2256,11 +2221,7 @@ class SVoiceRecApp:
                 # we force-reset here.
                 _last_returned = getattr(self.transcriber, "_last_transcribe_returned_at", 0.0)
                 _idle = time.time() - _last_returned
-                _worker_join_timeout = (
-                    TRANSCRIBER_COLD_START_TIMEOUT_SECONDS + 15
-                    if _idle > 5 * 60
-                    else 30
-                )
+                _worker_join_timeout = TRANSCRIBER_COLD_START_TIMEOUT_SECONDS + 15 if _idle > 5 * 60 else 30
                 try:
                     self.worker_thread.join(timeout=_worker_join_timeout)
                 except Exception as e:
@@ -2275,9 +2236,7 @@ class SVoiceRecApp:
                     # Keep showing "still working" — chunk_worker will submit
                     # _do_finish_cleanup when it actually completes.
                     if self._preview_panel:
-                        self._preview_panel.update_status(
-                            i18n.t("hud.still_working_title"), self._main_thread_queue
-                        )
+                        self._preview_panel.update_status(i18n.t("hud.still_working_title"), self._main_thread_queue)
                     self._start_overdue_worker_watchdog(
                         self.worker_thread,
                         my_session_id,
@@ -2286,8 +2245,7 @@ class SVoiceRecApp:
                     )
                 else:
                     log_info(
-                        f"Worker thread finished. Waited {waited:.1f}s. "
-                        "Submitting finish cleanup to main thread."
+                        f"Worker thread finished. Waited {waited:.1f}s. " "Submitting finish cleanup to main thread."
                     )
 
             # Safety-net: if the worker already exited *before* we joined it (race
@@ -2320,16 +2278,20 @@ class SVoiceRecApp:
 
     def start_file_transcription(self, file_path: str):
         if self.is_recording or self.is_processing:
-            log_info(f"Ignoring file transcription request; already busy. is_recording={self.is_recording}, is_processing={self.is_processing}")
+            log_info(
+                f"Ignoring file transcription request; already busy. is_recording={self.is_recording}, is_processing={self.is_processing}"
+            )
             return
-            
+
         self.is_processing = True
         self._submit_for_main_thread(
             lambda: self.menu_bar.set_status(recording=False, processing=True) if self.menu_bar else None
         )
-        
-        self.notify(i18n.t("notify.file_processing_title"), i18n.t("notify.file_processing_body", filename=Path(file_path).name))
-        
+
+        self.notify(
+            i18n.t("notify.file_processing_title"), i18n.t("notify.file_processing_body", filename=Path(file_path).name)
+        )
+
         threading.Thread(target=self._file_transcription_worker, args=(file_path,), daemon=True).start()
 
     def _file_transcription_worker(self, file_path: str):
@@ -2357,12 +2319,14 @@ class SVoiceRecApp:
             self._last_transcription_time = time.time()
 
             try:
+
                 def transcribe_file_call() -> str:
                     return self.transcriber.transcribe_file(
                         file_path,
                         initial_prompt=context,
                         allowed_languages=allowed_languages,
                     )
+
                 text = (
                     self._run_local_mlx(transcribe_file_call)
                     if self.config.get("stt_backend", "local") == "local"
@@ -2395,9 +2359,8 @@ class SVoiceRecApp:
                     misrecognitions = None
                     if isinstance(active_editor, ExternalApiEditor):
                         known_terms = collect_known_terms(self.config, allowed_languages)
-                        misrecognitions = collect_misrecognitions(
-                            allowed_languages, config=self.config
-                        )
+                        misrecognitions = collect_misrecognitions(allowed_languages, config=self.config)
+
                     def refine_file_call() -> str:
                         return active_editor.refine_file_text(
                             text,
@@ -2405,6 +2368,7 @@ class SVoiceRecApp:
                             known_terms=known_terms,
                             misrecognitions=misrecognitions,
                         )
+
                     text = (
                         refine_file_call()
                         if isinstance(active_editor, ExternalApiEditor)
@@ -2423,6 +2387,7 @@ class SVoiceRecApp:
                 log_info(f"File transcription successful, {len(text)} chars.")
 
                 from pathlib import Path
+
                 src = Path(file_path)
                 base = Path.home() / "Downloads" / f"{src.stem}_transcription"
                 output_file = base.with_suffix(".md")
@@ -2432,17 +2397,20 @@ class SVoiceRecApp:
                     counter += 1
 
                 try:
-                    output_file.write_text(
-                        f"# Transcription: {src.name}\n\n{text}", encoding="utf-8"
-                    )
+                    output_file.write_text(f"# Transcription: {src.name}\n\n{text}", encoding="utf-8")
                     log_info(f"Saved transcription to {output_file}")
 
                     self.transcribed_parts = [f"File saved to {output_file}"]
 
                     from .utils import copy_to_clipboard
+
                     copy_to_clipboard(text)
 
-                    self.notify(i18n.t("notify.file_done_title"), i18n.t("notify.file_done_body", filename=output_file.name), delay=3.0)
+                    self.notify(
+                        i18n.t("notify.file_done_title"),
+                        i18n.t("notify.file_done_body", filename=output_file.name),
+                        delay=3.0,
+                    )
                 except Exception as write_err:
                     log_error(f"Failed to write markdown file: {write_err}")
                     self.notify(i18n.t("notify.file_save_error_title"), i18n.t("notify.file_save_error_body"))
@@ -2507,9 +2475,7 @@ class SVoiceRecApp:
 
     def _schedule_keep_alive(self) -> None:
         """Schedule the next keep-alive check."""
-        self._keep_alive_timer = threading.Timer(
-            KEEP_ALIVE_INTERVAL_SECONDS, self._keep_alive_tick
-        )
+        self._keep_alive_timer = threading.Timer(KEEP_ALIVE_INTERVAL_SECONDS, self._keep_alive_tick)
         self._keep_alive_timer.daemon = True
         self._keep_alive_timer.start()
 
@@ -2520,10 +2486,7 @@ class SVoiceRecApp:
             under_pressure = self._is_memory_pressure_high()
 
             if elapsed < KEEP_ALIVE_INTERVAL_SECONDS and not under_pressure:
-                log_info(
-                    f"Keep-alive: last transcription {elapsed:.0f}s ago, "
-                    "model still warm — skipping ping."
-                )
+                log_info(f"Keep-alive: last transcription {elapsed:.0f}s ago, " "model still warm — skipping ping.")
                 return
 
             # Always clear the MLX Metal cache — this releases unused Metal buffers
@@ -2555,22 +2518,13 @@ class SVoiceRecApp:
         try:
             if skip_prewarm:
                 self.transcriber.clear_cache()
-                log_info(
-                    "Keep-alive: memory pressure high — cache cleared, pre_warm skipped."
-                )
+                log_info("Keep-alive: memory pressure high — cache cleared, pre_warm skipped.")
             else:
                 started_at = time.monotonic()
-                success = bool(
-                    self._run_local_mlx(
-                        lambda: self.transcriber.pre_warm(wait=True)
-                    )
-                )
+                success = bool(self._run_local_mlx(lambda: self.transcriber.pre_warm(wait=True)))
                 self._record_prewarm_health(started_at, success)
                 if not success:
-                    log_error(
-                        "Keep-alive: Whisper prewarm was not confirmed; "
-                        "Metal cache left untouched."
-                    )
+                    log_error("Keep-alive: Whisper prewarm was not confirmed; " "Metal cache left untouched.")
                     return
                 log_info("Keep-alive: Whisper forced prewarm confirmed.")
             self._last_transcription_time = time.time()
@@ -2607,10 +2561,7 @@ class SVoiceRecApp:
         # All popup-state checks and restart decisions run on the main thread so
         # that _is_interactive is never read from a background thread.
         def _decide_on_main_thread():
-            popup_open = (
-                self._preview_panel is not None
-                and getattr(self._preview_panel, "_is_interactive", False)
-            )
+            popup_open = self._preview_panel is not None and getattr(self._preview_panel, "_is_interactive", False)
             if popup_open:
                 log_info(
                     "Fatal recorder error while interactive popup is open — "
@@ -2641,9 +2592,11 @@ class SVoiceRecApp:
         log_info("Running deferred restart after popup closed.")
         # User already had a chance to confirm; no fallback save needed.
         self._last_final_text_for_restart_fallback = None
+
         def _do_restart():
             if self.menu_bar is not None:
                 self.menu_bar.restart_application()
+
         self._submit_for_main_thread(_do_restart)
 
     def _save_pending_phrase_before_restart(self) -> None:
@@ -2659,10 +2612,7 @@ class SVoiceRecApp:
             return
         try:
             append_phrase(text)
-            log_info(
-                f"Fallback: saved pending phrase to history before restart "
-                f"(len={len(text)})."
-            )
+            log_info(f"Fallback: saved pending phrase to history before restart " f"(len={len(text)}).")
         except Exception as e:
             log_error(f"Fallback phrase save failed: {e}")
         finally:
@@ -2696,9 +2646,7 @@ class SVoiceRecApp:
             # is stale (still the time of the last transcription before restart), so the
             # idle guard might wrongly skip pre_warm. Reset it to a distant past value.
             self.transcriber._last_transcribe_returned_at = 0.0
-            if self._run_local_mlx(
-                lambda: self.transcriber.pre_warm(wait=True)
-            ):
+            if self._run_local_mlx(lambda: self.transcriber.pre_warm(wait=True)):
                 log_info("Transcriber restarted and forced prewarm confirmed.")
                 emit_runtime_event(
                     "transcriber_restart_finished",
@@ -2752,8 +2700,7 @@ class SVoiceRecApp:
     def _check_memory_pressure_now(self) -> bool:
         try:
             r = subprocess.run(
-                ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
-                capture_output=True, text=True, timeout=1.0
+                ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True, timeout=1.0
             )
             if r.returncode == 0:
                 return int(r.stdout.strip()) >= 4  # 4 = Critical only
@@ -2764,6 +2711,7 @@ class SVoiceRecApp:
         # Fallback: psutil percent
         try:
             import psutil
+
             return psutil.virtual_memory().percent > MEMORY_PRESSURE_THRESHOLD_PERCENT
         except ImportError:
             return False
@@ -2798,14 +2746,12 @@ class SVoiceRecApp:
             class _WakeObserver(NSObject):
                 def onWake_(self, notification):
                     log_info("System wake detected — scheduling model warmup in background.")
-                    threading.Thread(
-                        target=app_ref._do_keep_alive_warmup, daemon=True
-                    ).start()
+                    threading.Thread(target=app_ref._do_keep_alive_warmup, daemon=True).start()
 
             self._wake_observer = _WakeObserver.alloc().init()
             workspace = NSWorkspace.sharedWorkspace()
             workspace.notificationCenter().addObserver_selector_name_object_(
-                self._wake_observer, 'onWake:', NSWorkspaceDidWakeNotification, None
+                self._wake_observer, "onWake:", NSWorkspaceDidWakeNotification, None
             )
             log_info("Wake-from-sleep observer registered successfully.")
         except ImportError:

@@ -25,6 +25,8 @@ public final class PreviewPanel: PopupPresenting {
     private var textField: NSTextField?      // non-interactive mode only
     private var textView: DictionaryAwareTextView?  // interactive mode only
     private var scrollView: NSScrollView?
+    private var pendingScrollView: NSScrollView?
+    private var pendingTextView: NSTextView?
     private var fadeTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
 
@@ -61,10 +63,11 @@ public final class PreviewPanel: PopupPresenting {
     }
 
     /// Whether the editable popup is currently open and waiting on the user.
-    public var isShowingInteractive: Bool { awaitingDecision }
+    public var isShowingInteractive: Bool { panel != nil && isInteractive }
+    public var currentText: String { textView?.string ?? "" }
 
-    /// Text currently in the editor, or nil when the popup is not interactive.
-    public var currentText: String? { textView?.string }
+    private var initialMouseLocation: NSPoint?
+    private var initialWindowFrame: NSRect?
 
     /// Test seams: the editor and title are otherwise private to the panel.
     var titleForTesting: String? { titleField?.stringValue }
@@ -117,12 +120,12 @@ public final class PreviewPanel: PopupPresenting {
     /// Update the body text, truncating to the last ~290 chars like the Python
     /// `update_text` (keeps the most recent speech visible).
     public func updateText(_ text: String) {
-        guard panel != nil, let textField else { return }
+        guard panel != nil else { return }
         var display = text
         if display.count > 300 {
             display = "… " + String(display.suffix(290))
         }
-        textField.stringValue = display
+        textField?.stringValue = display
     }
 
     // MARK: - Interactive popup
@@ -149,7 +152,7 @@ public final class PreviewPanel: PopupPresenting {
 
         canonicalTitle = title
         titleField?.stringValue = title
-        titleField?.textColor = .white
+        titleField?.textColor = .labelColor
         setEditorText(text)
         resizeInteractive(for: text, preservingPosition: false)
 
@@ -194,6 +197,51 @@ public final class PreviewPanel: PopupPresenting {
         titleField.stringValue = message
         titleField.textColor = .systemOrange
         panel?.setAccessibilityLabel(message)
+    }
+
+    public func showPendingAppend(_ text: String, title: String) {
+        guard let panel, isInteractive, let contentView = panel.contentView else { return }
+        let selection = textView?.selectedRange()
+        let pendingScroll: NSScrollView
+        let pendingText: NSTextView
+        if let existingScroll = pendingScrollView, let existingText = pendingTextView {
+            pendingScroll = existingScroll
+            pendingText = existingText
+        } else {
+            pendingScroll = makePendingScrollView()
+            guard let documentView = pendingScroll.documentView as? NSTextView else { return }
+            pendingText = documentView
+            contentView.addSubview(pendingScroll)
+            pendingScrollView = pendingScroll
+            pendingTextView = pendingText
+        }
+
+        let content = NSMutableAttributedString(
+            string: title + "\n",
+            attributes: [
+                .foregroundColor: NSColor.labelColor,
+                .font: NSFont.boldSystemFont(ofSize: 12),
+            ]
+        )
+        content.append(NSAttributedString(
+            string: text,
+            attributes: [
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .font: NSFont.systemFont(ofSize: 13),
+            ]
+        ))
+        pendingText.textStorage?.setAttributedString(content)
+        let currentText = textView?.string ?? ""
+        resizeInteractive(for: currentText, preservingPosition: true)
+        layoutContent(for: panel.frame.size)
+        if let selection { textView?.setSelectedRange(selection) }
+    }
+
+    public func clearPendingAppend() {
+        pendingScrollView?.removeFromSuperview()
+        pendingScrollView = nil
+        pendingTextView = nil
+        if let panel { layoutContent(for: panel.frame.size) }
     }
 
     /// Add the selection (or the word under the caret) to the dictionary, showing
@@ -269,6 +317,9 @@ public final class PreviewPanel: PopupPresenting {
         panel = nil
         iconView = nil
         titleField = nil
+        pendingScrollView?.removeFromSuperview()
+        pendingScrollView = nil
+        pendingTextView = nil
         textField = nil
         textView = nil
         scrollView = nil
@@ -310,6 +361,9 @@ public final class PreviewPanel: PopupPresenting {
         panel = nil
         iconView = nil
         titleField = nil
+        pendingScrollView?.removeFromSuperview()
+        pendingScrollView = nil
+        pendingTextView = nil
         textField = nil
         textView = nil
         scrollView = nil
@@ -375,7 +429,7 @@ public final class PreviewPanel: PopupPresenting {
     private func flashToast(_ message: String, duration: TimeInterval = 1.5) {
         guard let titleField else { return }
         let restoreTo = incompleteWarning ?? canonicalTitle
-        let restoreColor: NSColor = incompleteWarning == nil ? .white : .systemOrange
+        let restoreColor: NSColor = incompleteWarning == nil ? .labelColor : .systemOrange
         titleField.stringValue = message
         titleField.textColor = .systemGreen
 
@@ -391,6 +445,9 @@ public final class PreviewPanel: PopupPresenting {
     // MARK: - Construction
 
     private func makePanel(interactive: Bool) -> NSPanel {
+        pendingScrollView?.removeFromSuperview()
+        pendingScrollView = nil
+        pendingTextView = nil
         if let panel {
             if isInteractive == interactive { return panel }
             // Layouts differ; rebuild rather than reshuffle subviews.
@@ -440,7 +497,7 @@ public final class PreviewPanel: PopupPresenting {
         let titleX = iconX + iconSize + 10
         let titleY = height - 15 - 18
         let title = NSTextField(frame: NSRect(x: titleX, y: titleY, width: width - titleX - 15, height: 20))
-        configureLabel(title, color: .white, font: .boldSystemFont(ofSize: 13))
+        configureLabel(title, color: .labelColor, font: .boldSystemFont(ofSize: 13))
         title.setAccessibilityIdentifier("preview.status")
         effect.addSubview(title)
         self.titleField = title
@@ -457,7 +514,7 @@ public final class PreviewPanel: PopupPresenting {
             scroll.autohidesScrollers = false
             scroll.borderType = .noBorder
             scroll.drawsBackground = true
-            scroll.backgroundColor = NSColor(white: 1.0, alpha: 0.08)
+            scroll.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08)
             scroll.wantsLayer = true
             scroll.layer?.cornerRadius = 6
 
@@ -475,12 +532,12 @@ public final class PreviewPanel: PopupPresenting {
             )
             editor.textContainer?.widthTracksTextView = true
             editor.textContainer?.lineFragmentPadding = 4
-            editor.textColor = .white
+            editor.textColor = .labelColor
             editor.font = .systemFont(ofSize: 14)
             editor.isEditable = true
             editor.isSelectable = true
             editor.drawsBackground = false
-            editor.insertionPointColor = .white
+            editor.insertionPointColor = .labelColor
             editor.isRichText = false
             editor.isAutomaticSpellingCorrectionEnabled = false
             editor.isAutomaticQuoteSubstitutionEnabled = false
@@ -498,7 +555,7 @@ public final class PreviewPanel: PopupPresenting {
             self.textField = nil
         } else {
             let text = NSTextField(frame: NSRect(x: 15, y: textBottomPad, width: textW, height: textH))
-            configureLabel(text, color: NSColor(white: 1.0, alpha: 0.8), font: .systemFont(ofSize: 14))
+            configureLabel(text, color: .secondaryLabelColor, font: .systemFont(ofSize: 14))
             text.setAccessibilityIdentifier("preview.live-text")
             text.maximumNumberOfLines = 3
             text.cell?.wraps = true
@@ -514,13 +571,43 @@ public final class PreviewPanel: PopupPresenting {
         return panel
     }
 
-    /// Set the editor's text keeping the white-on-HUD attributes.
+    private func makePendingScrollView() -> NSScrollView {
+        let scroll = NSScrollView(frame: .zero)
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = true
+        scroll.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05)
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 6
+        scroll.setAccessibilityLabel(i18n.t("preview.refining_append"))
+        scroll.setAccessibilityIdentifier("preview.pending-append")
+
+        let pending = NSTextView(frame: .zero)
+        pending.isEditable = false
+        pending.isSelectable = true
+        pending.isRichText = false
+        pending.drawsBackground = false
+        pending.isVerticallyResizable = true
+        pending.isHorizontallyResizable = false
+        pending.textContainer?.widthTracksTextView = true
+        pending.textContainer?.lineFragmentPadding = 6
+        pending.textContainer?.containerSize = NSSize(
+            width: width - 30,
+            height: .greatestFiniteMagnitude
+        )
+        scroll.documentView = pending
+        return scroll
+    }
+
+    /// Set the editor's text with semantic foreground attributes.
     private func setEditorText(_ text: String) {
         guard let textView else { return }
         let attributed = NSAttributedString(
             string: text,
             attributes: [
-                .foregroundColor: NSColor.white,
+                .foregroundColor: NSColor.labelColor,
                 .font: NSFont.systemFont(ofSize: 14),
             ]
         )
@@ -536,7 +623,14 @@ public final class PreviewPanel: PopupPresenting {
             ?? NSScreen.main
             ?? NSScreen.screens.first else { return }
 
-        let preferred = PreviewPanelSizing.preferredSize(text: text, visibleFrame: screen.visibleFrame)
+        var preferred = PreviewPanelSizing.preferredSize(text: text, visibleFrame: screen.visibleFrame)
+        if pendingScrollView != nil {
+            let pendingHeight = pendingPreferredHeight(for: preferred.width - 30)
+            preferred.height = min(
+                screen.visibleFrame.height - 24,
+                preferred.height + pendingHeight + 6
+            )
+        }
         let size = preservingPosition
             ? NSSize(
                 width: max(panel.frame.width, preferred.width),
@@ -566,10 +660,27 @@ public final class PreviewPanel: PopupPresenting {
         titleField?.frame = NSRect(x: titleX, y: titleY, width: size.width - titleX - 15, height: 20)
 
         let textBottomPad: CGFloat = 10
-        let textHeight = titleY - textBottomPad - 10
-        let textFrame = NSRect(x: 15, y: textBottomPad, width: size.width - 30, height: textHeight)
-        scrollView?.frame = textFrame
-        textField?.frame = textFrame
+        var textHeight = titleY - textBottomPad - 10
+        if let pendingScrollView, pendingTextView != nil {
+            let pendingWidth = size.width - 30
+            let pendingHeight = pendingPreferredHeight(for: pendingWidth)
+            pendingScrollView.frame = NSRect(
+                x: 15,
+                y: textBottomPad,
+                width: pendingWidth,
+                height: pendingHeight
+            )
+            textHeight = max(44, textHeight - pendingHeight - 6)
+            scrollView?.frame = NSRect(
+                x: 15,
+                y: textBottomPad + pendingHeight + 6,
+                width: pendingWidth,
+                height: textHeight
+            )
+        } else {
+            scrollView?.frame = NSRect(x: 15, y: textBottomPad, width: size.width - 30, height: textHeight)
+        }
+        textField?.frame = NSRect(x: 15, y: textBottomPad, width: size.width - 30, height: titleY - textBottomPad - 10)
 
         if let scrollView, let textView {
             let contentSize = scrollView.contentSize
@@ -581,6 +692,22 @@ public final class PreviewPanel: PopupPresenting {
             )
             textView.setFrameSize(NSSize(width: contentSize.width, height: max(textView.frame.height, contentSize.height)))
         }
+    }
+
+    private func pendingPreferredHeight(for width: CGFloat) -> CGFloat {
+        guard let pendingScrollView, let pendingTextView else { return 0 }
+        pendingScrollView.frame = NSRect(x: 0, y: 0, width: max(1, width), height: 100)
+        let contentWidth = max(1, pendingScrollView.contentSize.width)
+        pendingTextView.textContainer?.containerSize = NSSize(
+            width: contentWidth,
+            height: .greatestFiniteMagnitude
+        )
+        pendingTextView.setFrameSize(NSSize(width: contentWidth, height: 1))
+        guard let container = pendingTextView.textContainer else { return 44 }
+        pendingTextView.layoutManager?.ensureLayout(for: container)
+        let usedHeight = pendingTextView.layoutManager?.usedRect(for: container).height ?? 0
+        pendingTextView.setFrameSize(NSSize(width: contentWidth, height: max(1, usedHeight + 12)))
+        return min(100, max(44, usedHeight + 12))
     }
 
     private func configureLabel(_ field: NSTextField, color: NSColor, font: NSFont) {

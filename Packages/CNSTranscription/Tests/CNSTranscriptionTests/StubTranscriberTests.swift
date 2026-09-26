@@ -3,6 +3,23 @@ import Testing
 
 @Suite("StubTranscriber")
 struct StubTranscriberTests {
+    @Test("Language-specific prompts default empty and preserve supplied values")
+    func languageSpecificPrompts() {
+        #expect(TranscriptionRequest(audio: []).initialPromptsByLanguage.isEmpty)
+
+        let request = TranscriptionRequest(
+            audio: [],
+            initialPrompt: "fallback",
+            initialPromptsByLanguage: ["en": "English terms", "ru": "Русские термины"]
+        )
+
+        #expect(request.initialPrompt == "fallback")
+        #expect(request.initialPromptsByLanguage == [
+            "en": "English terms",
+            "ru": "Русские термины",
+        ])
+    }
+
     @Test("Increments chunk index and reports audio length")
     func indexing() async {
         let stub = StubTranscriber()

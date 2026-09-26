@@ -53,8 +53,10 @@ def append_to_dataset(
     lang: Optional[str] = None,
     user_terms_for_lang: Optional[list[str]] = None,
     prompt_hash: Optional[str] = None,
+    stt_backend: Optional[str] = None,
     stt_model: Optional[str] = None,
     ai_model: Optional[str] = None,
+    editor_latency_ms: Optional[int] = None,
 ) -> None:
     """Append a single transcription record to the JSONL dataset file.
 
@@ -67,8 +69,10 @@ def append_to_dataset(
         lang: Detected transcription language (ISO 639-1).
         user_terms_for_lang: Active user_terms for the detected language (term strings).
         prompt_hash: md5[:12] of initial_prompt at transcription time.
+        stt_backend: The speech-to-text backend used for the recording.
         stt_model: The specific speech-to-text model name used.
         ai_model: The specific AI Editor model name used.
+        editor_latency_ms: AI Editor latency in ms.
     """
     terms = user_terms_for_lang or []
     record = {
@@ -76,8 +80,10 @@ def append_to_dataset(
         "raw_whisper": raw_text,
         "ai_edited": ai_text,
         "ai_status": ai_status,
+        "stt_backend": stt_backend,
         "stt_model": stt_model,
         "ai_model": ai_model,
+        "editor_latency_ms": editor_latency_ms,
         "user_final": user_final_text,
         "lang": lang,
         "prompt_hash": prompt_hash,

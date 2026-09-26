@@ -175,6 +175,14 @@ public actor AiEditorRouter: AiEditing {
         isStopping = false
     }
 
+    public func preWarm(languages: [String]?, force: Bool) async -> PrewarmResult {
+        guard let entry = active, !isStopping else { return .skipped }
+        beginUse(entry.generation)
+        let result = await entry.service.preWarm(languages: languages, force: force)
+        await endUse(entry.generation)
+        return result
+    }
+
     private func beginUse(_ generation: Int) {
         inFlight[generation, default: 0] += 1
     }

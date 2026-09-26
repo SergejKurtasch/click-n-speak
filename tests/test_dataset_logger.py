@@ -10,6 +10,7 @@ from src.dataset_logger import _find_terms, append_to_dataset
 # _find_terms
 # ---------------------------------------------------------------------------
 
+
 def test_find_terms_case_insensitive():
     result = _find_terms("I use MLX for inference", ["MLX"])
     assert result == ["mlx"]
@@ -69,6 +70,7 @@ def test_find_terms_multi_word_cyrillic():
 # append_to_dataset record shape
 # ---------------------------------------------------------------------------
 
+
 def test_record_shape_has_new_fields():
     with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
         path = f.name
@@ -82,8 +84,10 @@ def test_record_shape_has_new_fields():
         lang="en",
         user_terms_for_lang=["MLX", "GitHub"],
         prompt_hash="abc123def456",
+        stt_backend="local",
         stt_model="mlx-community/whisper-large-v3-turbo",
         ai_model="gemini-2.5-flash",
+        editor_latency_ms=375,
     )
 
     record = json.loads(Path(path).read_text(encoding="utf-8").strip())
@@ -95,8 +99,10 @@ def test_record_shape_has_new_fields():
     assert "vocab_terms_in_final" in record
     assert "mlx" in record["vocab_terms_in_raw"]
     assert "mlx" in record["vocab_terms_in_final"]
+    assert record["stt_backend"] == "local"
     assert record["stt_model"] == "mlx-community/whisper-large-v3-turbo"
     assert record["ai_model"] == "gemini-2.5-flash"
+    assert record["editor_latency_ms"] == 375
 
 
 def test_record_shape_without_new_fields():
@@ -116,8 +122,10 @@ def test_record_shape_without_new_fields():
     assert record["prompt_hash"] is None
     assert record["vocab_terms_in_raw"] == []
     assert record["vocab_terms_in_final"] == []
+    assert record["stt_backend"] is None
     assert record["stt_model"] is None
     assert record["ai_model"] is None
+    assert record["editor_latency_ms"] is None
 
 
 def test_record_preserves_existing_fields():

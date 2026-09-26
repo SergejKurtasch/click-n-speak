@@ -1,0 +1,6 @@
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp@1.2.3"]
+
+[mcp_servers.context7.env]
+CONTEXT7_API_KEY = "$CONTEXT7_API_KEY"

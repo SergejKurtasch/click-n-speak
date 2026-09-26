@@ -10,6 +10,9 @@ public struct TranscriptionRequest: Sendable {
     public var audio: [Float]
     /// Whisper `initial_prompt` (dictionary + recent context), or nil.
     public var initialPrompt: String?
+    /// Per-language prompt overrides for multilingual language selection.
+    /// Empty preserves the legacy `initialPrompt` behavior.
+    public var initialPromptsByLanguage: [String: String]
     /// Allowed language codes; empty means auto-detect (no hint).
     public var allowedLanguages: [String]
     /// Whether to condition on previously decoded text.
@@ -23,6 +26,7 @@ public struct TranscriptionRequest: Sendable {
     public init(
         audio: [Float],
         initialPrompt: String? = nil,
+        initialPromptsByLanguage: [String: String] = [:],
         allowedLanguages: [String] = [],
         conditionOnPreviousText: Bool = true,
         isFinalChunk: Bool = false,
@@ -30,6 +34,7 @@ public struct TranscriptionRequest: Sendable {
     ) {
         self.audio = audio
         self.initialPrompt = initialPrompt
+        self.initialPromptsByLanguage = initialPromptsByLanguage
         self.allowedLanguages = allowedLanguages
         self.conditionOnPreviousText = conditionOnPreviousText
         self.isFinalChunk = isFinalChunk
@@ -103,6 +108,16 @@ public enum TranscriptionOutcome: Sendable, Equatable {
 
 /// Typed result for one realtime decode. Transcript text remains separate from
 /// privacy-safe outcome metadata and must never be emitted in telemetry.
+public struct TranscriptionStageDurations: Sendable, Equatable {
+    public var languageDetectionSeconds: TimeInterval?
+    public var decodeSeconds: TimeInterval?
+
+    public init(languageDetectionSeconds: TimeInterval? = nil, decodeSeconds: TimeInterval? = nil) {
+        self.languageDetectionSeconds = languageDetectionSeconds
+        self.decodeSeconds = decodeSeconds
+    }
+}
+
 public struct TranscriptionResult: Sendable, Equatable {
     public var text: String
     public var detectedLanguage: String
@@ -111,6 +126,7 @@ public struct TranscriptionResult: Sendable, Equatable {
     public var modelID: String?
     public var retryCount: Int
     public var durationSeconds: TimeInterval
+    public var stageDurations: TranscriptionStageDurations?
 
     public init(
         text: String,
@@ -119,7 +135,8 @@ public struct TranscriptionResult: Sendable, Equatable {
         backend: String? = nil,
         modelID: String? = nil,
         retryCount: Int = 0,
-        durationSeconds: TimeInterval = 0
+        durationSeconds: TimeInterval = 0,
+        stageDurations: TranscriptionStageDurations? = nil
     ) {
         self.text = text
         self.detectedLanguage = detectedLanguage
@@ -128,6 +145,7 @@ public struct TranscriptionResult: Sendable, Equatable {
         self.modelID = modelID
         self.retryCount = retryCount
         self.durationSeconds = durationSeconds
+        self.stageDurations = stageDurations
     }
 
     public static let empty = TranscriptionResult(text: "", outcome: .noSpeech)

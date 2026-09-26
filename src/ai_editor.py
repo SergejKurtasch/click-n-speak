@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from .utils import log_error, log_info
 
 # Default generation settings for the editor LLM
-_DEFAULT_TEMP = 0.0        # greedy — deterministic and fastest
+_DEFAULT_TEMP = 0.0  # greedy — deterministic and fastest
 # Successful refinements complete in 0.7-3s; 8s gives ample headroom without
 # the 15s penalty that was previously paid on every slow/large input.
 _REFINE_TIMEOUT_SECONDS = 8.0
@@ -39,10 +39,21 @@ _LOCAL_MAX_FILE_CHUNK_CHARS: int = int(
 DEFAULT_MODEL_NAME = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 
 _LANG_NAMES: dict[str, str] = {
-    "ru": "Russian", "en": "English", "de": "German", "fr": "French",
-    "es": "Spanish", "it": "Italian", "zh": "Chinese", "ja": "Japanese",
-    "pt": "Portuguese", "nl": "Dutch", "pl": "Polish", "uk": "Ukrainian",
-    "tr": "Turkish", "ko": "Korean", "ar": "Arabic",
+    "ru": "Russian",
+    "en": "English",
+    "de": "German",
+    "fr": "French",
+    "es": "Spanish",
+    "it": "Italian",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "uk": "Ukrainian",
+    "tr": "Turkish",
+    "ko": "Korean",
+    "ar": "Arabic",
 }
 
 _FILLER_WORDS: dict[str, list[str]] = {
@@ -60,6 +71,50 @@ _FILLER_WORDS: dict[str, list[str]] = {
 }
 
 
+def _normalized_words(text: str) -> list[str]:
+    """Return lowercase lexical tokens for conservative local-editor checks."""
+    normalized = text.lower().replace("ё", "е")
+    return "".join(character if character.isalnum() or character == "_" else " " for character in normalized).split()
+
+
+def _realtime_filler_phrases(languages: list[str] | None) -> list[list[str]]:
+    """Return the configured filler phrases as normalized token sequences."""
+    codes = languages if languages else sorted(_FILLER_WORDS)
+    return [tokens for code in codes for filler in _FILLER_WORDS.get(code, []) if (tokens := _normalized_words(filler))]
+
+
+def _preserves_realtime_words(
+    original: str,
+    candidate: str,
+    languages: list[str] | None,
+) -> bool:
+    """Allow punctuation, configured fillers, and immediate repeated words only."""
+    source = _normalized_words(original)
+    output = _normalized_words(candidate)
+    fillers = _realtime_filler_phrases(languages)
+    reachable = [[False] * (len(output) + 1) for _ in range(len(source) + 1)]
+    reachable[0][0] = True
+
+    for source_index in range(len(source) + 1):
+        for output_index in range(len(output) + 1):
+            if not reachable[source_index][output_index]:
+                continue
+            if (
+                source_index < len(source)
+                and output_index < len(output)
+                and source[source_index] == output[output_index]
+            ):
+                reachable[source_index + 1][output_index + 1] = True
+            if source_index + 1 < len(source) and source[source_index] == source[source_index + 1]:
+                reachable[source_index + 1][output_index] = True
+            for filler in fillers:
+                filler_end = source_index + len(filler)
+                if source[source_index:filler_end] == filler:
+                    reachable[filler_end][output_index] = True
+
+    return reachable[len(source)][len(output)]
+
+
 def _build_system_prompt(languages: list[str] | None = None) -> str:
     """Realtime chunk prompt — conservative, microphone-oriented."""
     if languages:
@@ -68,7 +123,11 @@ def _build_system_prompt(languages: list[str] | None = None) -> str:
         fillers: list[str] = []
         for lang in languages:
             fillers.extend(_FILLER_WORDS.get(lang, []))
-        filler_line = f"- Remove only filler words/stutters: {', '.join(repr(w) for w in fillers)}." if fillers else "- Remove filler words and stutters."
+        filler_line = (
+            f"- Remove only filler words/stutters: {', '.join(repr(w) for w in fillers)}."
+            if fillers
+            else "- Remove filler words and stutters."
+        )
     else:
         lang_str = "multilingual"
         filler_line = "- Remove filler words and stutters."
@@ -155,7 +214,8 @@ def _build_file_system_prompt_gemini(
             fillers.extend(_FILLER_WORDS.get(lang, []))
         filler_line = (
             f"3. Remove filler words and stutters: {', '.join(repr(w) for w in fillers)}."
-            if fillers else "3. Remove filler words and stutters."
+            if fillers
+            else "3. Remove filler words and stutters."
         )
     else:
         lang_str = "the"
@@ -169,7 +229,7 @@ def _build_file_system_prompt_gemini(
         "4. Add paragraph breaks where there is a clear change of topic or a natural pause.\n"
         "5. Fix obvious transcription errors where context makes the correct word unambiguous.\n"
         "   For every word you correct in step 5, place the original word in parentheses immediately after the corrected word.\n"
-        "   Example: \"the company's revenue (revenooo) grew significantly.\"\n\n"
+        '   Example: "the company\'s revenue (revenooo) grew significantly."\n\n'
         "RULES:\n"
         "- Do NOT translate, summarise, rewrite, or change the meaning.\n"
         "- Do NOT add new words or commentary beyond the parenthetical originals.\n"
@@ -222,12 +282,12 @@ class AiEditor:
     STATUS_ERROR = "error"
 
     # Refine status codes set after every refine() call for callers to inspect.
-    REFINE_STATUS_OK = "ok"                      # LLM ran and produced a different (improved) text
-    REFINE_STATUS_UNCHANGED = "unchanged"        # LLM ran but returned same text (no edits needed)
-    REFINE_STATUS_TIMEOUT = "timeout"            # LLM hit the timeout — original text returned
-    REFINE_STATUS_SKIPPED = "skipped"            # Too short / hallucination filter / GPU busy
-    REFINE_STATUS_ERROR = "error"                # Exception inside the LLM thread
-    REFINE_STATUS_DISABLED = "disabled"          # ai_editor not ready or text was empty
+    REFINE_STATUS_OK = "ok"  # LLM ran and produced a different (improved) text
+    REFINE_STATUS_UNCHANGED = "unchanged"  # LLM ran but returned same text (no edits needed)
+    REFINE_STATUS_TIMEOUT = "timeout"  # LLM hit the timeout — original text returned
+    REFINE_STATUS_SKIPPED = "skipped"  # Too short / hallucination filter / GPU busy
+    REFINE_STATUS_ERROR = "error"  # Exception inside the LLM thread
+    REFINE_STATUS_DISABLED = "disabled"  # ai_editor not ready or text was empty
     REFINE_STATUS_MEMORY_PRESSURE = "memory_pressure"  # Skipped — system memory pressure too high
 
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME) -> None:
@@ -254,6 +314,7 @@ class AiEditor:
         """
         try:
             from huggingface_hub import snapshot_download  # type: ignore
+
             snapshot_download(
                 repo_id=self.model_name,
                 local_files_only=True,  # Raises if any file is missing
@@ -311,10 +372,7 @@ class AiEditor:
 
             self._ready = True
         except ImportError:
-            log_error(
-                "AiEditor: 'mlx-lm' is not installed. "
-                "Run: pip install mlx-lm"
-            )
+            log_error("AiEditor: 'mlx-lm' is not installed. " "Run: pip install mlx-lm")
         except Exception as e:
             log_error(f"AiEditor: failed to load model '{self.model_name}': {e}")
 
@@ -336,6 +394,7 @@ class AiEditor:
             return
         try:
             import mlx_lm  # type: ignore
+
             start = time.monotonic()
             for _ in mlx_lm.stream_generate(self._model, self._tokenizer, prompt="Warmup", max_tokens=1):
                 pass
@@ -367,8 +426,7 @@ class AiEditor:
         # skip refinement entirely to avoid Metal GPU conflicts.
         if not self._lock.acquire(blocking=False):
             log_info(
-                "AiEditor: previous LLM call still in progress "
-                "— skipping refinement to avoid Metal GPU conflict."
+                "AiEditor: previous LLM call still in progress " "— skipping refinement to avoid Metal GPU conflict."
             )
             self.last_refine_status = self.REFINE_STATUS_SKIPPED
             return text
@@ -411,8 +469,7 @@ class AiEditor:
                 )
             self._lock.release()
             log_error(
-                f"AiEditor: LLM thread timed out after {effective_timeout + 0.5:.1f}s "
-                "— returning original text."
+                f"AiEditor: LLM thread timed out after {effective_timeout + 0.5:.1f}s " "— returning original text."
             )
             self.last_refine_status = self.REFINE_STATUS_TIMEOUT
             return text
@@ -429,9 +486,12 @@ class AiEditor:
         # Safety guard: if LLM returned something dramatically longer than the
         # input, it likely hallucinated — fall back to the original.
         if len(cleaned) > len(text) * 2.5:
-            log_error(
-                "AiEditor: output suspiciously long — returning original text."
-            )
+            log_error("AiEditor: output suspiciously long — returning original text.")
+            self.last_refine_status = self.REFINE_STATUS_ERROR
+            return text
+
+        if not _preserves_realtime_words(text, cleaned, languages):
+            log_error("AiEditor: output changed source words — returning original text.")
             self.last_refine_status = self.REFINE_STATUS_ERROR
             return text
 
@@ -497,13 +557,15 @@ class AiEditor:
                     exc_ref: list[Exception] = _exc,
                 ) -> None:
                     try:
-                        result_ref.append(self._call_llm(
-                            c,
-                            languages=languages,
-                            max_output_tokens=max_tokens,
-                            stream_timeout=None,
-                            system_prompt=file_prompt,
-                        ))
+                        result_ref.append(
+                            self._call_llm(
+                                c,
+                                languages=languages,
+                                max_output_tokens=max_tokens,
+                                stream_timeout=None,
+                                system_prompt=file_prompt,
+                            )
+                        )
                     except Exception as e:
                         exc_ref.append(e)
 
@@ -539,9 +601,7 @@ class AiEditor:
             result = "\n\n".join(refined_parts)
             if not timed_out:
                 log_info(f"AiEditor: file refinement complete ({len(text)} → {len(result)} chars).")
-            self.last_refine_status = (
-                self.REFINE_STATUS_OK if result != text else self.REFINE_STATUS_UNCHANGED
-            )
+            self.last_refine_status = self.REFINE_STATUS_OK if result != text else self.REFINE_STATUS_UNCHANGED
             return result
         finally:
             self._lock.release()
@@ -609,7 +669,9 @@ class AiEditor:
 
             output_text += response.text
             if stream_timeout is not None and time.time() - start_time > stream_timeout:
-                log_error(f"AiEditor: LLM hit {time.time() - start_time:.1f}s timeout during stream_generate. Aborting early.")
+                log_error(
+                    f"AiEditor: LLM hit {time.time() - start_time:.1f}s timeout during stream_generate. Aborting early."
+                )
                 timeout_hit = True
                 break
 
@@ -636,7 +698,7 @@ class AiEditor:
             return True
 
         # Check if there's at least one alphanumeric character
-        if not re.search(r'[a-zA-Zа-яА-ЯёЁ0-9]', stripped):
+        if not re.search(r"[a-zA-Zа-яА-ЯёЁ0-9]", stripped):
             return True
 
         # Too short for meaningful editing: ≤2 words or ≤60 chars.
@@ -647,12 +709,9 @@ class AiEditor:
             return True
 
         # Consecutive word repeats (3+ times)
-        normalized_words = [re.sub(r'[^\w]', '', w.lower()) for w in words]
+        normalized_words = [re.sub(r"[^\w]", "", w.lower()) for w in words]
         for i in range(len(normalized_words) - 2):
-            if (
-                normalized_words[i]
-                and normalized_words[i] == normalized_words[i + 1] == normalized_words[i + 2]
-            ):
+            if normalized_words[i] and normalized_words[i] == normalized_words[i + 1] == normalized_words[i + 2]:
                 log_info(f"Hallucination detected: repeated word '{normalized_words[i]}'")
                 return True
 
@@ -748,9 +807,10 @@ def get_gemini_api_key() -> str | None:
         return key.strip() or None
     try:
         result = subprocess.run(
-            [_SECURITY_BIN, "find-generic-password",
-             "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w"],
-            capture_output=True, text=True, timeout=5,
+            [_SECURITY_BIN, "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip() or None
@@ -763,9 +823,11 @@ def set_gemini_api_key(key: str) -> None:
     """Store Gemini API key in macOS Keychain via security CLI. Raises on failure."""
     try:
         result = subprocess.run(
-            [_SECURITY_BIN, "add-generic-password",
-             "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w", "-", "-U"],
-            input=key, capture_output=True, text=True, timeout=5,
+            [_SECURITY_BIN, "add-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w", "-", "-U"],
+            input=key,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "security command failed")
@@ -932,8 +994,7 @@ class GeminiEditor(ExternalApiEditor):
             # Next refine_file_text() call will block up to 10 s on the acquire, then skip —
             # intentional: prevents concurrent Gemini API calls (same pattern as refine()).
             log_error(
-                f"GeminiEditor [{self.model_name}]: file refinement timed out after 300s "
-                "— returning original text."
+                f"GeminiEditor [{self.model_name}]: file refinement timed out after 300s " "— returning original text."
             )
             self.last_refine_status = self.REFINE_STATUS_TIMEOUT
             return text

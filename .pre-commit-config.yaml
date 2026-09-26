@@ -1,5 +1,22 @@
 # .pre-commit-config.yaml
 repos:
+  # Repository-owned agent context contract
+  - repo: local
+    hooks:
+      - id: development-environment
+        name: check development environment
+        entry: venv/bin/python scripts/check_dev_environment.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: agent-environment
+        name: validate agent environment
+        # `language: python` supplies an isolated interpreter for this hook.
+        entry: python scripts/validate_agent_environment.py
+        language: python
+        pass_filenames: false
+        always_run: true
+
   # Ruff — линтинг и форматирование (заменяет flake8 + black + isort)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.4.4

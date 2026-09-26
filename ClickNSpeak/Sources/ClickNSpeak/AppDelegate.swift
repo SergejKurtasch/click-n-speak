@@ -39,8 +39,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notificationService: UserNotificationService?
     private var launchTask: Task<Void, Never>?
     private var hotkeyStarted = false
-    private var keepAliveTimer: Timer?
-    private var wakeObserver: NSObjectProtocol?
     private var updateTimer: Timer?
     private var appActivationObserver: NSObjectProtocol?
     private var terminationStarted = false
@@ -287,7 +285,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         sessionRef.controller = session
         self.session = session
-        configureWarmupLifecycle(for: session)
 
         let modelOverride = ProcessInfo.processInfo.environment["CNS_WHISPER_MODEL"]
             .map { URL(fileURLWithPath: $0) }
@@ -403,6 +400,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.updateDesiredMenuConfig(updated)
             await runtimeCoordinator.activateInitial(updated)
+            guard !Task.isCancelled, !self.terminationStarted else { return }
+            self.configureWarmupLifecycle(for: session)
             let setupStillPending = !permissionService.isSetupDone()
                 || !permissionService.allPermissionsGranted()
                 || !updated.languagePickerDone
@@ -515,7 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let granted = permissionService?.allPermissionsGranted() == true
         let canRecord = runtimeCoordinator?.canRecord == true
-        
+
         guard shouldStartHotkey(
             permissionsGranted: granted,
             runtimeCanRecord: canRecord,
@@ -529,7 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
-        
+
         let registrar = hotkeyRegistrar ?? { [weak hotkey] in hotkey?.start() ?? false }
         let success = registrar()
         if success {
@@ -778,34 +777,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func stopLifecycleSources() {
         launchTask?.cancel()
-        keepAliveTimer?.invalidate()
         updateTimer?.invalidate()
-        if let wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
-        }
         if let appActivationObserver {
             NotificationCenter.default.removeObserver(appActivationObserver)
         }
         hotkey?.stop()
         scheduler?.stop()
+        warmupLifecycle?.stop()
     }
 
+    private var warmupLifecycle: RuntimeWarmupLifecycle?
+
     private func configureWarmupLifecycle(for session: SessionController) {
-        keepAliveTimer?.invalidate()
-        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak session] _ in
-            Task { @MainActor in
-                _ = await session?.warmupIfIdle(full: false)
-            }
+        warmupLifecycle?.stop()
+        warmupLifecycle = RuntimeWarmupLifecycle(session: session)
+        if case .ready = runtimeCoordinator?.state {
+            warmupLifecycle?.setRuntimeReady(true)
+        } else {
+            warmupLifecycle?.setRuntimeReady(false)
         }
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak session] _ in
-            Task { @MainActor in
-                _ = await session?.warmupIfIdle(full: false)
-            }
-        }
+        warmupLifecycle?.start()
     }
 
     /// Connect configuration ownership and menu projections independently of
@@ -824,6 +815,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateDesiredMenuConfig(updated)
         }
         runtimeCoordinator.onStateChanged = { [weak self] state in
+            if case .ready = state {
+                self?.warmupLifecycle?.setRuntimeReady(true)
+            } else {
+                self?.warmupLifecycle?.setRuntimeReady(false)
+            }
             self?.updateMenuRuntimeState(state)
             if case .ready = state { self?.reconcileHotkeyAvailability() }
             if case let .degraded(active, _, _, _) = state,
@@ -1076,6 +1072,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stillWorking: i18n.t("hud.still_working_title"),
             ready: i18n.t("hud.ready_title"),
             popupTitle: i18n.t("popup.title_with_hotkey"),
+            refining: i18n.t("hud.refining_title"),
+            appendRefining: i18n.t("preview.refining_append"),
             transcriptionInstruction: i18n.t("hud.transcription_instruction"),
             noSpeech: i18n.t("notify.no_speech_title"),
             recordError: i18n.t("notify.record_error_title"),

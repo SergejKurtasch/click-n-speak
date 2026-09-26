@@ -24,9 +24,283 @@ private final class TestScopedFileSink: RuntimeTelemetrySink, Sendable {
     func drain() async { await file.drain() }
 }
 
+private final class TestScopedMemorySink: RuntimeTelemetrySink, Sendable {
+    private let owner: Test.ID
+    private let memory = InMemoryRuntimeTelemetrySink()
+    private let onEmit: @Sendable (String) -> Void
+
+    init(owner: Test.ID, onEmit: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.owner = owner
+        self.onEmit = onEmit
+    }
+
+    func emit(event: String, fields: [String: Any]) {
+        guard Test.current?.id == owner else { return }
+        onEmit(event)
+        memory.emit(event: event, fields: fields)
+    }
+
+    func drain() async { await memory.drain() }
+
+    var events: [[String: Any]] {
+        memory.jsonLines.compactMap { line in
+            try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        }
+    }
+}
+
+private final class PreviewEventOrderRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func append(_ event: String) {
+        lock.withLock { storage.append(event) }
+    }
+
+    func clear() {
+        lock.withLock { storage.removeAll(keepingCapacity: true) }
+    }
+
+    var events: [String] {
+        lock.withLock { storage }
+    }
+}
+
 @MainActor
 @Suite("Runtime telemetry integration", .serialized)
 struct RuntimeTelemetryTests {
+    @Test("Whisper and editor warmup have separate timing and one operation identity")
+    func warmupTelemetrySeparatesComponents() async throws {
+        let sink = TestScopedMemorySink(owner: try #require(Test.current?.id))
+        RuntimeTelemetry.configure(sink: sink)
+        defer { RuntimeTelemetry.configure(sink: InMemoryRuntimeTelemetrySink()) }
+        let barrier = RefinementBarrier()
+        let editor = FakeAiEditor()
+        editor.prewarmBarrier = barrier
+        var raw = JSONObject()
+        raw["schema_version"] = .int(10)
+        raw["primary_language"] = .string("en")
+        raw["ai_editor_enabled"] = .bool(true)
+        let transcriber = FakeTranscriber()
+        let controller = SessionController(config: Config(raw: raw), transcriber: transcriber,
+            aiEditor: editor, recorder: FakeRecorder(), panel: FakePanel(),
+            delivery: FakeDelivery(), frontmost: FakeFrontmost())
+        let task = Task { await controller.warmupIfIdle(trigger: .wake) }
+        await barrier.waitUntilEntered()
+        try await Task.sleep(for: .milliseconds(40))
+        await barrier.resume()
+        #expect(await task.value)
+        let stt = try #require(sink.events.first { $0["event"] as? String == "transcriber_prewarm" })
+        let ai = try #require(sink.events.first { $0["event"] as? String == "editor_prewarm" })
+        #expect(ai["operation_id"] as? String == stt["operation_id"] as? String)
+        #expect(ai["backend"] as? String == "local")
+        #expect(ai["model"] as? String == "qwen-test")
+        #expect(ai["trigger"] as? String == "wake")
+        #expect(ai["outcome"] as? String == "warmed")
+        #expect(ai["reason"] as? String == "completed")
+        #expect(try #require(ai["duration_ms"] as? Double) > 35)
+        #expect(try #require(stt["duration_ms"] as? Double) < #require(ai["duration_ms"] as? Double))
+        #expect(await transcriber.reloadCount == 0)
+    }
+
+    @Test("Full draft preview telemetry is emitted before the editor returns")
+    func draftPreviewPrecedesEditorCompletion() async throws {
+        let sink = TestScopedMemorySink(owner: try #require(Test.current?.id))
+        RuntimeTelemetry.configure(sink: sink)
+        defer { RuntimeTelemetry.configure(sink: InMemoryRuntimeTelemetrySink()) }
+        let barrier = RefinementBarrier()
+        let editor = FakeAiEditor(refinementBarrier: barrier)
+        var raw = JSONObject()
+        raw["schema_version"] = .int(10)
+        raw["primary_language"] = .string("en")
+        raw["additional_languages"] = .array([])
+        raw["ai_editor_enabled"] = .bool(true)
+        let panel = FakePanel()
+        let recorder = FakeRecorder()
+        let controller = SessionController(
+            config: Config(raw: raw),
+            transcriber: FakeTranscriber(texts: ["draft"]),
+            aiEditor: editor,
+            recorder: recorder,
+            panel: panel,
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+
+        controller.toggle(now: Date())
+        await settle()
+        recorder.finalChunk = [Float](repeating: 0.2, count: 16_000)
+        controller.toggle(now: Date().addingTimeInterval(1))
+        await barrier.waitUntilEntered()
+
+        let events = sink.events
+        let names = events.compactMap { $0["event"] as? String }
+        #expect(panel.events.contains(.text("draft")))
+        #expect(names.filter { $0 == "first_preview_presented" }.count == 1)
+        #expect(names.filter { $0 == "draft_preview_presented" }.count == 1)
+        #expect(!names.contains("editor_refine"))
+        let draft = try #require(events.first { $0["event"] as? String == "draft_preview_presented" })
+        #expect(draft["append_mode"] as? Bool == false)
+        #expect((draft["stop_to_preview_ms"] as? Double) != nil)
+
+        await barrier.resume()
+        await settle()
+        await controller.shutdown()
+    }
+
+    @Test("A confirmed final recording emits one ordered, finite timing lifecycle")
+    func confirmedRecordingHasCompleteTimingLifecycle() async throws {
+        let sink = TestScopedMemorySink(owner: try #require(Test.current?.id))
+        RuntimeTelemetry.configure(sink: sink)
+        defer { RuntimeTelemetry.configure(sink: InMemoryRuntimeTelemetrySink()) }
+        let panel = FakePanel()
+        let recorder = FakeRecorder()
+        let controller = SessionController(
+            config: Config(raw: JSONObject([
+                ("schema_version", .int(10)),
+                ("primary_language", .string("en")),
+            ])),
+            transcriber: FakeTranscriber(texts: ["draft"]),
+            recorder: recorder,
+            panel: panel,
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+
+        controller.toggle(now: Date())
+        await settle()
+        recorder.finalChunk = [Float](repeating: 0.2, count: 16_000)
+        controller.toggle(now: Date().addingTimeInterval(1))
+        while !panel.isShowingInteractive { await Task.yield() }
+        while controller.state != .popup(sessionID: 1, targetPID: 4242) {
+            await Task.yield()
+        }
+        panel.userConfirms()
+        await settle(120)
+
+        let lifecycleNames = Set([
+            "session_start", "session_stop", "first_preview_presented",
+            "draft_preview_presented", "session_end",
+        ])
+        let events = sink.events.filter {
+            ($0["session_id"] as? Int) == 1
+                && lifecycleNames.contains($0["event"] as? String ?? "")
+        }
+        let names = events.compactMap { $0["event"] as? String }
+        #expect(names == [
+            "session_start", "session_stop", "first_preview_presented",
+            "draft_preview_presented", "session_end",
+        ])
+        #expect(events.allSatisfy { ($0["monotonic"] as? Double)?.isFinite == true })
+
+        let stop = try #require(events.first { $0["event"] as? String == "session_stop" })
+        let first = try #require(events.first { $0["event"] as? String == "first_preview_presented" })
+        let draft = try #require(events.first { $0["event"] as? String == "draft_preview_presented" })
+        let confirm = try #require(events.first { $0["event"] as? String == "session_end" })
+        #expect(try #require(stop["monotonic"] as? Double) <= #require(first["monotonic"] as? Double))
+        #expect(try #require(first["monotonic"] as? Double) <= #require(draft["monotonic"] as? Double))
+        #expect(try #require(draft["monotonic"] as? Double) <= #require(confirm["monotonic"] as? Double))
+        #expect((draft["stop_to_preview_ms"] as? Double) != nil)
+        #expect((confirm["stop_to_enter_ms"] as? Double) != nil)
+        #expect(confirm["reason"] as? String == "confirm")
+
+        await controller.shutdown()
+    }
+
+    @Test("Append partial and final previews emit one ordered event pair")
+    func appendPreviewTelemetryIsOrderedAndExactlyOnce() async throws {
+        let order = PreviewEventOrderRecorder()
+        let sink = TestScopedMemorySink(
+            owner: try #require(Test.current?.id),
+            onEmit: { order.append("telemetry:\($0)") }
+        )
+        RuntimeTelemetry.configure(sink: sink)
+        defer { RuntimeTelemetry.configure(sink: InMemoryRuntimeTelemetrySink()) }
+        let barrier = RefinementBarrier()
+        let editor = FakeAiEditor(refinementBarrier: barrier)
+        var raw = JSONObject()
+        raw["schema_version"] = .int(10)
+        raw["primary_language"] = .string("en")
+        raw["additional_languages"] = .array([])
+        raw["ai_editor_enabled"] = .bool(false)
+        let config = Config(raw: raw)
+        let panel = FakePanel()
+        panel.onEvent = { event in
+            guard case let .pending(text, _) = event else { return }
+            order.append("pending:\(text)")
+        }
+        let recorder = FakeRecorder()
+        let transcriber = FakeTranscriber(texts: ["old popup", "partial append", "final append"])
+        let controller = SessionController(
+            config: config,
+            transcriber: transcriber,
+            aiEditor: editor,
+            recorder: recorder,
+            panel: panel,
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+        let base = Date()
+
+        controller.toggle(now: base)
+        await settle()
+        recorder.finalChunk = [Float](repeating: 0.2, count: 16_000)
+        controller.toggle(now: base.addingTimeInterval(1))
+        await settle(40)
+        #expect(panel.currentText == "old popup")
+        order.clear()
+
+        raw["ai_editor_enabled"] = .bool(true)
+        controller.updateConfig(Config(raw: raw))
+        controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        let beforeSpeech = sink.events.filter { $0["session_id"] as? Int == 2 }
+        #expect(beforeSpeech.allSatisfy {
+            let event = $0["event"] as? String
+            return event != "first_preview_presented" && event != "draft_preview_presented"
+        })
+
+        recorder.emitChunk([Float](repeating: 0.2, count: 16_000))
+        await transcriber.waitUntilRequestCount(2)
+        await settle()
+        var appendEvents = sink.events.filter { $0["session_id"] as? Int == 2 }
+        #expect(panel.pendingText == "partial append")
+        #expect(appendEvents.filter { $0["event"] as? String == "first_preview_presented" }.count == 1)
+        #expect(appendEvents.filter { $0["event"] as? String == "draft_preview_presented" }.isEmpty)
+
+        recorder.finalChunk = [Float](repeating: 0.2, count: 16_000)
+        controller.toggle(now: base.addingTimeInterval(3))
+        await barrier.waitUntilEntered()
+        appendEvents = sink.events.filter { $0["session_id"] as? Int == 2 }
+        let previewEvents = appendEvents.filter {
+            let event = $0["event"] as? String
+            return event == "first_preview_presented" || event == "draft_preview_presented"
+        }
+        #expect(panel.pendingText == "partial append final append")
+        #expect(previewEvents.compactMap { $0["event"] as? String } == [
+            "first_preview_presented", "draft_preview_presented",
+        ])
+        #expect(previewEvents.allSatisfy { $0["append_mode"] as? Bool == true })
+        #expect((previewEvents.last?["stop_to_preview_ms"] as? Double) != nil)
+
+        let ordered = order.events
+        let partialHandoff = ordered.firstIndex(of: "pending:partial append")
+        let firstEvent = ordered.firstIndex(of: "telemetry:first_preview_presented")
+        let finalHandoff = ordered.firstIndex(of: "pending:partial append final append")
+        let draftEvent = ordered.firstIndex(of: "telemetry:draft_preview_presented")
+        if let partialHandoff, let firstEvent, let finalHandoff, let draftEvent {
+            #expect(partialHandoff < firstEvent)
+            #expect(firstEvent < finalHandoff)
+            #expect(finalHandoff < draftEvent)
+        } else {
+            Issue.record("Missing pending/telemetry ordering evidence: \(ordered)")
+        }
+
+        await barrier.resume()
+        await settle()
+        await controller.shutdown()
+    }
+
     @Test("A synthetic session persists privacy-safe events through the file logger sink")
     func syntheticSessionPersistsToFileLogger() async throws {
         let directory = FileManager.default.temporaryDirectory

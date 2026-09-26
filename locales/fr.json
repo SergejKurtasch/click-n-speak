@@ -12,6 +12,7 @@
     "hud.recording_body": "Parle maintenant. Appuie de nouveau sur le raccourci pour arrêter.",
     "hud.transcribing_title": "Transcription...",
     "hud.transcribing_body": "Reconnaissance en cours. Patiente un instant.",
+    "hud.refining_title": "Révision…",
     "hud.still_working_title": "Transcription... toujours en cours",
     "hud.still_working_body": "La reconnaissance est toujours en cours. Patiente un instant.",
     "hud.ready_title": "Prêt",
@@ -533,5 +534,6 @@
     "dialog.refinement_timeout": "Refinement timed out.",
     "dialog.refinement_failed": "Refinement failed.",
     "dialog.editor_disabled_reason": "Disabled in settings",
-    "dialog.editor_preparing_reason": "Starting up..."
+    "dialog.editor_preparing_reason": "Starting up...",
+    "preview.refining_append": "Nouvel enregistrement · Révision…"
 }

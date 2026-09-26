@@ -57,11 +57,33 @@ private actor RouterEditorDouble: AiEditing {
         RefineResult(text: text + suffix, status: .ok)
     }
 
+    func preWarm(languages: [String]?, force: Bool) async -> PrewarmResult {
+        await refineGate?.pause()
+        return Task.isCancelled ? .skipped : .warmed
+    }
+
     func stop() async { stopCount += 1 }
 }
 
 @Suite("AI editor router")
 struct AiEditorRouterTests {
+    @Test("Replacement retains a cancelled prewarming editor until generation exits")
+    func replacementRetainsCancelledPrewarm() async {
+        let router = AiEditorRouter()
+        let gate = EditorOperationGate()
+        let descriptor = AiEditorDescriptor(backend: "local", modelID: "old", kind: .local)
+        let editor = RouterEditorDouble(suffix: "old", descriptor: descriptor, refineGate: gate)
+        await router.install(editor, descriptor: descriptor)
+        let operation = Task { await router.preWarm(languages: nil, force: true) }
+        await gate.waitUntilEntered()
+        operation.cancel()
+        await router.install(nil, descriptor: .disabled)
+        #expect(await editor.stopCount == 0)
+        await gate.release()
+        #expect(await operation.value == .skipped)
+        #expect(await editor.stopCount == 1)
+    }
+
     @Test("Disable and replacement retire each prior editor once")
     func swapAndDisable() async {
         let router = AiEditorRouter()

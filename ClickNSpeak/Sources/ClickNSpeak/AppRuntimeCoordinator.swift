@@ -72,6 +72,7 @@ private enum RuntimeCommitError: LocalizedError {
 @MainActor
 protocol RuntimeSessionCoordinating: AnyObject {
     var isRuntimeIdle: Bool { get }
+    func cancelWarmup()
     func beginRuntimeMutation() -> Bool
     func endRuntimeMutation()
     func updateConfig(_ config: Config)
@@ -404,6 +405,7 @@ final class AppRuntimeCoordinator {
         }
 
         do {
+            session?.cancelWarmup()
             try await waitUntilSessionIsIdle(generation: generation)
             try ensureCurrent(generation)
 
@@ -517,7 +519,7 @@ final class AppRuntimeCoordinator {
                 active: activeRuntime,
                 desired: desired,
                 message: message,
-                recovery: recoveryActions(generation: generation, 
+                recovery: recoveryActions(generation: generation,
                     for: error,
                     deactivatedCredential: deactivatedCredential
                 )
@@ -905,7 +907,7 @@ final class AppRuntimeCoordinator {
         return true
     }
 
-    private func recoveryActions(generation: Int, 
+    private func recoveryActions(generation: Int,
         for error: Error,
         deactivatedCredential: Bool
     ) -> [RuntimeRecoveryCommand] {

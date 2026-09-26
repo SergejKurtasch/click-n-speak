@@ -1,0 +1,29 @@
+prefix_rule(
+    pattern = ["swift", "test"],
+    decision = "allow",
+    justification = "Swift package tests are the canonical local verification path.",
+)
+
+prefix_rule(
+    pattern = ["bash", "scripts/swift_verify.sh"],
+    decision = "allow",
+    justification = "The repository verification script is an approved project-local gate.",
+)
+
+prefix_rule(
+    pattern = ["bash", "scripts/swift_build_app.sh"],
+    decision = "allow",
+    justification = "The repository build script is the canonical application assembly path.",
+)
+
+prefix_rule(
+    pattern = ["venv/bin/python", "-m", "pytest"],
+    decision = "allow",
+    justification = "Python tests run through the repository virtual environment.",
+)
+
+prefix_rule(
+    pattern = ["venv/bin/python", "scripts/validate_agent_environment.py"],
+    decision = "allow",
+    justification = "The repository-owned agent environment validator is safe and read-only.",
+)

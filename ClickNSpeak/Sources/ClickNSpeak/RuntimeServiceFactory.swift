@@ -47,7 +47,7 @@ struct PreparedEditor: Sendable {
 struct AccessTokenReleasingTranscriber: Transcribing {
     let inner: any Transcribing
     let tokens: [UUID]
-    
+
     func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult { await inner.transcribe(request) }
     func warmup(language: String?) async { await inner.warmup(language: language) }
     func prepare(language: String?) async throws { try await inner.prepare(language: language) }
@@ -67,7 +67,7 @@ struct AccessTokenReleasingTranscriber: Transcribing {
 struct AccessTokenReleasingEditor: AiEditing {
     let inner: any AiEditing
     let tokens: [UUID]
-    
+
     var descriptor: AiEditorDescriptor { inner.descriptor }
     var isReady: Bool { inner.isReady }
     func prepare() async throws {
@@ -86,6 +86,9 @@ struct AccessTokenReleasingEditor: AiEditing {
     }
     func refineFileText(text: String, languages: [String]?, knownTerms: [String]?, misrecognitions: [(String, String)]?) async -> RefineResult {
         await inner.refineFileText(text: text, languages: languages, knownTerms: knownTerms, misrecognitions: misrecognitions)
+    }
+    func preWarm(languages: [String]?, force: Bool) async -> PrewarmResult {
+        await inner.preWarm(languages: languages, force: force)
     }
     func stop() async {
         await inner.stop()
@@ -154,7 +157,7 @@ struct RuntimeServiceFactory: RuntimeServiceBuilding, Sendable {
                     throw RuntimePreparationError.initializationFailed(error.localizedDescription)
                 }
             }
-            
+
             let baseService: any Transcribing = GuardedTranscriber(
                 wrapping: WhisperCppTranscriber(
                     modelURL: modelURL,
@@ -163,17 +166,17 @@ struct RuntimeServiceFactory: RuntimeServiceBuilding, Sendable {
                 )
             )
             let service: any Transcribing = AccessTokenReleasingTranscriber(
-                inner: baseService, 
+                inner: baseService,
                 tokens: token.map { [$0] } ?? []
             )
-            
+
             do {
                 try await service.prepare(language: config.primaryLanguage)
             } catch {
                 await service.stop()
                 throw RuntimePreparationError.initializationFailed(error.localizedDescription)
             }
-            
+
             if let t = token {
                 registry.updateReason(t, reason: ModelArtifactUse.activeRuntime(descriptor: RuntimeDescriptor(transcriber: TranscriberDescriptor(backend: "local", modelID: model.id, kind: .local), aiEditor: .disabled)))
             }
@@ -265,7 +268,7 @@ guard config.aiEditorEnabled else {
                 }
                 throw RuntimePreparationError.initializationFailed(error.localizedDescription)
             }
-            
+
             if let t = token {
                 registry.updateReason(t, reason: ModelArtifactUse.activeRuntime(descriptor: RuntimeDescriptor(
                     transcriber: .unavailable,

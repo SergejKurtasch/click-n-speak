@@ -12,6 +12,7 @@ struct LocalAiEditorTests {
         warmTimeout: TimeInterval = 0.2,
         coldTimeout: TimeInterval = 0.2,
         fileGateTimeout: TimeInterval = 0.2,
+        fileOperationTimeout: TimeInterval = 0.5,
         fileMaximumChunkCharacters: Int = EditorPolicy.localMaximumFileChunkCharacters
     ) throws -> (LocalAiEditor, URL) {
         let directory = try EditorSnapshotFixture.make()
@@ -25,10 +26,151 @@ struct LocalAiEditorTests {
             realtimeColdTimeout: coldTimeout,
             coldIdleThreshold: 0,
             fileGateTimeout: fileGateTimeout,
-            fileOperationTimeout: 0.5,
+            fileOperationTimeout: fileOperationTimeout,
             fileMaximumChunkCharacters: fileMaximumChunkCharacters
         )
         return (editor, directory)
+    }
+
+    @Test("Freshness expires at 300 seconds and a backwards clock invalidates it")
+    func prewarmFreshnessBoundaries() async throws {
+        let clock = LockedSnapshot(Date(timeIntervalSince1970: 1000))
+        let generator = ScriptedLocalGenerator([])
+        let directory = try EditorSnapshotFixture.make()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let editor = LocalAiEditor(modelID: "qwen-test", modelDirectory: directory,
+            gate: InferenceExecutionGate(), memoryPressure: FixedMemoryPressure(high: false),
+            generator: generator, now: { clock.get() })
+        try await editor.prepare()
+        #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
+        clock.set(Date(timeIntervalSince1970: 1299))
+        #expect(await editor.preWarm(languages: nil, force: false) == .skipped)
+        clock.set(Date(timeIntervalSince1970: 1300))
+        #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
+        clock.set(Date(timeIntervalSince1970: 1200))
+        #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
+    }
+
+    @Test("Failed prewarm does not mark the editor fresh")
+    func prewarmFailureRemainsCold() async throws {
+        let generator = ScriptedLocalGenerator([.failure])
+        let (editor, directory) = try makeEditor(generator: generator)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await editor.prepare()
+        #expect(await editor.preWarm(languages: nil, force: false) == .failed)
+        #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
+    }
+
+    @Test("Soft prewarm deadline requests cancellation and waits for actual exit")
+    func prewarmDeadlineRetainsLease() async throws {
+        let generator = ScriptedLocalGenerator([.delayed("warmup", 0.10)])
+        let gate = InferenceExecutionGate()
+        let directory = try EditorSnapshotFixture.make()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let editor = LocalAiEditor(modelID: "qwen-test", modelDirectory: directory, gate: gate,
+            memoryPressure: FixedMemoryPressure(high: false), generator: generator, prewarmTimeout: 0.01)
+        try await editor.prepare()
+        let task = Task { await editor.preWarm(languages: nil, force: false) }
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(gate.isBusy)
+        #expect(await task.value == .skipped)
+        #expect(!gate.isBusy)
+        #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
+    }
+
+    @Test("Successful synthetic computation selects the existing warm user deadline")
+    func prewarmSelectsWarmUserTimeout() async throws {
+        let generator = ScriptedLocalGenerator([.output("warmup"), .delayed(longEditorInput, 0.08)])
+        let directory = try EditorSnapshotFixture.make()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let editor = LocalAiEditor(modelID: "qwen-test", modelDirectory: directory,
+            gate: InferenceExecutionGate(), memoryPressure: FixedMemoryPressure(high: false),
+            generator: generator, realtimeWarmTimeout: 0.02, realtimeColdTimeout: 0.20)
+        try await editor.prepare()
+        #expect(await editor.preWarm(languages: nil, force: true) == .warmed)
+        #expect(await editor.refine(text: longEditorInput, languages: nil, knownTerms: nil, misrecognitions: nil).status == .timeout)
+        try await Task.sleep(for: .milliseconds(100))
+    }
+
+    @Test("Successful file cleanup refreshes prewarm freshness")
+    func fileCleanupRefreshesPrewarmFreshness() async throws {
+        let generator = ScriptedLocalGenerator([.output(longEditorInput)])
+        let (editor, directory) = try makeEditor(generator: generator)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await editor.prepare()
+        #expect(await editor.refineFileText(text: longEditorInput, languages: nil, knownTerms: nil, misrecognitions: nil).status == .unchanged)
+        #expect(await editor.preWarm(languages: nil, force: false) == .skipped)
+        #expect(await generator.preWarmCount == 0)
+    }
+
+    @Test("Cancelled file cleanup does not refresh prewarm freshness")
+    func cancelledFileCleanupDoesNotRefreshPrewarmFreshness() async throws {
+        let generator = ScriptedLocalGenerator([.delayed(longEditorInput, 0.10)])
+        let (editor, directory) = try makeEditor(
+            generator: generator,
+            fileOperationTimeout: 0.01
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await editor.prepare()
+
+        #expect(
+            await editor.refineFileText(
+                text: longEditorInput,
+                languages: nil,
+                knownTerms: nil,
+                misrecognitions: nil
+            ).status == .timeout
+        )
+        try await Task.sleep(for: .milliseconds(130))
+
+        #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
+        #expect(await generator.preWarmCount == 1)
+    }
+
+    @Test("Prepared local prewarm computes once and forced wake bypasses freshness")
+    func prewarmComputesAndTracksFreshness() async throws {
+        let generator = ScriptedLocalGenerator([])
+        let gate = InferenceExecutionGate()
+        let (editor, directory) = try makeEditor(generator: generator, gate: gate)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(await editor.preWarm(languages: ["en"], force: true) == .skipped)
+        try await editor.prepare()
+        #expect(await editor.preWarm(languages: ["en"], force: false) == .warmed)
+        #expect(await editor.preWarm(languages: ["en"], force: false) == .skipped)
+        #expect(await editor.preWarm(languages: ["en"], force: true) == .warmed)
+        #expect(await generator.preWarmCount == 2)
+        #expect(!gate.isBusy)
+    }
+
+    @Test("Prewarm yields to shared inference and memory pressure")
+    func prewarmSkipsBusyGateAndMemoryPressure() async throws {
+        for memoryHigh in [false, true] {
+            let generator = ScriptedLocalGenerator([])
+            let gate = InferenceExecutionGate()
+            let (editor, directory) = try makeEditor(generator: generator, gate: gate, memoryHigh: memoryHigh)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            try await editor.prepare()
+            let lease = memoryHigh ? nil : gate.tryAcquire()
+            #expect(await editor.preWarm(languages: nil, force: true) == .skipped)
+            #expect(await generator.preWarmCount == 0)
+            lease?.release()
+        }
+    }
+
+    @Test("Cancelled prewarm retains the lease until uncooperative generation exits")
+    func cancelledPrewarmRetainsLease() async throws {
+        let generator = ScriptedLocalGenerator([.delayed("warmup", 0.15)])
+        let gate = InferenceExecutionGate()
+        let (editor, directory) = try makeEditor(generator: generator, gate: gate)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await editor.prepare()
+        let task = Task { await editor.preWarm(languages: nil, force: true) }
+        try await Task.sleep(for: .milliseconds(20))
+        task.cancel()
+        #expect(gate.isBusy)
+        #expect(await task.value != .warmed)
+        #expect(!gate.isBusy)
+        #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
     }
 
     @Test("Disabled, skipped, memory-pressure, unchanged, ok, and error paths preserve the source contract")

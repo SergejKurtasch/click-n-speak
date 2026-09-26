@@ -12,6 +12,7 @@
     "hud.recording_body": "Habla ahora. Pulsa el atajo de nuevo para detener.",
     "hud.transcribing_title": "Transcribiendo...",
     "hud.transcribing_body": "Reconocimiento en curso. Por favor, espera.",
+    "hud.refining_title": "Edición…",
     "hud.still_working_title": "Transcribiendo... todavía en proceso",
     "hud.still_working_body": "El reconocimiento sigue en curso. Por favor, espera.",
     "hud.ready_title": "Listo",
@@ -533,5 +534,6 @@
     "dialog.refinement_timeout": "Refinement timed out.",
     "dialog.refinement_failed": "Refinement failed.",
     "dialog.editor_disabled_reason": "Disabled in settings",
-    "dialog.editor_preparing_reason": "Starting up..."
+    "dialog.editor_preparing_reason": "Starting up...",
+    "preview.refining_append": "Nueva grabación · Edición…"
 }

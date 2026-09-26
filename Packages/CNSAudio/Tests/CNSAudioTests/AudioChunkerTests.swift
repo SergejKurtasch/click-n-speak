@@ -25,14 +25,32 @@ struct AudioChunkerTests {
         #expect(block(&c, seconds: 0.5, speech: false) == .emit(triggerType: "Normal"))
     }
 
-    @Test("Micro branch: 0.4s silence triggers after target (4s) duration")
-    func microBranch() {
+    @Test("Normal pause near the target remains in the current phrase")
+    func normalPauseNearTargetWaitsForMicroPausePolicy() {
+        var c = AudioChunker()
+        // A 1.0 s pause at 3.85 s used to emit a 2.85 s prefix and leave a
+        // sub-second real-speech tail for an independent Whisper request.
+        #expect(block(&c, seconds: 2.85, speech: true) == .continue)
+        #expect(block(&c, seconds: 0.5, speech: false) == .continue)
+        #expect(block(&c, seconds: 0.5, speech: false) == .continue)
+        // Crossing the target during that same pause must not let the 0.4 s
+        // micro-pause threshold split it before speech has a chance to resume.
+        #expect(block(&c, seconds: 0.2, speech: false) == .continue)
+        // Speech resuming just after 4 s must remain attached to that prefix.
+        #expect(block(&c, seconds: 0.2, speech: true) == .continue)
+    }
+
+    @Test("Micro pause after target waits for a stable endpoint")
+    func microPauseWaitsForStableEndpoint() {
         var c = AudioChunker()
         // 4.0s of speech reaches target, with no trigger while speech continues.
         for _ in 0..<8 { #expect(block(&c, seconds: 0.5, speech: true) == .continue) }
-        // Two 0.2s silence frames → silence_counter 0.4 → Micro trigger.
+        // A 0.4s micro-pause can be an in-sentence hesitation. Keep it in the
+        // current request so a following word is not sent as a tiny tail.
         #expect(block(&c, seconds: 0.2, speech: false) == .continue)
-        #expect(block(&c, seconds: 0.2, speech: false) == .emit(triggerType: "MICRO (Target duration)"))
+        #expect(block(&c, seconds: 0.2, speech: false) == .continue)
+        // A stable 0.8s pause after the target remains a useful early endpoint.
+        #expect(block(&c, seconds: 0.4, speech: false) == .emit(triggerType: "MICRO (Target duration)"))
     }
 
     @Test("Force branch: any block past max (8s) triggers with zero silence")

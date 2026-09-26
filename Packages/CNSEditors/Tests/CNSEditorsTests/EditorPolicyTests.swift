@@ -34,4 +34,30 @@ struct EditorPolicyTests {
         ))
         #expect(EditorPolicy.validatedOutput(source + "?", original: source, multiplier: 2.5).text == source + "?")
     }
+
+    @Test("Realtime validation allows punctuation, known fillers, and repeated words")
+    func realtimeValidationAllowsConservativeEdits() {
+        let source = "ну вот это это тест"
+        let result = EditorPolicy.validatedRealtimeOutput(
+            "Это тест.",
+            original: source,
+            languages: ["ru"],
+            multiplier: 2.5
+        )
+
+        #expect(result == RefineResult(text: "Это тест.", status: .ok))
+    }
+
+    @Test("Realtime validation rejects rewritten speech")
+    func realtimeValidationRejectsRewrittenSpeech() {
+        let source = "Please review the release notes before lunch"
+        let result = EditorPolicy.validatedRealtimeOutput(
+            "The release notes are ready for publication.",
+            original: source,
+            languages: ["en"],
+            multiplier: 2.5
+        )
+
+        #expect(result == RefineResult(text: source, status: .error))
+    }
 }

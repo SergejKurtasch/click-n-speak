@@ -32,6 +32,7 @@ public struct DatasetRecord: Sendable {
     public var sttBackend: String?
     public var sttModel: String?
     public var aiModel: String?
+    public var editorLatencyMs: Int?
     public var userFinal: String
     public var lang: String?
     public var promptHash: String?
@@ -49,6 +50,7 @@ public struct DatasetRecord: Sendable {
         sttBackend: String? = nil,
         sttModel: String? = nil,
         aiModel: String? = nil,
+        editorLatencyMs: Int? = nil,
         userFinal: String,
         lang: String? = nil,
         promptHash: String? = nil,
@@ -62,6 +64,7 @@ public struct DatasetRecord: Sendable {
         self.sttBackend = sttBackend
         self.sttModel = sttModel
         self.aiModel = aiModel
+        self.editorLatencyMs = editorLatencyMs
         self.userFinal = userFinal
         self.lang = lang
         self.promptHash = promptHash
@@ -117,6 +120,7 @@ public struct DatasetLogger: Sendable {
         object["stt_backend"] = record.sttBackend.map { JSONValue.string($0) } ?? .null
         object["stt_model"] = record.sttModel.map { JSONValue.string($0) } ?? .null
         object["ai_model"] = record.aiModel.map { JSONValue.string($0) } ?? .null
+        object["editor_latency_ms"] = record.editorLatencyMs.map { JSONValue.int(Int64($0)) } ?? .null
         object["user_final"] = .string(record.userFinal)
         object["lang"] = record.lang.map { JSONValue.string($0) } ?? .null
         object["prompt_hash"] = record.promptHash.map { JSONValue.string($0) } ?? .null

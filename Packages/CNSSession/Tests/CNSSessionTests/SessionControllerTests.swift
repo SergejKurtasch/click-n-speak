@@ -3,6 +3,7 @@ import CNSDictionary
 import CNSTranscription
 
 import Foundation
+import AppKit
 import Testing
 @testable import CNSSession
 
@@ -26,6 +27,7 @@ struct SessionControllerTests {
         results: [TranscriptionResult] = [],
         delay: TimeInterval = 0,
         config: Config? = nil,
+        strings: SessionStrings = SessionStrings(),
         aiEditor: FakeAiEditor? = nil,
         phraseHistory: (any PhraseHistoryProviding)? = nil,
         datasetLogger: DatasetLogger? = nil,
@@ -42,6 +44,7 @@ struct SessionControllerTests {
         let frontmost = FakeFrontmost()
         let controller = SessionController(
             config: config ?? Self.makeConfig(),
+            strings: strings,
             transcriber: transcriber,
             aiEditor: aiEditor,
             recorder: recorder,
@@ -301,8 +304,22 @@ struct SessionControllerTests {
         rig.controller.toggle(now: Date().addingTimeInterval(3))
         await settle()
 
-        #expect(rig.panel.events.contains(.append("вторая фраза")))
-        #expect(rig.panel.interactiveTexts.count == 1)  // no second popup
+        #expect(rig.panel.interactiveTexts == ["первая фраза"])
+        #expect(rig.panel.events.filter { $0 == .append("вторая фраза") }.count == 1)
+        #expect(rig.panel.shownText == "первая фраза вторая фраза")
+        let pending = rig.panel.events.firstIndex(of: .pending(
+            text: "вторая фраза",
+            title: "New recording · Refining…"
+        ))
+        let cleared = rig.panel.events.firstIndex(of: .clearPending)
+        let appended = rig.panel.events.firstIndex(of: .append("вторая фраза"))
+        #expect(pending != nil)
+        #expect(cleared != nil)
+        #expect(appended != nil)
+        if let pending, let cleared, let appended {
+            #expect(pending < cleared)
+            #expect(cleared < appended)
+        }
         #expect(rig.controller.previousAppPid == 100)
         #expect(rig.controller.appendToPopup == false)
     }
@@ -322,6 +339,7 @@ struct SessionControllerTests {
         #expect(rig.panel.isShowingInteractive)
         #expect(rig.panel.decisionEnabled)
         #expect(rig.panel.shownText == "first")
+        #expect(rig.panel.events.contains(.clearPending))
         await rig.controller.shutdown()
     }
 
@@ -385,6 +403,52 @@ struct SessionControllerTests {
         #expect(rig.panel.isShowingInteractive)
         #expect(rig.panel.decisionEnabled)
         #expect(rig.panel.shownText == "first")
+        #expect(rig.panel.events.contains(.clearPending))
+        await rig.controller.shutdown()
+    }
+
+    @Test("Append preview preserves the editor and merges against its latest text")
+    func appendPreviewPreservesLiveEdits() async {
+        let barrier = RefinementBarrier()
+        let editor = FakeAiEditor(refinementBarrier: barrier)
+        editor.refinedText = "refined append"
+        var config = Self.makeConfig()
+        config.raw["ai_editor_enabled"] = .bool(false)
+        let rig = makeRig(
+            texts: ["first", "partial append", "final append"],
+            config: config,
+            aiEditor: editor
+        )
+        let base = Date()
+        await runSession(rig)
+        rig.panel.userEdits("corrected first")
+
+        config.raw["ai_editor_enabled"] = .bool(true)
+        rig.controller.updateConfig(config)
+        rig.controller.toggle(now: base.addingTimeInterval(2))
+        await settle()
+        rig.recorder.emitChunk(audio)
+        await rig.transcriber.waitUntilRequestCount(2)
+        await settle()
+
+        #expect(rig.panel.pendingText == "partial append")
+        #expect(rig.panel.shownText == "corrected first")
+        #expect(rig.panel.interactiveTexts == ["first"])
+
+        rig.recorder.finalChunk = audio
+        rig.controller.toggle(now: base.addingTimeInterval(3))
+        await barrier.waitUntilEntered()
+        #expect(rig.panel.pendingText == "partial append final append")
+        #expect(rig.panel.shownText == "corrected first")
+        #expect(!rig.panel.decisionEnabled)
+
+        rig.panel.userEdits("latest first")
+        await barrier.resume()
+        await settle()
+
+        #expect(rig.panel.shownText == "latest first refined append")
+        #expect(rig.panel.pendingText == nil)
+        #expect(rig.panel.events.filter { $0 == .append("refined append") }.count == 1)
         await rig.controller.shutdown()
     }
 
@@ -1176,6 +1240,133 @@ struct SessionControllerTests {
         #expect(rig.delivery.delivered.count == 1)
     }
 
+    private func warmupConfig() -> Config {
+        var config = Self.makeConfig()
+        config.raw["ai_editor_enabled"] = .bool(true)
+        return config
+    }
+
+    @Test("Startup and wake warm the local editor; keepalive warms only Whisper")
+    func startupAndWakeWarmEditor() async {
+        let editor = FakeAiEditor()
+        let rig = makeRig(config: warmupConfig(), aiEditor: editor)
+        #expect(await rig.controller.warmupIfIdle(trigger: .startup))
+        #expect(await rig.controller.warmupIfIdle(trigger: .wake))
+        #expect(await rig.controller.warmupIfIdle(trigger: .keepAlive))
+        #expect(editor.prewarmCalls == [false, true])
+        #expect(await rig.transcriber.preWarmCount == 3)
+    }
+
+    @Test("Cancelled editor warmup keeps runtime reserved until actual completion")
+    func cancelledEditorWarmupRetainsReservation() async {
+        let barrier = RefinementBarrier()
+        let editor = FakeAiEditor()
+        editor.prewarmBarrier = barrier
+        let rig = makeRig(config: warmupConfig(), aiEditor: editor, shutdownTimeout: 0.02)
+        let warmup = Task { await rig.controller.warmupIfIdle(trigger: .wake) }
+        await barrier.waitUntilEntered()
+        rig.controller.cancelWarmup()
+        #expect(!rig.controller.isRuntimeIdle)
+        #expect(!rig.controller.beginRuntimeMutation())
+        let result = await rig.controller.shutdown()
+        #expect(result.pendingActivities.contains(.warmup))
+        #expect(await rig.transcriber.abortCount == 0)
+        await barrier.resume()
+        _ = await warmup.value
+        #expect((await rig.controller.shutdown()).pendingActivities.isEmpty)
+    }
+
+    @Test("Recording during Qwen prewarm starts capture without aborting Whisper")
+    func recordingDuringEditorWarmup() async {
+        let barrier = RefinementBarrier()
+        let editor = FakeAiEditor()
+        editor.prewarmBarrier = barrier
+        let rig = makeRig(config: warmupConfig(), aiEditor: editor)
+        let warmup = Task { await rig.controller.warmupIfIdle(trigger: .wake) }
+        await barrier.waitUntilEntered()
+        rig.controller.toggle(now: Date())
+        await settle(20)
+        #expect(rig.recorder.isRecording)
+        #expect(await rig.transcriber.abortCount == 0)
+        await barrier.resume()
+        _ = await warmup.value
+        _ = await rig.controller.shutdown()
+    }
+
+    @Test("File transcription cancels and drains Qwen prewarm before reserving runtime")
+    func fileWaitsForEditorWarmup() async {
+        let barrier = RefinementBarrier()
+        let editor = FakeAiEditor()
+        editor.prewarmBarrier = barrier
+        let rig = makeRig(config: warmupConfig(), aiEditor: editor)
+        let warmup = Task { await rig.controller.warmupIfIdle(trigger: .wake) }
+        await barrier.waitUntilEntered()
+        let file = Task { await rig.controller.transcribeFile(url: URL(fileURLWithPath: "/tmp/test.wav")) }
+        await settle(20)
+        #expect(rig.controller.state == .idle)
+        #expect(!rig.controller.isRuntimeIdle)
+        await barrier.resume()
+        _ = await warmup.value
+        #expect(await file.value.status == .noSpeech)
+    }
+
+    @Test("Cancellation at the Whisper-to-Qwen boundary never enters the editor")
+    func cancellationBetweenWhisperAndEditor() async {
+        let editor = FakeAiEditor()
+        let rig = makeRig(config: warmupConfig(), aiEditor: editor)
+        await rig.transcriber.setPrewarmCompletion { await rig.controller.cancelWarmup() }
+        #expect(await rig.controller.warmupIfIdle(trigger: .wake) == false)
+        #expect(editor.prewarmCalls.isEmpty)
+        #expect(rig.controller.isRuntimeIdle)
+    }
+
+    @Test("Whisper cancellation prevents the editor phase")
+    func cancellationDuringWhisperSkipsEditor() async {
+        let editor = FakeAiEditor()
+        let rig = makeRig(config: warmupConfig(), aiEditor: editor)
+        await rig.transcriber.setSuspendPreWarm(true)
+        let warmup = Task { await rig.controller.warmupIfIdle(trigger: .wake) }
+        await rig.transcriber.waitUntilPreWarmStarted()
+        rig.controller.cancelWarmup()
+        #expect(await warmup.value == false)
+        #expect(editor.prewarmCalls.isEmpty)
+        #expect(await rig.transcriber.abortCount == 1)
+    }
+
+    @Test("A recording that starts while a file waits for prewarm wins the idle boundary")
+    func recordingWinsWhileFileWaitsForWarmup() async {
+        let barrier = RefinementBarrier()
+        let editor = FakeAiEditor()
+        editor.prewarmBarrier = barrier
+        let rig = makeRig(config: warmupConfig(), aiEditor: editor)
+        let warmup = Task { await rig.controller.warmupIfIdle(trigger: .wake) }
+        await barrier.waitUntilEntered()
+        let file = Task { await rig.controller.transcribeFile(url: URL(fileURLWithPath: "/tmp/test.wav")) }
+        await settle(20)
+        rig.controller.toggle(now: Date())
+        await barrier.resume()
+        _ = await warmup.value
+        if case .failed(let failure) = await file.value.status {
+            #expect(failure.kind == .unavailable)
+        } else { Issue.record("File should report busy after recording wins") }
+        #expect(rig.controller.isRecording)
+        _ = await rig.controller.shutdown()
+    }
+
+    @Test("Disabled, cloud and unready editors never receive synthetic work")
+    func ineligibleEditorsSkipPrewarm() async {
+        for mode in ["disabled", "cloud", "unready"] {
+            let editor = FakeAiEditor()
+            var config = warmupConfig()
+            if mode == "disabled" { config.raw["ai_editor_enabled"] = .bool(false) }
+            if mode == "cloud" { editor.descriptor = AiEditorDescriptor(backend: "gemini", modelID: "test", kind: .cloud) }
+            if mode == "unready" { editor.isReady = false }
+            let rig = makeRig(config: config, aiEditor: editor)
+            #expect(await rig.controller.warmupIfIdle(trigger: .wake))
+            #expect(editor.prewarmCalls.isEmpty)
+        }
+    }
+
     @Test("Hotkey start never queues synthetic prewarm work")
     func hotkeyDoesNotPrewarm() async {
         let rig = makeRig()
@@ -1351,11 +1542,21 @@ struct SessionControllerTests {
     func recordingUsesConfigurationSnapshot() async {
         var initial = Self.makeConfig(primary: "ru", additional: ["en"])
         initial.raw["initial_prompt"] = .string("OLD RECORDING PROMPT")
+        initial.raw["user_terms"] = .object(JSONObject([
+            ("ru", .array([.object(JSONObject([
+                ("term", .string("нейросеть")), ("source", .string("manual"))
+            ]))])),
+            ("en", .array([.object(JSONObject([
+                ("term", .string("WhisperKit")), ("source", .string("manual"))
+            ]))]))
+        ]))
         initial.raw["ai_editor_enabled"] = .bool(true)
         let editor = FakeAiEditor()
+        let instruction = "TEST TRANSCRIPTION INSTRUCTION"
         let rig = makeRig(
             texts: ["first", "second", "third"],
             config: initial,
+            strings: SessionStrings(transcriptionInstruction: instruction),
             aiEditor: editor
         )
         await rig.transcriber.suspendOneDecode()
@@ -1380,6 +1581,19 @@ struct SessionControllerTests {
         #expect(requests.allSatisfy { $0.allowedLanguages == ["ru", "en"] })
         #expect(requests.allSatisfy { $0.initialPrompt?.contains("OLD RECORDING PROMPT") == true })
         #expect(requests.allSatisfy { $0.initialPrompt?.contains("NEW RECORDING PROMPT") == false })
+        #expect(requests.allSatisfy {
+            $0.initialPromptsByLanguage["en"]?.contains("English language.") == true
+                && $0.initialPromptsByLanguage["en"]?.contains("Русский язык") == false
+                && $0.initialPromptsByLanguage["en"]?.contains("WhisperKit") == true
+                && $0.initialPromptsByLanguage["en"]?.contains("нейросеть") == false
+                && $0.initialPromptsByLanguage["ru"]?.contains("Русский язык.") == true
+                && $0.initialPromptsByLanguage["ru"]?.contains("нейросеть") == true
+                && $0.initialPromptsByLanguage["ru"]?.contains("WhisperKit") == false
+                && $0.initialPromptsByLanguage["ru"]?.contains(instruction) == true
+                && $0.initialPromptsByLanguage["en"]?.contains(instruction) == true
+        })
+        #expect(requests[1].initialPromptsByLanguage["ru"]?.contains("first") == true)
+        #expect(requests[1].initialPromptsByLanguage["en"]?.contains("first") == false)
         #expect(editor.lastLanguages == ["ru", "en"])
 
         rig.panel.userCancels()
@@ -1443,32 +1657,37 @@ struct SessionControllerTests {
         #expect(rig.controller.completedSessions == 20)
         #expect(await rig.transcriber.reloadCount == 1)
     }
-    @Test("AI Editor refines text before showing interactive popup")
-    func testFinalizeWithAiEditor() async {
-        let aiEditor = FakeAiEditor()
+    @Test("The final transcript is visible in the HUD while refinement is suspended")
+    func finalPreviewPrecedesRefinement() async {
+        let barrier = RefinementBarrier()
+        let aiEditor = FakeAiEditor(refinementBarrier: barrier)
         aiEditor.refinedText = "super refined text"
-        
+
         // Ensure ai_editor_enabled is true in config
         var config = Self.makeConfig()
         config.raw["ai_editor_enabled"] = .bool(true)
-        
+
         let rig = makeRig(texts: ["raw STT"], config: config, aiEditor: aiEditor)
-        
+
         let now = Date()
         rig.controller.toggle(now: now)
         await settle()
-        
+
         rig.recorder.finalChunk = [Float](repeating: 0, count: 16000)
-        
+
         rig.controller.toggle(now: now.addingTimeInterval(2.0))
-        
-        while !rig.panel.isShowingInteractive { await Task.yield() }
-        
+
+        await barrier.waitUntilEntered()
+
         #expect(aiEditor.didCallRefine)
         #expect(aiEditor.lastInputText == "raw STT")
-        
-        // Wait, the panel should show the refined text
-        #expect(rig.panel.shownText == "super refined text")
+        #expect(rig.panel.events.contains(.text("raw STT")))
+        #expect(rig.panel.statuses.contains("Refining…"))
+        #expect(rig.panel.interactiveTexts.isEmpty)
+
+        await barrier.resume()
+        await settle()
+        #expect(rig.panel.interactiveTexts == ["super refined text"])
     }
 
     @Test("Replacement policy mirrors local and cloud editor hint behavior")

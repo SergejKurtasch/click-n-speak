@@ -25,12 +25,14 @@ public protocol AiEditing: Sendable {
         misrecognitions: [(String, String)]?
     ) async -> RefineResult
 
+    func preWarm(languages: [String]?, force: Bool) async -> PrewarmResult
     func stop() async
 }
 
 public extension AiEditing {
     var descriptor: AiEditorDescriptor { .disabled }
     func prepare() async throws {}
+    func preWarm(languages: [String]?, force: Bool) async -> PrewarmResult { .skipped }
     func stop() async {}
 }
 

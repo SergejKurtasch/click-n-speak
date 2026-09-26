@@ -1,0 +1,11 @@
+[agents.researcher]
+description = "Read-only evidence collection with explicit sources and uncertainties."
+config_file = "agents/researcher.toml"
+
+[agents.implementer]
+description = "Bounded implementation with tests, preserved user changes, and concise handoff."
+config_file = "agents/implementer.toml"
+
+[agents.reviewer]
+description = "Independent correctness review ordered by severity with file and line evidence."
+config_file = "agents/reviewer.toml"

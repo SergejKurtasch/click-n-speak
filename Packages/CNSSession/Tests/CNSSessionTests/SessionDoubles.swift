@@ -14,6 +14,8 @@ final class FakePanel: PopupPresenting {
         case text(String)
         case interactive(String)
         case append(String)
+        case pending(text: String, title: String)
+        case clearPending
         case incompleteWarning(String)
         case decisionEnabled(Bool)
         case hide
@@ -22,7 +24,10 @@ final class FakePanel: PopupPresenting {
     private(set) var events: [Event] = []
     private(set) var isShowingInteractive = false
     private(set) var shownText = ""
+    var currentText: String { shownText }
     private(set) var decisionEnabled = true
+    private(set) var pendingText: String?
+    var onEvent: ((Event) -> Void)?
 
     private var onConfirm: ((String) -> Void)?
     private var onCancel: (() -> Void)?
@@ -44,6 +49,17 @@ final class FakePanel: PopupPresenting {
 
     func showIncompleteWarning(_ message: String) {
         events.append(.incompleteWarning(message))
+    }
+
+    func showPendingAppend(_ text: String, title: String) {
+        pendingText = text
+        let event = Event.pending(text: text, title: title)
+        events.append(event)
+        onEvent?(event)
+    }
+    func clearPendingAppend() {
+        pendingText = nil
+        events.append(.clearPending)
     }
 
     func hide(delay: TimeInterval) {
@@ -221,6 +237,8 @@ actor FakeTranscriber: Transcribing {
     private var reloadContinuation: CheckedContinuation<Void, Never>?
     private var suspendPreWarm = false
     private(set) var preWarmCancelledCount = 0
+    private var prewarmCompletion: (@Sendable () async -> Void)?
+    func setPrewarmCompletion(_ completion: @escaping @Sendable () async -> Void) { prewarmCompletion = completion }
 
     var fileResult: FileTranscriptionResult = .init(text: "", status: .noSpeech)
 
@@ -320,6 +338,7 @@ actor FakeTranscriber: Transcribing {
             }
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
+        await prewarmCompletion?()
         return .warmed
     }
 
@@ -559,6 +578,40 @@ final class ShutdownResultRecorder: @unchecked Sendable {
 }
 
 /// A fake AI editor for testing integration.
+actor RefinementBarrier {
+    private var availableResumes = 0
+    private var enteredCount = 0
+    private var pauseContinuations: [CheckedContinuation<Void, Never>] = []
+    private var enteredContinuations: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func pause() async {
+        enteredCount += 1
+        let ready = enteredContinuations.filter { $0.count <= enteredCount }
+        enteredContinuations.removeAll { $0.count <= enteredCount }
+        ready.forEach { $0.continuation.resume() }
+        if availableResumes > 0 {
+            availableResumes -= 1
+            return
+        }
+        await withCheckedContinuation { pauseContinuations.append($0) }
+    }
+
+    func waitUntilEntered(_ count: Int = 1) async {
+        if enteredCount >= count { return }
+        await withCheckedContinuation { continuation in
+            enteredContinuations.append((count, continuation))
+        }
+    }
+
+    func resume() {
+        if pauseContinuations.isEmpty {
+            availableResumes += 1
+        } else {
+            pauseContinuations.removeFirst().resume()
+        }
+    }
+}
+
 final class FakeAiEditor: AiEditing, @unchecked Sendable {
     var isReady: Bool = true
     var refineDelay: TimeInterval = 0
@@ -568,6 +621,21 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
     var lastMisrecognitions: [(String, String)]?
     var lastLanguages: [String]?
     var didCallRefine = false
+    var descriptor = AiEditorDescriptor(backend: "local", modelID: "qwen-test", kind: .local)
+    var prewarmBarrier: RefinementBarrier?
+    var prewarmCalls: [Bool] = []
+
+    func preWarm(languages: [String]?, force: Bool) async -> PrewarmResult {
+        prewarmCalls.append(force)
+        await prewarmBarrier?.pause()
+        return Task.isCancelled ? .skipped : .warmed
+    }
+
+    private let refinementBarrier: RefinementBarrier?
+
+    init(refinementBarrier: RefinementBarrier? = nil) {
+        self.refinementBarrier = refinementBarrier
+    }
 
     func refine(
         text: String,
@@ -579,6 +647,7 @@ final class FakeAiEditor: AiEditing, @unchecked Sendable {
         lastInputText = text
         lastMisrecognitions = misrecognitions
         lastLanguages = languages
+        await refinementBarrier?.pause()
         if refineDelay > 0 {
             try? await Task.sleep(nanoseconds: UInt64(refineDelay * 1_000_000_000))
         }

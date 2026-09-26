@@ -1,0 +1,33 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  repository-contract:
+    name: Repository contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: sudo apt-get install -y ripgrep
+      - run: python -m venv venv
+      - run: venv/bin/python -m pip install pytest pre-commit==4.5.1
+      - run: venv/bin/python scripts/check_dev_environment.py
+      - run: venv/bin/pre-commit run agent-environment --all-files
+      - run: venv/bin/python scripts/validate_agent_environment.py
+      - run: venv/bin/python -m pytest tests/test_agent_environment.py -q
+
+  swift:
+    name: Swift verification
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/swift_verify.sh

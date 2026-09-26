@@ -80,33 +80,54 @@ def test_automated_scenarios_have_dedicated_test_targets_and_regression_coverage
 
     assert all(item["evidence_gate"] != "swift_fast" for item in automated)
     assert all(item["test_targets"] for item in automated)
-    assert {
-        regression_id
-        for item in automated
-        for regression_id in item["regression_ids"]
-    } == {f"R{number:02d}" for number in range(1, 16)}
+    assert {regression_id for item in automated for regression_id in item["regression_ids"]} == {
+        f"R{number:02d}" for number in range(1, 16)
+    }
     expected_targets = {
-        "R01": ["ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig","ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#validBackupRestoresSafely"],
-        "R02": ["Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage", "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#dirtyUsageSurvivesCoordinatorRoundTrip"],
-        "R03": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#fileJobBlocksHotkey","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#injectingBlocksHotkey"],
+        "R01": [
+            "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig",
+            "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#validBackupRestoresSafely",
+        ],
+        "R02": [
+            "Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage",
+            "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#dirtyUsageSurvivesCoordinatorRoundTrip",
+        ],
+        "R03": [
+            "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#fileJobBlocksHotkey",
+            "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#injectingBlocksHotkey",
+        ],
         "R04": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#silentAppendPreservesPopup"],
-        "R05": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendPreservesDatasetSource","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendAfterUserEditPreservesProvenance"],
+        "R05": [
+            "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendPreservesDatasetSource",
+            "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendAfterUserEditPreservesProvenance",
+        ],
         "R06": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#partialFailureIsVisible"],
-        "R07": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownBlocksNewActivities","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownCannotReopenPopup"],
-        "R08": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#preparationCannotCommitIntoRecording"],
-        "R09": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents", "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#revalidationRebuildsActiveClient"],
+        "R07": [
+            "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownBlocksNewActivities",
+            "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownCannotReopenPopup",
+        ],
+        "R08": [
+            "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#preparationCannotCommitIntoRecording"
+        ],
+        "R09": [
+            "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents",
+            "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#revalidationRebuildsActiveClient",
+        ],
         "R10": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#languageChangeRebuildsPrompt"],
-        "R11": ["Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific"],
+        "R11": [
+            "Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific"
+        ],
         "R12": ["Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal"],
-        "R13": ["Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation"],
+        "R13": [
+            "Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation"
+        ],
         "R14": ["Packages/CNSInput/Tests/CNSInputTests/SystemTextDeliveryTests.swift#missingTargetPreservesText"],
-        "R15": ["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames","tests/parity/test_parity_contract.py#test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts"],
+        "R15": [
+            "Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames",
+            "tests/parity/test_parity_contract.py#test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts",
+        ],
     }
-    regression_scenarios = {
-        item["regression_ids"][0]: item
-        for item in automated
-        if item["regression_ids"]
-    }
+    regression_scenarios = {item["regression_ids"][0]: item for item in automated if item["regression_ids"]}
     assert set(regression_scenarios) == set(expected_targets)
     for regression_id, targets in expected_targets.items():
         assert regression_scenarios[regression_id]["id"].startswith(f"regression.{regression_id}.")
@@ -115,12 +136,7 @@ def test_automated_scenarios_have_dedicated_test_targets_and_regression_coverage
 
 def test_original_eleven_audit_probes_are_permanent_selected_tests() -> None:
     scenarios = validate_scenario_manifest(load_json(REPO_ROOT / "tests/parity/swift_parity_scenarios.json"))
-    selected = {
-        target
-        for scenario in scenarios
-        for target in scenario.get("test_targets", [])
-        if "#" in target
-    }
+    selected = {target for scenario in scenarios for target in scenario.get("test_targets", []) if "#" in target}
     runtime_file = "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift"
     startup_file = "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift"
     session_file = "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"
@@ -163,10 +179,7 @@ def test_metric_thresholds_are_complete_and_fail_closed() -> None:
     thresholds = load_json(REPO_ROOT / "tests/parity/quality_thresholds.json")
     policies = thresholds["thresholds"]
     assert isinstance(policies, dict)
-    passing_metrics = {
-        name: policy["value"]
-        for name, policy in policies.items()
-    }
+    passing_metrics = {name: policy["value"] for name, policy in policies.items()}
     results, failures = evaluate({"metrics": passing_metrics}, thresholds)
     assert not failures
     assert all(result["status"] == "passed" for result in results)
@@ -196,9 +209,7 @@ def test_hybrid_scenario_requires_both_automatic_and_manual_evidence() -> None:
         "evidence_location": "manual.json",
         "intentional_deviation": None,
     }
-    gates = {
-        "swift_fast": GateResult("swift_fast", "passed", 1.0, "tests")
-    }
+    gates = {"swift_fast": GateResult("swift_fast", "passed", 1.0, "tests")}
     assert scenario_result(scenario, gates, {})["status"] == "skipped"
     manual = {"hybrid.fixture": {"status": "passed", "evidence": "manual.json"}}
     assert scenario_result(scenario, gates, manual)["status"] == "passed"
@@ -415,13 +426,18 @@ def test_candidate_identity_records_exact_model_artifact(tmp_path: Path) -> None
         verify_candidate_artifacts(candidate)
 
 
-def test_stt_model_gate_accepts_a_model_file_before_corpus_validation(tmp_path: Path) -> None:
+def test_stt_model_gate_accepts_an_explicitly_identified_model_before_corpus_validation(tmp_path: Path) -> None:
     model = tmp_path / "ggml-model.bin"
     model.write_bytes(b"synthetic model path")
     missing_corpus = tmp_path / "missing-corpus"
     completed = subprocess.run(
         ["bash", str(REPO_ROOT / "scripts/swift_verify_stt_model.sh")],
-        env={"PATH": "/usr/bin:/bin", "CNS_WHISPER_MODEL": str(model), "CNS_STT_GOLDEN_DIR": str(missing_corpus)},
+        env={
+            "PATH": "/usr/bin:/bin",
+            "CNS_WHISPER_MODEL": str(model),
+            "CNS_WHISPER_MODEL_ID": "fixture-model",
+            "CNS_STT_GOLDEN_DIR": str(missing_corpus),
+        },
         check=False,
         capture_output=True,
         text=True,
@@ -429,6 +445,21 @@ def test_stt_model_gate_accepts_a_model_file_before_corpus_validation(tmp_path: 
 
     assert completed.returncode == 2
     assert "CNS_STT_GOLDEN_DIR" in completed.stderr
+
+
+def test_stt_model_gate_requires_an_explicit_id_for_an_unknown_filename(tmp_path: Path) -> None:
+    model = tmp_path / "ggml-model.bin"
+    model.write_bytes(b"synthetic model path")
+    completed = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/swift_verify_stt_model.sh")],
+        env={"PATH": "/usr/bin:/bin", "CNS_WHISPER_MODEL": str(model)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "CNS_WHISPER_MODEL_ID is required" in completed.stderr
 
 
 def test_candidate_dmg_must_contain_the_exact_app(
@@ -480,16 +511,18 @@ def test_release_manifest_rejects_a_different_source_revision(tmp_path: Path) ->
     )
     manifest = tmp_path / "release.manifest.json"
     manifest.write_text(
-        json.dumps({
-            "schema_version": 1,
-            "git_revision": "0e065f1",
-            "version": "1.1.0",
-            "dmg": {
-                "sha256": candidate["dmg"]["sha256"],
-                "file_name": dmg.name,
-                "size": dmg.stat().st_size,
-            },
-        }),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "git_revision": "0e065f1",
+                "version": "1.1.0",
+                "dmg": {
+                    "sha256": candidate["dmg"]["sha256"],
+                    "file_name": dmg.name,
+                    "size": dmg.stat().st_size,
+                },
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -610,7 +643,9 @@ def test_swift_scenario_target_uses_exact_suite_filter() -> None:
     assert command[-2:] == ["--filter", "RuntimeTelemetryTests"]
     selected = scenario_gate_command(
         REPO_ROOT,
-        ["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames"],
+        [
+            "Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames"
+        ],
     )
     assert selected[-2:] == ["--filter", "testTelemetryRejectsContentBearingFieldNames"]
     python_selected = scenario_gate_command(
@@ -754,10 +789,7 @@ def test_soak_summary_uses_only_privacy_safe_structured_events(tmp_path: Path) -
         {"event": "audio_capture_stats", "monotonic": 3.3, "maximum_callback_ms": 2.0, "overflow_samples": 0},
     ]
     log_path.write_text(
-        "\n".join(
-            f"prefix runtime_event {json.dumps({**line, 'run_id': 'synthetic-run'})}"
-            for line in lines
-        ),
+        "\n".join(f"prefix runtime_event {json.dumps({**line, 'run_id': 'synthetic-run'})}" for line in lines),
         encoding="utf-8",
     )
     result = summarize(parse_runtime_events(log_path))

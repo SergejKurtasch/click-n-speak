@@ -18,6 +18,7 @@ actor ScriptedLocalGenerator: LocalTextGenerating {
     }
 
     private var behaviors: [Behavior]
+    private(set) var preWarmCount = 0
     private(set) var callCount = 0
     private(set) var stopCount = 0
     private(set) var cancellationCount = 0
@@ -26,6 +27,11 @@ actor ScriptedLocalGenerator: LocalTextGenerating {
     init(_ behaviors: [Behavior]) { self.behaviors = behaviors }
 
     func prepare() async throws {}
+
+    func preWarm(systemPrompt: String) async throws {
+        preWarmCount += 1
+        _ = try await generate(systemPrompt: systemPrompt, text: "warmup", maximumTokens: 1)
+    }
 
     func generate(systemPrompt: String, text: String, maximumTokens: Int) async throws -> String {
         callCount += 1

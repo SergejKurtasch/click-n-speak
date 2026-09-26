@@ -1,0 +1,10 @@
+[mcp_servers.exa]
+command = "npx"
+args = ["-y", "exa-mcp@latest"]
+
+[mcp_servers.exa.env]
+EXA_API_KEY = "fixture-not-a-real-credential"
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]

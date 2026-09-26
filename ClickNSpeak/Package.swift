@@ -36,6 +36,7 @@ let package = Package(
                 "ClickNSpeak",
                 .product(name: "CNSCore", package: "CNSCore"),
                 .product(name: "CNSDictionary", package: "CNSDictionary"),
+                .product(name: "CNSAudio", package: "CNSAudio"),
                 .product(name: "CNSTranscription", package: "CNSTranscription"),
                 .product(name: "CNSEditors", package: "CNSEditors"),
                 .product(name: "CNSSession", package: "CNSSession"),

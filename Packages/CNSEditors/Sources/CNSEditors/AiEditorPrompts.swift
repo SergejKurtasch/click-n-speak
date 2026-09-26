@@ -8,20 +8,6 @@ public enum AiEditorPrompts {
         "tr": "Turkish", "ko": "Korean", "ar": "Arabic",
     ]
 
-    private static let fillerWords: [String: [String]] = [
-        "ru": ["э", "эм", "ну", "типа", "короче", "как бы", "значит", "вот", "это самое"],
-        "uk": ["е", "ем", "ну", "типу", "значить", "от", "це саме"],
-        "en": ["uh", "um", "like", "you know", "so", "right", "basically", "I mean", "kind of", "sort of"],
-        "de": ["äh", "ähm", "halt", "irgendwie", "sozusagen", "quasi", "also"],
-        "fr": ["euh", "ben", "genre", "bref", "du coup", "voilà"],
-        "es": ["eh", "este", "o sea", "bueno", "pues", "osea"],
-        "it": ["eh", "allora", "cioè", "praticamente", "tipo", "ecco"],
-        "pt": ["é", "assim", "tipo", "né", "então", "sabe"],
-        "pl": ["ee", "yyy", "no", "właśnie", "znaczy", "jakby"],
-        "nl": ["eh", "uhm", "zeg maar", "eigenlijk", "nou"],
-        "tr": ["yani", "işte", "şey", "falan"],
-    ]
-
     public static func buildSystemPrompt(languages: [String]?) -> String {
         let langString: String
         let fillerLine: String
@@ -29,7 +15,7 @@ public enum AiEditorPrompts {
         if let languages, !languages.isEmpty {
             langString = languages.map { langNames[$0] ?? $0.uppercased() }
                 .joined(separator: " and ")
-            let fillers = languages.flatMap { fillerWords[$0] ?? [] }
+            let fillers = EditorPolicy.fillerPhrases(languages: languages)
             fillerLine = fillers.isEmpty
                 ? "- Remove filler words and stutters."
                 : "- Remove only filler words/stutters: \(fillers.map { "'\($0)'" }.joined(separator: ", "))."
@@ -119,7 +105,7 @@ public enum AiEditorPrompts {
         if let languages, !languages.isEmpty {
             langString = languages.map { langNames[$0] ?? $0.uppercased() }
                 .joined(separator: " and ")
-            let fillers = languages.flatMap { fillerWords[$0] ?? [] }
+            let fillers = EditorPolicy.fillerPhrases(languages: languages)
             fillerLine = fillers.isEmpty
                 ? "3. Remove filler words and stutters."
                 : "3. Remove filler words and stutters: \(fillers.map { "'\($0)'" }.joined(separator: ", "))."

@@ -28,3 +28,39 @@ struct PrewarmOutcomeTests {
         #expect(WhisperCppTranscriber.prewarmResult(for: failed) == .failed)
     }
 }
+
+@Suite("Language retry timing aggregation")
+struct LanguageRetryAggregationTests {
+    @Test("An empty retry retains the time spent on both decode attempts")
+    func emptyRetryRetainsAllAttemptTiming() {
+        let first = TranscriptionResult(
+            text: "detected speech",
+            detectedLanguage: "fr",
+            retryCount: 2,
+            durationSeconds: 1.25,
+            stageDurations: .init(
+                languageDetectionSeconds: 0.15,
+                decodeSeconds: 1.10
+            )
+        )
+        let retry = TranscriptionResult(
+            text: "",
+            detectedLanguage: "en",
+            outcome: .noSpeech,
+            durationSeconds: 0.75,
+            stageDurations: .init(decodeSeconds: 0.75)
+        )
+
+        let combined = WhisperCppTranscriber.aggregateLanguageRetry(
+            original: first,
+            retry: retry
+        )
+
+        #expect(combined.text.isEmpty)
+        #expect(combined.retryCount == 3)
+        #expect(combined.durationSeconds == 2.0)
+        #expect(combined.stageDurations?.languageDetectionSeconds == 0.15)
+        #expect(combined.stageDurations?.decodeSeconds == 1.85)
+    }
+
+}

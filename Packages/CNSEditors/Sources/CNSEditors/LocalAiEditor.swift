@@ -8,6 +8,7 @@ import Tokenizers
 
 public protocol LocalTextGenerating: Sendable {
     func prepare() async throws
+    func preWarm(systemPrompt: String) async throws
     func generate(systemPrompt: String, text: String, maximumTokens: Int) async throws -> String
     func stop() async
 }
@@ -42,6 +43,41 @@ public actor MLXLocalTextGenerator: LocalTextGenerating {
             generateParameters: parameters
         )
         return try await session.respond(to: "<speech>\n\(text)\n</speech>")
+    }
+
+    public func preWarm(systemPrompt: String) async throws {
+        guard let container else { throw LocalAiEditorError.notPrepared }
+        try Task.checkCancellation()
+        try await container.perform { context in
+            try Task.checkCancellation()
+            let parameters = GenerateParameters(maxTokens: 1, temperature: 0)
+            let input = try await context.processor.prepare(input: UserInput(chat: [
+                .system(systemPrompt), .user("<speech>\nHello.\n</speech>")
+            ]))
+            try Task.checkCancellation()
+            let iterator = try TokenIterator(
+                input: input, model: context.model,
+                cache: context.model.newCache(parameters: parameters), parameters: parameters
+            )
+            let (stream, generationTask) = MLXLMCommon.generateTask(
+                promptTokenCount: input.text.tokens.size,
+                modelConfiguration: context.configuration,
+                tokenizer: context.tokenizer, iterator: iterator
+            )
+            await withTaskCancellationHandler {
+                for await _ in stream {
+                    if Task.isCancelled {
+                        generationTask.cancel()
+                        break
+                    }
+                }
+                // Stream termination does not prove that GPU evaluation has exited.
+                await generationTask.value
+            } onCancel: {
+                generationTask.cancel()
+            }
+            try Task.checkCancellation()
+        }
     }
 
     public func stop() async {
@@ -85,7 +121,9 @@ public actor LocalAiEditor: AiEditing {
     private let fileGateTimeout: TimeInterval
     private let fileOperationTimeout: TimeInterval
     private let fileMaximumChunkCharacters: Int
-    private var lastCompletedAt: TimeInterval = 0
+    private var lastWarmedAt: Date?
+    private let now: @Sendable () -> Date
+    private let prewarmTimeout: TimeInterval
 
     public init(
         modelID: String,
@@ -98,8 +136,12 @@ public actor LocalAiEditor: AiEditing {
         coldIdleThreshold: TimeInterval = EditorPolicy.coldIdleThreshold,
         fileGateTimeout: TimeInterval = EditorPolicy.fileGateTimeout,
         fileOperationTimeout: TimeInterval = EditorPolicy.fileOperationTimeout,
-        fileMaximumChunkCharacters: Int = EditorPolicy.localMaximumFileChunkCharacters
+        fileMaximumChunkCharacters: Int = EditorPolicy.localMaximumFileChunkCharacters,
+        now: @escaping @Sendable () -> Date = { Date() },
+        prewarmTimeout: TimeInterval = 8
     ) {
+        self.now = now
+        self.prewarmTimeout = prewarmTimeout
         self.modelDirectory = modelDirectory
         self.gate = gate
         self.memoryPressure = memoryPressure
@@ -121,6 +163,45 @@ public actor LocalAiEditor: AiEditing {
         defer { lease.release() }
         try await generator.prepare()
         readiness.set(true)
+    }
+
+    public func preWarm(languages: [String]?, force: Bool) async -> PrewarmResult {
+        guard !Task.isCancelled, isReady, !memoryPressure.isHigh() else { return .skipped }
+        if !force, let lastWarmedAt {
+            let age = now().timeIntervalSince(lastWarmedAt)
+            if age >= 0, age < 300 { return .skipped }
+        }
+        guard let lease = gate.tryAcquire() else { return .skipped }
+        defer { lease.release() }
+        let generator = self.generator
+        let prompt = AiEditorPrompts.buildSystemPrompt(languages: languages)
+        let operation = Task<PrewarmResult, Never> {
+            do {
+                try Task.checkCancellation()
+                try await generator.preWarm(systemPrompt: prompt)
+                try Task.checkCancellation()
+                return .warmed
+            } catch is CancellationError {
+                return .skipped
+            } catch {
+                return .failed
+            }
+        }
+        let timeout = prewarmTimeout
+        let deadline = Task {
+            do {
+                try await Task.sleep(for: .seconds(timeout))
+                operation.cancel()
+            } catch is CancellationError {}
+            catch { operation.cancel() }
+        }
+        let result = await withTaskCancellationHandler {
+            await operation.value
+        } onCancel: { operation.cancel() }
+        deadline.cancel()
+        guard !Task.isCancelled, result == .warmed else { return result == .warmed ? .skipped : result }
+        lastWarmedAt = now()
+        return .warmed
     }
 
     public func refine(
@@ -155,7 +236,12 @@ public actor LocalAiEditor: AiEditing {
                     text: text,
                     maximumTokens: maximumTokens
                 )
-                return EditorPolicy.validatedOutput(output, original: text, multiplier: 2.5)
+                return EditorPolicy.validatedRealtimeOutput(
+                    output,
+                    original: text,
+                    languages: languages,
+                    multiplier: 2.5
+                )
             } catch is CancellationError {
                 return RefineResult(text: text, status: .timeout)
             } catch {
@@ -163,17 +249,16 @@ public actor LocalAiEditor: AiEditing {
             }
         }
 
-        let now = ProcessInfo.processInfo.systemUptime
-        let timeout = now - lastCompletedAt > coldIdleThreshold
-            ? realtimeColdTimeout
-            : realtimeWarmTimeout
+        let age = lastWarmedAt.map { now().timeIntervalSince($0) }
+        let fresh = age.map { $0 >= 0 && $0 <= coldIdleThreshold } ?? false
+        let timeout = fresh ? realtimeWarmTimeout : realtimeColdTimeout
         let result = await AsyncDeadline.race(
             operation: operation,
             timeout: timeout,
             timeoutValue: RefineResult(text: text, status: .timeout)
         )
         if result.status == .ok || result.status == .unchanged {
-            lastCompletedAt = ProcessInfo.processInfo.systemUptime
+            lastWarmedAt = now()
         }
         return result
     }
@@ -221,6 +306,10 @@ public actor LocalAiEditor: AiEditing {
                         maximumTokens: EditorPolicy.fileMaximumOutputTokens(for: chunk)
                     )
                     let result = EditorPolicy.validatedOutput(output, original: chunk, multiplier: 2.5)
+                    if !Task.isCancelled,
+                       (result.status == .ok || result.status == .unchanged) {
+                        lastWarmedAt = now()
+                    }
                     refined.append(result.status == .ok ? result.text : chunk)
                 } catch is CancellationError {
                     return RefineResult(text: text, status: .timeout)
