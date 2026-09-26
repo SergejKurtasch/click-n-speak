@@ -396,16 +396,16 @@ def load_json_object(path: Path) -> dict[str, Any]:
 
 def validate_scenario_manifest(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     if payload.get("schema_version") != 1:
-        raise ValueError("Unsupported parity scenario manifest schema")
+        raise ValueError("Unsupported Swift behavior scenario manifest schema")
     scenarios = payload.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
-        raise ValueError("Parity scenario manifest must contain scenarios")
+        raise ValueError("Swift behavior scenario manifest must contain scenarios")
 
     required_keys = {
         "id",
         "area",
-        "python_reference",
-        "swift_expected",
+        "behavioral_expectation",
+        "expected_behavior",
         "required",
         "fixture_ids",
         "classification",

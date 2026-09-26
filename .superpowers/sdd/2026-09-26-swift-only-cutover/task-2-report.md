@@ -36,7 +36,32 @@ the required Xcode cache access passed.
 
 ## Commit
 
-Commit: `efd4a44` (`refactor: cut over to Swift-only repository`)
+Commit: `c2639b2` (`refactor: cut over to Swift-only repository`)
+
+## Fix round 1
+
+- Removed the four tracked legacy-dependent spike scripts; preserved copies
+  remain in the approved external archive.
+- Converted the acceptance manifest and validator from Python parity fields to
+  Swift behavioral expectation fields while preserving scenario IDs, release
+  gates, and Swift test targets.
+- Added structural coverage for legacy imports and archive-path dependencies.
+- Replaced the active migration plan with a root-relative Swift-only guide and
+  retained the former plan under `docs/archive/`.
+- Updated verification guidance to use the root Swift commands.
+
+RED was observed when the new structural checks found the four legacy spike
+scripts and the old Python-referenced manifest schema. GREEN was observed after
+the removals and schema/documentation updates.
+
+Validation for this fix round:
+
+```text
+/Users/sergej/Click-n-speak/venv/bin/python -m pytest tests/test_swift_only_layout.py tests/test_agent_environment.py -q
+22 passed
+bash scripts/swift_verify.sh
+Swift verification passed
+```
 
 ## Risks
 
