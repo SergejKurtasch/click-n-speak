@@ -27,17 +27,17 @@
 
 **Interfaces:** Produces a standalone immutable archive used only outside Git.
 
-- [ ] **Step 1: Verify source and destination**
+- [x] **Step 1: Verify source and destination**
 
 Run a read-only check that `legacy-python/LEGACY_STATUS.md` exists and the
 archive destination does not exist. Expected: source exists, destination absent.
 
-- [ ] **Step 2: Copy without ignored artifacts**
+- [x] **Step 2: Copy without ignored artifacts**
 
 Use `ditto legacy-python /Users/sergej/Click-n-speak-python-legacy-archive`.
 Do not use `mv`, `rm`, or copy any parent workspace files.
 
-- [ ] **Step 3: Verify archive identity**
+- [x] **Step 3: Verify archive identity**
 
 Compare a manifest of tracked source files and SHA-256 content hashes between
 `legacy-python/` and the archive. Expected: identical tracked file set and hashes.
@@ -86,16 +86,16 @@ Commit message: `refactor: cut over to Swift-only repository`.
 
 **Files:** root documentation and CI only if Task 2 review finds stale paths.
 
-- [ ] **Step 1: Run a whole-branch review**
+- [x] **Step 1: Run a whole-branch review**
 
 Check the complete diff for residual Python runtime ownership, archive path
 references, stale `swift-app/` paths, and accidental removal of Swift fixtures.
 
-- [ ] **Step 2: Run final checks**
+- [x] **Step 2: Run final checks**
 
 Run `bash scripts/swift_verify.sh`, the Swift layout check, and
 `git diff --check` for the cutover range. Record any ignored-artifact limitation.
 
-- [ ] **Step 3: Commit review fixes when needed**
+- [x] **Step 3: Commit review fixes when needed**
 
 Use a conventional commit only if review fixes source or documentation.
