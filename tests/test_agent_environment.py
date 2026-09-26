@@ -46,8 +46,8 @@ def _write_minimal_agent_environment(root: Path) -> None:
         f'pattern = [{", ".join(json.dumps(token) for token in prefix)}]\ndecision = "allow"\n)'
         for prefix in (
             ("swift", "test"),
-            ("bash", "swift-app/scripts/swift_verify.sh"),
-            ("bash", "swift-app/scripts/swift_build_app.sh"),
+            ("bash", "scripts/swift_verify.sh"),
+            ("bash", "scripts/swift_build_app.sh"),
             ("venv/bin/python", "-m", "pytest"),
             ("venv/bin/python", "scripts/validate_agent_environment.py"),
         )
@@ -94,13 +94,10 @@ def _write_minimal_agent_environment(root: Path) -> None:
         encoding="utf-8",
     )
     for relative_path in (
-            "swift-app/AGENTS.md",
-            "swift-app/ClickNSpeak/AGENTS.md",
-            "swift-app/Packages/AGENTS.md",
-            "swift-app/Packages/CNSSession/AGENTS.md",
-            "swift-app/Packages/CNSDictionary/AGENTS.md",
-            "legacy-python/src/AGENTS.md",
-            "legacy-python/scripts/AGENTS.md",
+            "ClickNSpeak/AGENTS.md",
+            "Packages/AGENTS.md",
+            "Packages/CNSSession/AGENTS.md",
+            "Packages/CNSDictionary/AGENTS.md",
             "tests/AGENTS.md",
     ):
         guide_path = root / relative_path

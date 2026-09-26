@@ -30,4 +30,4 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - run: bash swift-app/scripts/swift_verify.sh
+      - run: bash scripts/swift_verify.sh

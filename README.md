@@ -1,19 +1,17 @@
-# Click-n-speak workspace
+# Click-n-speak
 
 Click-n-speak is a macOS menu-bar speech-to-text application. This repository
-contains two deliberately separated application trees:
+contains the SwiftPM application, packages, native resources, tests, release
+scripts, and current documentation:
 
-- [`swift-app/`](swift-app/README.md) — the production Swift application and
-  the only actively developed product.
-- [`legacy-python/`](legacy-python/README.md) — the frozen, rollback-only
-  Python reference kept for migration and recovery.
+The former Python implementation is frozen outside Git at
+`/Users/sergej/Click-n-speak-python-legacy-archive` for rollback reference;
+the repository has no runtime or parity dependency on it.
 
-The split is a repository layout change. Both applications retain their
-existing Application Support paths and on-disk data formats. Each tree must be
-able to build, test, and resolve its runtime resources without depending on
-the sibling tree. Workspace-level automation and source-split documentation
-remain at the repository root.
+## Development
 
-See the scoped guides in each application directory before making changes:
-[`swift-app/AGENTS.md`](swift-app/AGENTS.md) and
-[`legacy-python/AGENTS.md`](legacy-python/AGENTS.md).
+```bash
+swift test --disable-index-store --package-path Packages/<Package>
+swift test --disable-index-store --package-path ClickNSpeak
+bash scripts/swift_verify.sh
+```

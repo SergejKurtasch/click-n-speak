@@ -1,21 +1,15 @@
-# Click-n-speak workspace guide
+# Click-n-speak Swift application guide
 
-The repository root is a workspace map and owns only cross-application
-automation and documentation. Application source, runtime resources, tests,
-and build tooling belong to one of the two sibling trees below.
+The repository root is the active SwiftPM application. `ClickNSpeak/`,
+`Packages/`, native resources, release scripts, and focused tests are owned
+here. The frozen Python implementation is archived outside Git and must not
+be restored as a runtime dependency.
 
 ## Ownership
 
-- [`swift-app/`](swift-app/AGENTS.md) is the production Swift application and
-  the only actively developed product.
-- [`legacy-python/`](legacy-python/AGENTS.md) is the frozen, rollback-only
-  Python application.
-
-The two trees must remain independently buildable and relocatable. Do not add
-runtime symlinks or mandatory `../` lookups between them. Preserve existing
-Application Support paths and data formats. See the [source split design](docs/superpowers/specs/2026-09-26-source-split-design.md)
-and [implementation plan](docs/superpowers/plans/2026-09-26-source-split.md)
-for the staged migration contract.
+Preserve existing Application Support paths and data formats. See the
+[Swift-only cutover specification](docs/superpowers/specs/2026-09-26-swift-only-cutover.md)
+for the migration contract.
 
 ## Working rules
 
@@ -33,8 +27,4 @@ The repository-contract check runs from the workspace root:
 venv/bin/python -m pytest tests/test_agent_environment.py -q
 ```
 
-Application build and test commands are intentionally documented in the
-scoped guides and run from their owning roots: [`swift-app/AGENTS.md`](swift-app/AGENTS.md)
-and [`legacy-python/AGENTS.md`](legacy-python/AGENTS.md). Root automation and
-source-split checks are workspace concerns; application behavior belongs in
-the owning tree.
+Run the root Swift verification gate with `bash scripts/swift_verify.sh`.

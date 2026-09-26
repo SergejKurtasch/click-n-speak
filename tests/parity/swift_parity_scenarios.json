@@ -371,12 +371,12 @@
       "swift_expected": "Sanitized schema fixtures round-trip Python→Swift→Python and Swift→Python→Swift without loss; corrupt originals remain untouched.",
       "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
       "fixture_ids": ["config-schema-v1-v9", "dictionary-persistence-fixtures"],
-      "test_targets": ["tests/parity/test_parity_contract.py", "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift"],
+      "test_targets": ["Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift"],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
       "evidence_gate": "scenario.data.python_swift_roundtrip",
-      "evidence_location": "tests/parity and Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift",
+      "evidence_location": "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift",
       "intentional_deviation": null
     },
     {
@@ -634,12 +634,12 @@
       "swift_expected": "Swift preserves the shared schema and unknown keys so Python rollback can load the copied acceptance dataset.",
       "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
       "fixture_ids": ["bidirectional-config-v1-v9"],
-      "test_targets": ["tests/parity/test_parity_contract.py"],
+      "test_targets": ["Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift"],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
       "evidence_gate": "scenario.rollback.python_data_read",
-      "evidence_location": "tests/parity/test_parity_contract.py",
+      "evidence_location": "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift",
       "intentional_deviation": null
     },
     {"id":"regression.R01.config_recovery","area":"data","python_reference":"config recovery","swift_expected":"config recovery","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig","ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#validBackupRestoresSafely"],"regression_ids":["R01"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R01","evidence_location":"ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig","intentional_deviation":null},
@@ -656,6 +656,6 @@
     {"id":"regression.R12.bounded_download_retry","area":"models","python_reference":"bounded download retry","swift_expected":"bounded download retry","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal"],"regression_ids":["R12"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R12","evidence_location":"Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal","intentional_deviation":null},
     {"id":"regression.R13.update_exit_barrier","area":"update","python_reference":"update exit barrier","swift_expected":"update exit barrier","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation"],"regression_ids":["R13"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R13","evidence_location":"Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation","intentional_deviation":null},
     {"id":"regression.R14.injection_failure_notice","area":"injection","python_reference":"injection failure notice","swift_expected":"injection failure notice","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSInput/Tests/CNSInputTests/SystemTextDeliveryTests.swift#missingTargetPreservesText"],"regression_ids":["R14"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R14","evidence_location":"Packages/CNSInput/Tests/CNSInputTests/SystemTextDeliveryTests.swift#missingTargetPreservesText","intentional_deviation":null},
-    {"id":"regression.R15.telemetry_acceptance_provenance","area":"privacy","python_reference":"telemetry acceptance provenance","swift_expected":"telemetry acceptance provenance","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames","tests/parity/test_parity_contract.py#test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts"],"regression_ids":["R15"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R15","evidence_location":"Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames","intentional_deviation":null}
+    {"id":"regression.R15.telemetry_acceptance_provenance","area":"privacy","python_reference":"telemetry acceptance provenance","swift_expected":"telemetry acceptance provenance","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames"],"regression_ids":["R15"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R15","evidence_location":"Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames","intentional_deviation":null}
   ]
 }

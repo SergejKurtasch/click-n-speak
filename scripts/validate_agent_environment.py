@@ -25,25 +25,22 @@ MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\((?!https?://|#)([^)]+\.md)\)")
 HISTORICAL_ROOT_MARKERS = ("completed roadmap", "known latency profile", "phase 17")
 CANONICAL_VERIFICATION_COMMANDS = (
     "venv/bin/python -m pytest <test-path> -q",
-    "swift test --disable-index-store --package-path swift-app/Packages/<Package>",
-    "swift test --disable-index-store --package-path swift-app/ClickNSpeak",
-    "bash swift-app/scripts/swift_verify.sh",
-    "bash swift-app/scripts/swift_build_app.sh release",
+    "swift test --disable-index-store --package-path Packages/<Package>",
+    "swift test --disable-index-store --package-path ClickNSpeak",
+    "bash scripts/swift_verify.sh",
+    "bash scripts/swift_build_app.sh release",
 )
 NESTED_AGENTS_PATHS = (
-    Path("swift-app/AGENTS.md"),
-    Path("swift-app/ClickNSpeak/AGENTS.md"),
-    Path("swift-app/Packages/AGENTS.md"),
-    Path("swift-app/Packages/CNSSession/AGENTS.md"),
-    Path("swift-app/Packages/CNSDictionary/AGENTS.md"),
-    Path("legacy-python/src/AGENTS.md"),
-    Path("legacy-python/scripts/AGENTS.md"),
+    Path("ClickNSpeak/AGENTS.md"),
+    Path("Packages/AGENTS.md"),
+    Path("Packages/CNSSession/AGENTS.md"),
+    Path("Packages/CNSDictionary/AGENTS.md"),
     Path("tests/AGENTS.md"),
 )
 REQUIRED_RULE_PREFIXES = (
     ("swift", "test"),
-    ("bash", "swift-app/scripts/swift_verify.sh"),
-    ("bash", "swift-app/scripts/swift_build_app.sh"),
+    ("bash", "scripts/swift_verify.sh"),
+    ("bash", "scripts/swift_build_app.sh"),
     ("venv/bin/python", "-m", "pytest"),
     ("venv/bin/python", "scripts/validate_agent_environment.py"),
 )

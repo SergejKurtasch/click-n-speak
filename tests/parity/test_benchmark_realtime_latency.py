@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SWIFT_ROOT = REPO_ROOT / "swift-app"
+SWIFT_ROOT = REPO_ROOT
 SCRIPT_PATH = SWIFT_ROOT / "scripts" / "benchmark_realtime_latency.py"
 
 
