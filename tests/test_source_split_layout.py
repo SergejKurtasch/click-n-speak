@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import importlib
+import os
+import shutil
+import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -52,6 +56,42 @@ def test_legacy_launcher_has_standalone_source_and_config_fallback() -> None:
     assert "launcher.c" in launcher_script
     assert "config.example.json" in launcher_script
     assert "config.json" in launcher_script
+    assert '"${RESOURCES}/config.json"' in launcher_script
+
+
+def test_standalone_launcher_selects_python311_fallback(tmp_path: Path) -> None:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        return
+    bundle = tmp_path / "Click-n-speak.app"
+    macos = bundle / "Contents" / "MacOS"
+    resources = bundle / "Contents" / "Resources"
+    python_bin = resources / "python" / "bin"
+    app = resources / "app"
+    macos.mkdir(parents=True)
+    python_bin.mkdir(parents=True)
+    app.mkdir(parents=True)
+    (app / "main.py").write_text("", encoding="utf-8")
+    recorder = tmp_path / "launcher-args.txt"
+    python_stub = python_bin / "python3.11"
+    python_stub.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$0|$1|$RESOURCEPATH\" > \"$CNS_LAUNCHER_RECORD\"\n",
+        encoding="utf-8",
+    )
+    python_stub.chmod(python_stub.stat().st_mode | stat.S_IXUSR)
+    launcher = macos / "Click-n-speak"
+    subprocess.run(
+        [compiler, "-O2", "-o", str(launcher), str(LEGACY_ROOT / "scripts/launcher.c")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    environment = os.environ | {"CNS_LAUNCHER_RECORD": str(recorder)}
+    subprocess.run([str(launcher), "--probe"], check=True, env=environment)
+    recorded = recorder.read_text(encoding="utf-8").strip().split("|")
+    assert recorded[0].endswith("python3.11")
+    assert recorded[1].endswith("Resources/app/main.py")
+    assert Path(recorded[2]).resolve() == resources.resolve()
 
 
 def test_swift_locales_do_not_reference_legacy_python_scripts() -> None:

@@ -66,7 +66,7 @@ CONFIG_SOURCE="${PROJECT_ROOT}/config.json"
 if [ ! -f "${CONFIG_SOURCE}" ]; then
     CONFIG_SOURCE="${PROJECT_ROOT}/config.example.json"
 fi
-cp "${CONFIG_SOURCE}" "${APP_DIR}/config.json"
+cp "${CONFIG_SOURCE}" "${RESOURCES}/config.json"
 echo "  App code in ${APP_DIR}"
 
 # Step 4: Install dependencies into standalone Python
