@@ -32,7 +32,10 @@ for package in "${PACKAGES[@]}"; do
 done
 
 echo "==> Testing ClickNSpeak"
-swift test --disable-index-store --package-path "$REPO_ROOT/ClickNSpeak"
+# CNSSession's tests are also built through the aggregate package. Keep the
+# same Xcode 16.4 compiler-crash workaround in this verification path.
+swift test --disable-index-store --package-path "$REPO_ROOT/ClickNSpeak" \
+    -Xswiftc -disable-batch-mode
 
 if [ "${CNS_RUN_MODEL_TESTS:-0}" = "1" ]; then
     echo "==> Running real-model 42-phrase golden parity suite"
