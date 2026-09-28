@@ -4,6 +4,25 @@ import CNSCore
 import CNSTranscription
 @testable import CNSSession
 
+@MainActor
+private func makeFileSessionController(
+    config: Config,
+    transcriber: FakeTranscriber,
+    aiEditor: FakeAiEditor?,
+    runtimeDescriptor: RuntimeDescriptor
+) -> SessionController {
+    SessionController(
+        config: config,
+        transcriber: transcriber,
+        aiEditor: aiEditor,
+        recorder: FakeRecorder(),
+        panel: FakePanel(),
+        delivery: FakeDelivery(),
+        frontmost: FakeFrontmost(),
+        runtimeDescriptorProvider: { runtimeDescriptor }
+    )
+}
+
 @Suite("File Refinement Outcomes")
 struct FileRefinementOutcomeTests {
     private let url = URL(fileURLWithPath: "/tmp/test.wav")
@@ -14,20 +33,15 @@ struct FileRefinementOutcomeTests {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
         let editor = FakeAiEditor()
         editor.refinedText = "refined text"
-        
-        let sut = await SessionController(
+        let runtimeDescriptor = RuntimeDescriptor(
+            transcriber: TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready),
+            aiEditor: AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
+        )
+        let sut = await makeFileSessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
-            recorder: FakeRecorder(),
-            panel: await FakePanel(),
-            delivery: FakeDelivery(),
-            frontmost: FakeFrontmost(),
-            runtimeDescriptorProvider: {
-                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
-                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
-                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
-            }
+            runtimeDescriptor: runtimeDescriptor
         )
         
         let result = await sut.transcribeFile(url: url, refine: false, progress: { _ in })
