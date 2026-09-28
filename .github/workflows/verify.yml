@@ -30,4 +30,6 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Build pinned whisper.cpp XCFramework
+        run: bash scripts/build_whisper_xcframework.sh
       - run: bash scripts/swift_verify.sh
