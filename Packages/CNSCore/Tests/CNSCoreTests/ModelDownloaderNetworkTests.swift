@@ -401,7 +401,10 @@ struct ModelDownloaderNetworkTests {
         }
         let paths = testPaths()
         try paths.ensureModelsDirectory()
-        let model = singleFileModel(data: modelData)
+        let model = singleFileModel(
+            data: modelData,
+            id: "network-\(UUID().uuidString)"
+        )
         if resumePrefixLength > 0 {
             let artifact = model.artifacts[0]
             let directory = paths.modelsDirectory
