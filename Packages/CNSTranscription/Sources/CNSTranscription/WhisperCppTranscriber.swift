@@ -125,7 +125,7 @@ public actor WhisperCppTranscriber: Transcribing {
             overrides: request.initialPromptsByLanguage,
             fallback: request.initialPrompt
         )
-        var result = runDecode(ctx: ctx, audio: request.audio, params: &params,
+        var result = runDecode(ctx: ctx, audio: request.audio, params: params,
                                language: language, prompt: prompt)
         result.stageDurations?.languageDetectionSeconds = detectDuration
         lastDecodeAt = Date()
@@ -147,8 +147,10 @@ public actor WhisperCppTranscriber: Transcribing {
         if allowedLanguages.count == 1 { return allowedLanguages[0] }
         guard !allowedLanguages.isEmpty else { return nil }
 
+        let context = WhisperContextReference(ctx)
+        let threads = threadCount
         let melStatus = audio.withUnsafeBufferPointer { samples in
-            whisper_pcm_to_mel(ctx, samples.baseAddress, Int32(samples.count), threadCount)
+            whisper_pcm_to_mel(context.pointer, samples.baseAddress, Int32(samples.count), threads)
         }
         guard melStatus == 0 else { return nil }
 
@@ -157,7 +159,7 @@ public actor WhisperCppTranscriber: Transcribing {
             count: Int(whisper_lang_max_id()) + 1
         )
         let detectionStatus = probabilities.withUnsafeMutableBufferPointer { buffer in
-            whisper_lang_auto_detect(ctx, 0, threadCount, buffer.baseAddress)
+            whisper_lang_auto_detect(context.pointer, 0, threads, buffer.baseAddress)
         }
         guard detectionStatus >= 0 else { return nil }
         return AllowedLanguageSelection.select(
@@ -274,8 +276,8 @@ public actor WhisperCppTranscriber: Transcribing {
 
         let pad = [Float](repeating: 0, count: 1600) // 0.1 s at 16 kHz
         let padded = pad + request.audio + pad
-        var params = makeParams()
-        let retry = runDecode(ctx: ctx, audio: padded, params: &params,
+        let params = makeParams()
+        let retry = runDecode(ctx: ctx, audio: padded, params: params,
                               language: language, prompt: prompt)
         return Self.aggregateLanguageRetry(original: result, retry: retry)
     }
@@ -336,81 +338,76 @@ public actor WhisperCppTranscriber: Transcribing {
         abortFlag.abortActiveGeneration()
     }
 
-    /// Nested withCString calls keep the language/prompt C strings alive across
-    /// the whisper_full call.
+    /// Storage objects keep the language/prompt C strings alive across the
+    /// whisper_full call while isolating the C pointers from Swift concurrency.
     private func runDecode(
         ctx: OpaquePointer, audio: [Float],
-        params: inout whisper_full_params, language: String?, prompt: String?
+        params: whisper_full_params, language: String?, prompt: String?
     ) -> TranscriptionResult {
-        func withOptionalCString<R>(_ s: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
-            if let s { return s.withCString { body($0) } }
-            return body(nil)
-        }
-
         let startedAt = ProcessInfo.processInfo.systemUptime
         let abortToken = abortFlag.beginGeneration()
         defer { abortFlag.endGeneration(abortToken.generation) }
-        params.abort_callback = { userData in
+        let parameters = WhisperFullParametersReference(params)
+        parameters.value.abort_callback = { userData in
             guard let userData else { return false }
             return Unmanaged<AbortToken>.fromOpaque(userData).takeUnretainedValue().isAborted
                 || Task.isCancelled
         }
-        params.abort_callback_user_data = Unmanaged.passUnretained(abortToken).toOpaque()
+        parameters.value.abort_callback_user_data = Unmanaged.passUnretained(abortToken).toOpaque()
 
-        return withOptionalCString(language) { langPtr in
-            withOptionalCString(prompt) { promptPtr in
-                params.language = langPtr
-                params.initial_prompt = promptPtr
-                let status = audio.withUnsafeBufferPointer { buf in
-                    whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
-                }
-                let duration = ProcessInfo.processInfo.systemUptime - startedAt
-                guard status == 0 else {
-                    if abortToken.isAborted || Task.isCancelled {
-                        return TranscriptionResult(
-                            text: "",
-                            outcome: .aborted,
-                            backend: "local",
-                            modelID: modelID,
-                            durationSeconds: duration,
-                            stageDurations: TranscriptionStageDurations(decodeSeconds: duration)
-                        )
-                    }
-                    return TranscriptionResult(
-                        text: "",
-                        outcome: .failed(.init(kind: .decode, message: "Local speech decoding failed")),
-                        backend: "local",
-                        modelID: modelID,
-                        durationSeconds: duration,
-                        stageDurations: TranscriptionStageDurations(decodeSeconds: duration)
-                    )
-                }
-
-                var text = ""
-                let n = whisper_full_n_segments(ctx)
-                for i in 0..<n {
-                    if let seg = whisper_full_get_segment_text(ctx, i) {
-                        text += String(cString: seg)
-                    }
-                }
-                text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                var detected = ""
-                let langId = whisper_full_lang_id(ctx)
-                if langId >= 0, let langStr = whisper_lang_str(langId) {
-                    detected = String(cString: langStr)
-                }
+        let context = WhisperContextReference(ctx)
+        let languageStorage = WhisperCStringStorage(language)
+        let promptStorage = WhisperCStringStorage(prompt)
+        parameters.value.language = languageStorage.pointer
+        parameters.value.initial_prompt = promptStorage.pointer
+        let status = audio.withUnsafeBufferPointer { buf in
+            whisper_full(context.pointer, parameters.value, buf.baseAddress, Int32(buf.count))
+        }
+        let duration = ProcessInfo.processInfo.systemUptime - startedAt
+        guard status == 0 else {
+            if abortToken.isAborted || Task.isCancelled {
                 return TranscriptionResult(
-                    text: text,
-                    detectedLanguage: detected,
-                    outcome: text.isEmpty ? .noSpeech : .success,
+                    text: "",
+                    outcome: .aborted,
                     backend: "local",
                     modelID: modelID,
                     durationSeconds: duration,
                     stageDurations: TranscriptionStageDurations(decodeSeconds: duration)
                 )
             }
+            return TranscriptionResult(
+                text: "",
+                outcome: .failed(.init(kind: .decode, message: "Local speech decoding failed")),
+                backend: "local",
+                modelID: modelID,
+                durationSeconds: duration,
+                stageDurations: TranscriptionStageDurations(decodeSeconds: duration)
+            )
         }
+
+        var text = ""
+        let n = whisper_full_n_segments(ctx)
+        for i in 0..<n {
+            if let seg = whisper_full_get_segment_text(ctx, i) {
+                text += String(cString: seg)
+            }
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var detected = ""
+        let langId = whisper_full_lang_id(ctx)
+        if langId >= 0, let langStr = whisper_lang_str(langId) {
+            detected = String(cString: langStr)
+        }
+        return TranscriptionResult(
+            text: text,
+            detectedLanguage: detected,
+            outcome: text.isEmpty ? .noSpeech : .success,
+            backend: "local",
+            modelID: modelID,
+            durationSeconds: duration,
+            stageDurations: TranscriptionStageDurations(decodeSeconds: duration)
+        )
     }
 
     /// One-time warm decode of silence to load the model + compile Metal shaders
@@ -486,12 +483,12 @@ public actor WhisperCppTranscriber: Transcribing {
 
     private func decodeSilence(seconds: Double, language: String?) -> PrewarmResult {
         guard let ctx = try? load() else { return .failed }
-        var params = makeParams()
+        let params = makeParams()
         let silence = [Float](repeating: 0, count: Int(16000 * seconds))
         let result = runDecode(
             ctx: ctx,
             audio: silence,
-            params: &params,
+            params: params,
             language: language,
             prompt: nil
         )
@@ -512,6 +509,53 @@ public actor WhisperCppTranscriber: Transcribing {
     public func reload() async {
         contextBox.free()
         warmupDone = false
+    }
+}
+
+/// A C context pointer only crosses into synchronous buffer callbacks. The
+/// owning transcriber actor serializes every use of the underlying context.
+private struct WhisperContextReference: @unchecked Sendable {
+    let pointer: OpaquePointer
+
+    init(_ pointer: OpaquePointer) {
+        self.pointer = pointer
+    }
+}
+
+/// Keeps a mutable C parameter value in a reference that can be captured by
+/// Swift's synchronous unsafe-buffer closures without crossing actor state.
+private final class WhisperFullParametersReference: @unchecked Sendable {
+    var value: whisper_full_params
+
+    init(_ value: whisper_full_params) {
+        self.value = value
+    }
+}
+
+/// Owns a null-terminated UTF-8 buffer for the lifetime of a whisper call.
+private final class WhisperCStringStorage: @unchecked Sendable {
+    let pointer: UnsafePointer<CChar>?
+    private let ownedPointer: UnsafeMutablePointer<CChar>?
+
+    init(_ string: String?) {
+        guard let string else {
+            pointer = nil
+            ownedPointer = nil
+            return
+        }
+
+        let bytes = Array(string.utf8)
+        let storage = UnsafeMutablePointer<CChar>.allocate(capacity: bytes.count + 1)
+        for (index, byte) in bytes.enumerated() {
+            storage[index] = CChar(bitPattern: byte)
+        }
+        storage[bytes.count] = 0
+        ownedPointer = storage
+        pointer = UnsafePointer(storage)
+    }
+
+    deinit {
+        ownedPointer?.deallocate()
     }
 }
 
