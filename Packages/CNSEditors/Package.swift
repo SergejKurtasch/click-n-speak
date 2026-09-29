@@ -21,6 +21,10 @@ let package = Package(
             url: "https://github.com/huggingface/swift-transformers",
             exact: "1.3.0"
         ),
+        .package(
+            url: "https://github.com/apple/swift-collections.git",
+            exact: "1.1.6"
+        ),
     ],
     targets: [
         .target(
@@ -32,6 +36,7 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "Collections", package: "swift-collections"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
