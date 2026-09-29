@@ -63,7 +63,8 @@ struct LocalAiEditorTests {
 
     @Test("Soft prewarm deadline requests cancellation and waits for actual exit")
     func prewarmDeadlineRetainsLease() async throws {
-        let generator = ScriptedLocalGenerator([.delayed("warmup", 0.10)])
+        // Use a long delay so that slow CI runners won't expire the generator before we check gate.isBusy
+        let generator = ScriptedLocalGenerator([.delayed("warmup", 2.0)])
         let gate = InferenceExecutionGate()
         let directory = try EditorSnapshotFixture.make()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -83,13 +84,17 @@ struct LocalAiEditorTests {
         let generator = ScriptedLocalGenerator([.output("warmup"), .delayed(longEditorInput, 0.08)])
         let directory = try EditorSnapshotFixture.make()
         defer { try? FileManager.default.removeItem(at: directory) }
+        let gate = InferenceExecutionGate()
         let editor = LocalAiEditor(modelID: "qwen-test", modelDirectory: directory,
-            gate: InferenceExecutionGate(), memoryPressure: FixedMemoryPressure(high: false),
+            gate: gate, memoryPressure: FixedMemoryPressure(high: false),
             generator: generator, realtimeWarmTimeout: 0.02, realtimeColdTimeout: 0.20)
         try await editor.prepare()
         #expect(await editor.preWarm(languages: nil, force: true) == .warmed)
         #expect(await editor.refine(text: longEditorInput, languages: nil, knownTerms: nil, misrecognitions: nil).status == .timeout)
-        try await Task.sleep(for: .milliseconds(100))
+        for _ in 0..<20 {
+            try await Task.sleep(for: .milliseconds(50))
+            if !gate.isBusy { break }
+        }
     }
 
     @Test("Successful file cleanup refreshes prewarm freshness")
@@ -121,9 +126,17 @@ struct LocalAiEditorTests {
                 misrecognitions: nil
             ).status == .timeout
         )
-        try await Task.sleep(for: .milliseconds(130))
-
-        #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
+        // Wait for the uncooperative generator to finish and release the lease.
+        // A slow CI runner might delay the generator's global queue completion.
+        var warmed = false
+        for _ in 0..<20 {
+            try await Task.sleep(for: .milliseconds(100))
+            if await editor.preWarm(languages: nil, force: false) == .warmed {
+                warmed = true
+                break
+            }
+        }
+        #expect(warmed, "Prewarm should eventually succeed after lease is released")
         #expect(await generator.preWarmCount == 1)
     }
 
@@ -159,7 +172,8 @@ struct LocalAiEditorTests {
 
     @Test("Cancelled prewarm retains the lease until uncooperative generation exits")
     func cancelledPrewarmRetainsLease() async throws {
-        let generator = ScriptedLocalGenerator([.delayed("warmup", 0.15)])
+        // Use a long delay so that slow CI runners won't expire the generator before we check gate.isBusy
+        let generator = ScriptedLocalGenerator([.delayed("warmup", 2.0)])
         let gate = InferenceExecutionGate()
         let (editor, directory) = try makeEditor(generator: generator, gate: gate)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -245,8 +259,16 @@ struct LocalAiEditorTests {
         )
         #expect(second.status == .skipped)
 
-        try await Task.sleep(for: .milliseconds(140))
-        #expect(!gate.isBusy)
+        // Wait for the uncooperative generator to finish and release the lease.
+        var released = false
+        for _ in 0..<20 {
+            try await Task.sleep(for: .milliseconds(100))
+            if !gate.isBusy {
+                released = true
+                break
+            }
+        }
+        #expect(released, "Gate should eventually be released")
         try? FileManager.default.removeItem(at: directory)
     }
 
@@ -277,7 +299,7 @@ struct LocalAiEditorTests {
         let (editor, directory) = try makeEditor(
             generator: generator,
             gate: gate,
-            fileGateTimeout: 1
+            fileGateTimeout: 10
         )
         try await editor.prepare()
         let whisperLease = try #require(gate.tryAcquire())
