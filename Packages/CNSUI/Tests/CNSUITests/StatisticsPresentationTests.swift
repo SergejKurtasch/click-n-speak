@@ -21,7 +21,7 @@ struct StatisticsPresentationTests {
                 return JSONObject()
             }
         )
-        weak let weakModel = model
+        weak var weakModel = model
         model?.load()
         model = nil
         for _ in 0..<20 where weakModel != nil { await Task.yield() }

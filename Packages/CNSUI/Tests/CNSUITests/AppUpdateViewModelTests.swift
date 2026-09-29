@@ -149,7 +149,7 @@ final class AppUpdateViewModelTests: XCTestCase {
             i18n: makeI18n(),
             checker: { version in await gate.run(version: version) }
         )
-        weak let retainedViewModel = viewModel
+        weak var retainedViewModel = viewModel
         viewModel?.checkForUpdates(currentVersion: "1.0.0")
         await gate.waitUntilCalled()
         viewModel = nil
