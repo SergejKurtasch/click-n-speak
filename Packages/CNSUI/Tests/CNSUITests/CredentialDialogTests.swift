@@ -19,19 +19,15 @@ final class CredentialDialogTests: XCTestCase {
         fatalError("Repository root not found")
     }
 
-    var sut: MenuBarController!
-    
     @MainActor
-    override func setUp() async throws {
-        try await super.setUp()
-        
+    private func makeSUT() -> MenuBarController {
         let resources = repoResources()
         let i18n = I18n.load("en", localesDirectory: resources.localesDirectory)
         let config = Config()
         let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cns-menu-tests-\(UUID().uuidString)")
         let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
         
-        sut = MenuBarController(
+        return MenuBarController(
             config: config,
             i18n: i18n,
             resources: resources,
@@ -42,6 +38,7 @@ final class CredentialDialogTests: XCTestCase {
     
     @MainActor
     func testSaveNewCredential() {
+        let sut = makeSUT()
         sut.testKeychain = [:]
         
         var alertShown = false
@@ -78,6 +75,7 @@ final class CredentialDialogTests: XCTestCase {
     
     @MainActor
     func testEnvironmentOverrideDisablesInputs() {
+        let sut = makeSUT()
         sut.testEnvironment = ["GOOGLE_API_KEY": "env-key"]
         var alertShown = false
         sut.alertRunner = { alert in
@@ -105,6 +103,7 @@ final class CredentialDialogTests: XCTestCase {
     
     @MainActor
     func testValidationFailureKeepsText() {
+        let sut = makeSUT()
         sut.testKeychain = [:]
         
         var runs = 0
