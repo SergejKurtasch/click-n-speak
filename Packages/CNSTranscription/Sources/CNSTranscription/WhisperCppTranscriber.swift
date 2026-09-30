@@ -125,7 +125,7 @@ public actor WhisperCppTranscriber: Transcribing {
             overrides: request.initialPromptsByLanguage,
             fallback: request.initialPrompt
         )
-        var result = runDecode(ctx: ctx, audio: request.audio, params: &params,
+        var result = runDecode(ctx: ctx, audio: request.audio, params: params,
                                language: language, prompt: prompt)
         result.stageDurations?.languageDetectionSeconds = detectDuration
         lastDecodeAt = Date()
@@ -274,8 +274,8 @@ public actor WhisperCppTranscriber: Transcribing {
 
         let pad = [Float](repeating: 0, count: 1600) // 0.1 s at 16 kHz
         let padded = pad + request.audio + pad
-        var params = makeParams()
-        let retry = runDecode(ctx: ctx, audio: padded, params: &params,
+        let params = makeParams()
+        let retry = runDecode(ctx: ctx, audio: padded, params: params,
                               language: language, prompt: prompt)
         return Self.aggregateLanguageRetry(original: result, retry: retry)
     }
@@ -340,8 +340,9 @@ public actor WhisperCppTranscriber: Transcribing {
     /// the whisper_full call.
     private func runDecode(
         ctx: OpaquePointer, audio: [Float],
-        params: inout whisper_full_params, language: String?, prompt: String?
+        params: whisper_full_params, language: String?, prompt: String?
     ) -> TranscriptionResult {
+        var params = params
         func withOptionalCString<R>(_ s: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
             if let s { return s.withCString { body($0) } }
             return body(nil)
@@ -359,10 +360,11 @@ public actor WhisperCppTranscriber: Transcribing {
 
         return withOptionalCString(language) { langPtr in
             withOptionalCString(prompt) { promptPtr in
-                params.language = langPtr
-                params.initial_prompt = promptPtr
+                var localParams = params
+                localParams.language = langPtr
+                localParams.initial_prompt = promptPtr
                 let status = audio.withUnsafeBufferPointer { buf in
-                    whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
+                    whisper_full(ctx, localParams, buf.baseAddress, Int32(buf.count))
                 }
                 let duration = ProcessInfo.processInfo.systemUptime - startedAt
                 guard status == 0 else {
@@ -486,12 +488,12 @@ public actor WhisperCppTranscriber: Transcribing {
 
     private func decodeSilence(seconds: Double, language: String?) -> PrewarmResult {
         guard let ctx = try? load() else { return .failed }
-        var params = makeParams()
+        let params = makeParams()
         let silence = [Float](repeating: 0, count: Int(16000 * seconds))
         let result = runDecode(
             ctx: ctx,
             audio: silence,
-            params: &params,
+            params: params,
             language: language,
             prompt: nil
         )
