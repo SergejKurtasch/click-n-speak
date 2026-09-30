@@ -338,7 +338,7 @@ public actor WhisperCppTranscriber: Transcribing {
 
     /// Nested withCString calls keep the language/prompt C strings alive across
     /// the whisper_full call.
-    private func runDecode(
+    private nonisolated func runDecode(
         ctx: OpaquePointer, audio: [Float],
         params: whisper_full_params, language: String?, prompt: String?
     ) -> TranscriptionResult {
