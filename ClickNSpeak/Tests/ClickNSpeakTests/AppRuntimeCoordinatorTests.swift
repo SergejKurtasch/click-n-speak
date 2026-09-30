@@ -348,7 +348,7 @@ struct AppRuntimeCoordinatorTests {
     }
 
     private func settle(_ milliseconds: Int = 100) async {
-        try? await Task.sleep(for: .milliseconds(milliseconds))
+        try? await Task.sleep(for: .milliseconds(milliseconds * 3))
     }
 
     private func dictionary(initial: Config, directory: URL, runtime: AppRuntimeCoordinator) -> DictionaryCoordinator {
@@ -807,7 +807,10 @@ struct AppRuntimeCoordinatorTests {
         #expect(!factory.preparedBackends.contains("gemini"))
 
         session.isRuntimeIdle = true
-        await settle()
+        for _ in 0..<20 {
+            if router.currentDescriptorSnapshot.backend == "gemini" { break }
+            await settle(50)
+        }
         #expect(router.currentDescriptorSnapshot.backend == "gemini")
     }
 
@@ -887,7 +890,10 @@ struct AppRuntimeCoordinatorTests {
         #expect(transcriber.currentDescriptorSnapshot.backend == "local")
 
         session.toggle(now: base.addingTimeInterval(1))
-        await settle(150)
+        for _ in 0..<20 {
+            if transcriber.currentDescriptorSnapshot.backend == "gemini" { break }
+            await settle(50)
+        }
         #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
 
         let fileGate = RuntimePreparationGate()
@@ -897,11 +903,17 @@ struct AppRuntimeCoordinatorTests {
         }
         await fileGate.waitForEntry()
         coordinator.requestConfiguration(config(backend: "openai"))
-        await settle()
+        for _ in 0..<20 {
+            if transcriber.currentDescriptorSnapshot.backend == "gemini" { break }
+            await settle(50)
+        }
         #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
         await fileGate.release()
         _ = await file.value
-        await settle(150)
+        for _ in 0..<20 {
+            if transcriber.currentDescriptorSnapshot.backend == "openai" { break }
+            await settle(50)
+        }
         #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
 
         recorder.finalAudio = [Float](repeating: 0.2, count: 16_000)
@@ -910,11 +922,17 @@ struct AppRuntimeCoordinatorTests {
         session.toggle(now: base.addingTimeInterval(3))
         while !panel.isShowingInteractive { await Task.yield() }
         coordinator.requestConfiguration(initial)
-        await settle()
+        for _ in 0..<20 {
+            if transcriber.currentDescriptorSnapshot.backend == "openai" { break }
+            await settle(50)
+        }
         #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
 
         panel.cancel()
-        await settle(150)
+        for _ in 0..<20 {
+            if transcriber.currentDescriptorSnapshot.backend == "local" { break }
+            await settle(50)
+        }
         #expect(transcriber.currentDescriptorSnapshot.backend == "local")
         _ = await session.shutdown()
         await coordinator.shutdown()
@@ -959,7 +977,10 @@ struct AppRuntimeCoordinatorTests {
         }
 
         await nextPreparation.release()
-        await settle(150)
+        for _ in 0..<20 {
+            if transcriber.currentDescriptorSnapshot.backend == "openai" { break }
+            await settle(50)
+        }
         #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
         #expect(editor.currentDescriptorSnapshot.backend == "local")
         await coordinator.shutdown()
