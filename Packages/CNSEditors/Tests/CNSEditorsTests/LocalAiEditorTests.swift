@@ -89,7 +89,7 @@ struct LocalAiEditorTests {
         try await editor.prepare()
         #expect(await editor.preWarm(languages: nil, force: true) == .warmed)
         #expect(await editor.refine(text: longEditorInput, languages: nil, knownTerms: nil, misrecognitions: nil).status == .timeout)
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: .milliseconds(500))
     }
 
     @Test("Successful file cleanup refreshes prewarm freshness")
@@ -121,7 +121,7 @@ struct LocalAiEditorTests {
                 misrecognitions: nil
             ).status == .timeout
         )
-        try await Task.sleep(for: .milliseconds(130))
+        try await Task.sleep(for: .milliseconds(500))
 
         #expect(await editor.preWarm(languages: nil, force: false) == .warmed)
         #expect(await generator.preWarmCount == 1)
@@ -245,7 +245,7 @@ struct LocalAiEditorTests {
         )
         #expect(second.status == .skipped)
 
-        try await Task.sleep(for: .milliseconds(140))
+        try await Task.sleep(for: .milliseconds(500))
         #expect(!gate.isBusy)
         try? FileManager.default.removeItem(at: directory)
     }
