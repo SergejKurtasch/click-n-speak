@@ -139,7 +139,7 @@ public actor WhisperCppTranscriber: Transcribing {
         return retried
     }
 
-    private func detectAllowedLanguage(
+    private nonisolated func detectAllowedLanguage(
         ctx: OpaquePointer,
         audio: [Float],
         allowedLanguages: [String]
