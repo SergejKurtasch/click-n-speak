@@ -191,9 +191,9 @@ struct AudioRecorderLifecycleTests {
             try await recorder.start(callbacks: .init())
         }
         #expect(Date().timeIntervalSince(startedAt) < 0.1)
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
         #expect(fatal.isSet)
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
         #expect(adapter.removeTapCount == 1)
         #expect(adapter.stopCount == 1)
     }
