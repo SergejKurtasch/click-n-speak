@@ -5,7 +5,7 @@ import CNSTranscription
 @testable import CNSSession
 
 @Suite("File Refinement Outcomes")
-@MainActor struct FileRefinementOutcomeTests {
+struct FileRefinementOutcomeTests {
     private let url = URL(fileURLWithPath: "/tmp/test.wav")
     private let config = Config()
 
@@ -15,7 +15,7 @@ import CNSTranscription
         let editor = FakeAiEditor()
         editor.refinedText = "refined text"
 
-        let sut = SessionController(
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
@@ -28,7 +28,7 @@ import CNSTranscription
                 let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
-        )
+        ) }
 
         let result = await sut.transcribeFile(url: url, refine: false, progress: { _ in })
         #expect(result.text == "raw text")
@@ -41,7 +41,7 @@ import CNSTranscription
     func unavailable() async throws {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
 
-        let sut = SessionController(
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: nil,
@@ -54,7 +54,7 @@ import CNSTranscription
                 let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .disabled, readiness: .ready)
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
-        )
+        ) }
 
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
@@ -67,7 +67,7 @@ import CNSTranscription
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "", status: .failed(.init(kind: .fileDecode, message: "decode error"))))
         let editor = FakeAiEditor()
 
-        let sut = SessionController(
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
@@ -80,7 +80,7 @@ import CNSTranscription
                 let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
-        )
+        ) }
 
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.refinement == .notRun)
@@ -95,7 +95,7 @@ import CNSTranscription
         editor.refineStatus = .timeout
         editor.refinedText = "timed out text" // shouldn't be used
 
-        let sut = SessionController(
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
@@ -108,7 +108,7 @@ import CNSTranscription
                 let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
-        )
+        ) }
 
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
@@ -122,7 +122,7 @@ import CNSTranscription
         let editor = FakeAiEditor()
         editor.refineStatus = .error
 
-        let sut = SessionController(
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
@@ -135,7 +135,7 @@ import CNSTranscription
                 let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
-        )
+        ) }
 
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
@@ -150,7 +150,7 @@ import CNSTranscription
         editor.refineStatus = .ok
         editor.refinedText = "refined text"
 
-        let sut = SessionController(
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
@@ -163,7 +163,7 @@ import CNSTranscription
                 let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
-        )
+        ) }
 
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "refined text")
@@ -178,7 +178,7 @@ import CNSTranscription
         editor.refineStatus = .unchanged
         editor.refinedText = "some other text"
 
-        let sut = SessionController(
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
@@ -191,7 +191,7 @@ import CNSTranscription
                 let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
-        )
+        ) }
 
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
@@ -205,7 +205,7 @@ import CNSTranscription
         let editor = FakeAiEditor()
         editor.refineStatus = .skipped
 
-        let sut = SessionController(
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
@@ -218,7 +218,7 @@ import CNSTranscription
                 let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
-        )
+        ) }
 
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
