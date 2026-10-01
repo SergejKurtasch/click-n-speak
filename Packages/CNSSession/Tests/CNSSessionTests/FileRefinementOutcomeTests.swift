@@ -5,22 +5,22 @@ import CNSTranscription
 @testable import CNSSession
 
 @Suite("File Refinement Outcomes")
-struct FileRefinementOutcomeTests {
+@MainActor struct FileRefinementOutcomeTests {
     private let url = URL(fileURLWithPath: "/tmp/test.wav")
     private let config = Config()
-    
+
     @Test("Refine=false sets .notRequested and never calls editor")
     func notRequested() async throws {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
         let editor = FakeAiEditor()
         editor.refinedText = "refined text"
-        
-        let sut = await SessionController(
+
+        let sut = SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
             recorder: FakeRecorder(),
-            panel: await FakePanel(),
+            panel: FakePanel(),
             delivery: FakeDelivery(),
             frontmost: FakeFrontmost(),
             runtimeDescriptorProvider: {
@@ -29,7 +29,7 @@ struct FileRefinementOutcomeTests {
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
         )
-        
+
         let result = await sut.transcribeFile(url: url, refine: false, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .notRequested)
@@ -40,13 +40,13 @@ struct FileRefinementOutcomeTests {
     @Test("Disabled editor maps to .unavailable and preserves raw text")
     func unavailable() async throws {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
-        
-        let sut = await SessionController(
+
+        let sut = SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: nil,
             recorder: FakeRecorder(),
-            panel: await FakePanel(),
+            panel: FakePanel(),
             delivery: FakeDelivery(),
             frontmost: FakeFrontmost(),
             runtimeDescriptorProvider: {
@@ -55,7 +55,7 @@ struct FileRefinementOutcomeTests {
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
         )
-        
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .unavailable)
@@ -66,13 +66,13 @@ struct FileRefinementOutcomeTests {
     func notRunOnFailure() async throws {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "", status: .failed(.init(kind: .fileDecode, message: "decode error"))))
         let editor = FakeAiEditor()
-        
-        let sut = await SessionController(
+
+        let sut = SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
             recorder: FakeRecorder(),
-            panel: await FakePanel(),
+            panel: FakePanel(),
             delivery: FakeDelivery(),
             frontmost: FakeFrontmost(),
             runtimeDescriptorProvider: {
@@ -81,7 +81,7 @@ struct FileRefinementOutcomeTests {
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
         )
-        
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.refinement == .notRun)
         if case .failed = result.status { } else { Issue.record("Expected failed") }
@@ -94,13 +94,13 @@ struct FileRefinementOutcomeTests {
         let editor = FakeAiEditor()
         editor.refineStatus = .timeout
         editor.refinedText = "timed out text" // shouldn't be used
-        
-        let sut = await SessionController(
+
+        let sut = SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
             recorder: FakeRecorder(),
-            panel: await FakePanel(),
+            panel: FakePanel(),
             delivery: FakeDelivery(),
             frontmost: FakeFrontmost(),
             runtimeDescriptorProvider: {
@@ -109,7 +109,7 @@ struct FileRefinementOutcomeTests {
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
         )
-        
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .timedOut)
@@ -121,13 +121,13 @@ struct FileRefinementOutcomeTests {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
         let editor = FakeAiEditor()
         editor.refineStatus = .error
-        
-        let sut = await SessionController(
+
+        let sut = SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
             recorder: FakeRecorder(),
-            panel: await FakePanel(),
+            panel: FakePanel(),
             delivery: FakeDelivery(),
             frontmost: FakeFrontmost(),
             runtimeDescriptorProvider: {
@@ -136,7 +136,7 @@ struct FileRefinementOutcomeTests {
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
         )
-        
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .failed)
@@ -149,13 +149,13 @@ struct FileRefinementOutcomeTests {
         let editor = FakeAiEditor()
         editor.refineStatus = .ok
         editor.refinedText = "refined text"
-        
-        let sut = await SessionController(
+
+        let sut = SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
             recorder: FakeRecorder(),
-            panel: await FakePanel(),
+            panel: FakePanel(),
             delivery: FakeDelivery(),
             frontmost: FakeFrontmost(),
             runtimeDescriptorProvider: {
@@ -164,7 +164,7 @@ struct FileRefinementOutcomeTests {
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
         )
-        
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "refined text")
         #expect(result.refinement == .applied)
@@ -177,13 +177,13 @@ struct FileRefinementOutcomeTests {
         let editor = FakeAiEditor()
         editor.refineStatus = .unchanged
         editor.refinedText = "some other text"
-        
-        let sut = await SessionController(
+
+        let sut = SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
             recorder: FakeRecorder(),
-            panel: await FakePanel(),
+            panel: FakePanel(),
             delivery: FakeDelivery(),
             frontmost: FakeFrontmost(),
             runtimeDescriptorProvider: {
@@ -192,7 +192,7 @@ struct FileRefinementOutcomeTests {
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
         )
-        
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .unchanged)
@@ -204,13 +204,13 @@ struct FileRefinementOutcomeTests {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
         let editor = FakeAiEditor()
         editor.refineStatus = .skipped
-        
-        let sut = await SessionController(
+
+        let sut = SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
             recorder: FakeRecorder(),
-            panel: await FakePanel(),
+            panel: FakePanel(),
             delivery: FakeDelivery(),
             frontmost: FakeFrontmost(),
             runtimeDescriptorProvider: {
@@ -219,7 +219,7 @@ struct FileRefinementOutcomeTests {
                 return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
             }
         )
-        
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .skipped)
