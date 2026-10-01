@@ -2,8 +2,6 @@
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 class TestIsAccessibilityTrusted:
     """Tests for is_accessibility_trusted()."""
@@ -11,7 +9,6 @@ class TestIsAccessibilityTrusted:
     @patch("src.utils.log_error")
     def test_returns_true_when_trusted(self, mock_log):
         with patch.dict("sys.modules", {"ApplicationServices": MagicMock()}):
-            import importlib
             import src.utils as utils_mod
 
             mock_as = MagicMock()

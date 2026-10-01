@@ -6,11 +6,10 @@ extraction. No network calls: urlopen is mocked throughout.
 """
 
 import json
-import sys
 import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-from io import BytesIO
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,7 +18,6 @@ from src.updater import (
     _find_dmg_asset,
     _parse_version,
     check_for_update,
-    get_current_version,
 )
 
 

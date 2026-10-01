@@ -15,3 +15,5 @@ webrtcvad
 py2app
 pytest
 psutil
+google-genai
+openai

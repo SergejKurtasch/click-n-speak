@@ -3,48 +3,58 @@
 # This script handles the full build + post-build fixups for native libraries
 set -e
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+if [ "${CNS_ALLOW_LEGACY_CLEAN:-}" != "1" ]; then
+    echo "Refusing legacy cleanup without CNS_ALLOW_LEGACY_CLEAN=1." >&2
+    exit 2
+fi
+
 APP_NAME="Click-n-speak"
-BUNDLE="dist/${APP_NAME}.app"
+BUNDLE="${REPO_ROOT}/dist/${APP_NAME}.app"
 RESOURCES="${BUNDLE}/Contents/Resources"
 LIB_DIR="${RESOURCES}/lib/python3.11"
 FRAMEWORKS="${BUNDLE}/Contents/Frameworks"
+BUILD_DIR="${REPO_ROOT}/build"
+DIST_DIR="${REPO_ROOT}/dist"
+EGGS_DIR="${REPO_ROOT}/.eggs"
 
 echo "=== Click-n-speak Build Script ==="
 
 # Step 1: Clean previous build
 echo "Step 1: Cleaning previous build..."
 # Strip macOS Sequoia's com.apple.provenance xattr that prevents deletion of signed bundles
-xattr -r -d com.apple.provenance build dist 2>/dev/null || true
-chmod -R u+w build dist 2>/dev/null || true
-rm -rf build dist .eggs 2>/dev/null || true
+xattr -r -d com.apple.provenance "${BUILD_DIR}" "${DIST_DIR}" 2>/dev/null || true
+chmod -R u+w "${BUILD_DIR}" "${DIST_DIR}" 2>/dev/null || true
+rm -rf "${BUILD_DIR}" "${DIST_DIR}" "${EGGS_DIR}" 2>/dev/null || true
 
 # If it still exists, try to at least clear its contents
-if [ -d "dist" ]; then
-    rm -rf dist/* 2>/dev/null || true
+if [ -d "${DIST_DIR}" ]; then
+    rm -rf "${DIST_DIR}"/* 2>/dev/null || true
 fi
 
 # Final check: we only fail if an actual .app is blocking us
-if [ -d "dist/${APP_NAME}.app" ]; then
-    echo "  ERROR: Could not clean dist/${APP_NAME}.app. Run manually:"
-    echo "    sudo xattr -r -d com.apple.provenance dist && sudo rm -rf dist"
+if [ -d "${BUNDLE}" ]; then
+    echo "  ERROR: Could not clean ${BUNDLE}. Run manually:"
+    echo "    sudo xattr -r -d com.apple.provenance ${DIST_DIR} && sudo rm -rf ${DIST_DIR}"
     exit 1
 fi
 
-PYTHON_EXEC="$(pwd)/venv/bin/python"
+PYTHON_EXEC="${REPO_ROOT}/venv/bin/python"
 
 # Step 2: Run py2app using /tmp to bypass macOS provenance restrictions
 echo "Step 2: Running py2app in /tmp..."
 rm -rf /tmp/cns_bdist /tmp/cns_dist 2>/dev/null
 mkdir -p /tmp/cns_bdist /tmp/cns_dist
 
-"${PYTHON_EXEC}" setup.py py2app --bdist-base /tmp/cns_bdist --dist-dir /tmp/cns_dist
+"${PYTHON_EXEC}" "${REPO_ROOT}/setup.py" py2app --bdist-base /tmp/cns_bdist --dist-dir /tmp/cns_dist
 
 # Move the built app back to our local dist/ folder
-mkdir -p dist
-mv /tmp/cns_dist/*.app dist/
+mkdir -p "${DIST_DIR}"
+mv /tmp/cns_dist/*.app "${DIST_DIR}/"
 
 # Update variables for post-build steps
-BUNDLE="dist/${APP_NAME}.app"
+BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 RESOURCES="${BUNDLE}/Contents/Resources"
 LIB_DIR="${RESOURCES}/lib/python3.11"
 FRAMEWORKS="${BUNDLE}/Contents/Frameworks"
@@ -105,7 +115,7 @@ fi
 
 # Step 3b: Copy numba stub (mlx_whisper/timing.py uses @numba.jit but numba is not installed)
 echo "Step 3b: Installing numba stub module..."
-NUMBA_STUB_SRC="$(cd "$(dirname "$0")" && pwd)/numba_stub/__init__.py"
+NUMBA_STUB_SRC="${SCRIPT_DIR}/numba_stub/__init__.py"
 NUMBA_DEST="${LIB_DIR}/numba"
 mkdir -p "${NUMBA_DEST}"
 cp "${NUMBA_STUB_SRC}" "${NUMBA_DEST}/__init__.py"
@@ -115,7 +125,7 @@ echo "  ✅ numba stub installed"
 # The applet binary reports its internal name as "applet" which causes macOS TCC
 # to show "applet" in Input Monitoring settings instead of "Click-n-speak".
 echo "Step 3c: Compiling and installing custom launcher..."
-LAUNCHER_SRC="$(cd "$(dirname "$0")" && pwd)/launcher_py2app.c"
+LAUNCHER_SRC="${SCRIPT_DIR}/launcher_py2app.c"
 LAUNCHER_BIN="${BUNDLE}/Contents/MacOS/${APP_NAME}"
 if cc -arch arm64 -O2 -o "${LAUNCHER_BIN}" "${LAUNCHER_SRC}" 2>&1; then
     chmod +x "${LAUNCHER_BIN}"
@@ -127,15 +137,59 @@ fi
 # Step 4: Re-sign the bundle (copying new files invalidates the signature)
 # Sign each .so/.dylib individually first — --deep misses some nested binaries on macOS 15+
 echo "Step 4: Re-signing bundle..."
+
+repair_liblzma() {
+    local target="$1"
+    local source
+
+    source=$("${PYTHON_EXEC}" -c '
+from pathlib import Path
+import PIL
+
+candidate = Path(PIL.__file__).parent / ".dylibs" / "liblzma.5.dylib"
+if candidate.is_file():
+    print(candidate)
+')
+    if [ -z "${source}" ] || [ ! -f "${source}" ]; then
+        echo "  ERROR: Could not locate a clean Pillow liblzma.5.dylib" >&2
+        return 1
+    fi
+
+    echo "  Repairing malformed py2app liblzma from ${source}"
+    cp "${source}" "${target}"
+    xattr -d com.apple.provenance "${target}" 2>/dev/null || true
+    codesign --remove-signature "${target}" 2>/dev/null || true
+    install_name_tool \
+        -id "@executable_path/../Frameworks/$(basename "${target}")" \
+        "${target}"
+    codesign --force --sign - "${target}"
+}
+
 failed=0
 while IFS= read -r f; do
     if ! codesign --force --sign - "$f" 2>&1; then
-        echo "  WARNING: failed to sign $f" >&2
-        failed=$((failed + 1))
+        if [[ "$(basename "$f")" == liblzma*.dylib ]] && repair_liblzma "$f"; then
+            echo "  ✅ Repaired and signed $f"
+        else
+            echo "  ERROR: failed to sign $f" >&2
+            failed=$((failed + 1))
+        fi
     fi
 done < <(find "${BUNDLE}" \( -name "*.so" -o -name "*.dylib" \))
-[ "$failed" -gt 0 ] && echo "  ⚠️  $failed binary/binaries failed to sign" >&2
-codesign --force --sign - "${BUNDLE}" || echo "  Warning: bundle codesign failed (non-critical for local use)"
+if [ "$failed" -gt 0 ]; then
+    echo "  ERROR: ${failed} binary/binaries failed to sign" >&2
+    exit 1
+fi
+
+# py2app may modify its multiprocessing helper after the linker applies an
+# ad-hoc signature. Re-sign every Mach-O launcher/helper before sealing the app.
+while IFS= read -r executable; do
+    codesign --force --sign - "${executable}"
+done < <(find "${BUNDLE}/Contents/MacOS" -type f -perm +111)
+
+codesign --force --sign - "${BUNDLE}"
+codesign --verify --deep --strict --verbose=2 "${BUNDLE}"
+echo "  ✅ Bundle signature verified"
 
 # Step 5: Verify
 echo ""

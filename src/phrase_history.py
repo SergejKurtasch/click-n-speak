@@ -1,7 +1,6 @@
 """Persist and retrieve full phrases from recognition sessions (one phrase per hotkey start–stop)."""
 
 from datetime import datetime
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .utils import get_phrases_file_path, log_error, log_info

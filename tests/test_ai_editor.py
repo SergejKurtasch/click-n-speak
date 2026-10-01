@@ -17,25 +17,23 @@ Integration smoke test (skipped if mlx-lm is missing):
   - AiEditor.load() does not crash when mlx-lm is available.
 """
 
-import sys
-import threading
-import tempfile
-import types
-import unittest
-from unittest.mock import MagicMock, patch
-
-
 # ---------------------------------------------------------------------------
 # Ensure the project root is on sys.path so "from src.ai_editor import …" works
 # ---------------------------------------------------------------------------
 import os
+import sys
+import tempfile
+import threading
+import unittest
+from unittest.mock import MagicMock, patch
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.ai_editor import (
+    _REFINE_TIMEOUT_SECONDS,
     AiEditor,
     ExternalApiEditor,
     GeminiEditor,
-    _REFINE_TIMEOUT_SECONDS,
     _build_api_editor_system_prompt,
     _build_system_prompt,
 )
@@ -109,6 +107,16 @@ class TestAiEditorFallbacks(unittest.TestCase):
         result = editor.refine(raw)
         self.assertEqual(result, cleaned)
 
+    def test_safety_guard_rejects_rewritten_output(self):
+        editor = self._make_ready_editor()
+        raw = "please review the release notes before lunch"
+        editor._call_llm = lambda t, **kw: "the release notes are ready for publication"
+
+        result = editor.refine(raw, languages=["en"])
+
+        self.assertEqual(result, raw)
+        self.assertEqual(editor.last_refine_status, AiEditor.REFINE_STATUS_ERROR)
+
     # ------------------------------------------------------------------
     # normal operation
     # ------------------------------------------------------------------
@@ -164,6 +172,7 @@ class TestAiEditorFallbacks(unittest.TestCase):
 
     def test_status_timeout_on_slow_llm(self):
         import time as _time
+
         editor = self._make_ready_editor()
         # Simulate a recently-used editor so the normal 8s timeout applies,
         # not the cold-start 25s timeout (which would let the slow call succeed).
@@ -225,9 +234,7 @@ class TestExternalApiEditorPrompts(unittest.TestCase):
         self.assertIn("GitHub, PCA", prompt)
 
     def test_api_prompt_with_misrecognitions(self):
-        prompt = _build_api_editor_system_prompt(
-            ["en"], misrecognitions=[("git hub", "GitHub"), ("piton", "Python")]
-        )
+        prompt = _build_api_editor_system_prompt(["en"], misrecognitions=[("git hub", "GitHub"), ("piton", "Python")])
         self.assertIn("COMMON MISRECOGNITIONS", prompt)
         self.assertIn('"git hub" -> "GitHub"', prompt)
         self.assertIn('"piton" -> "Python"', prompt)
@@ -255,14 +262,14 @@ class TestExternalApiEditorPrompts(unittest.TestCase):
         editor._ready = True
         editor._model = MagicMock()
         editor._tokenizer = MagicMock()
-        editor._call_llm = lambda text, **kwargs: "Qwen output"
+        editor._call_llm = lambda text, **kwargs: "Input text."
         result = editor.refine(
             "input text",
             languages=["en"],
             known_terms=["GitHub"],
             misrecognitions=[("piton", "Python")],
         )
-        self.assertEqual(result, "Qwen output")
+        self.assertEqual(result, "Input text.")
 
     def test_qwen_prompt_uses_ukrainian_name_and_fillers_for_uk_code(self):
         prompt = _build_system_prompt(["uk", "de"])
@@ -293,16 +300,13 @@ class TestVocabProvider(unittest.TestCase):
     def test_term_sanitization(self):
         config = {
             "primary_language": "en",
-            "user_terms": {"en": [{"term": "Git\n\"Hub\"", "source": "manual", "use_count": 1}]},
+            "user_terms": {"en": [{"term": 'Git\n"Hub"', "source": "manual", "use_count": 1}]},
         }
         terms = collect_known_terms(config, ["en"])
         self.assertEqual(terms, ["Git 'Hub"])
 
     def test_misrecognitions_capped_at_30_and_min_count(self):
-        pairs = [
-            {"from": f"old {i}", "to": f"new {i}", "count": 3 + (40 - i)}
-            for i in range(40)
-        ]
+        pairs = [{"from": f"old {i}", "to": f"new {i}", "count": 3 + (40 - i)} for i in range(40)]
         index_payload = {"replacement_pairs": {"latin": pairs, "cyrillic": []}}
         with tempfile.TemporaryDirectory() as tmp:
             idx_path = os.path.join(tmp, "corrections.json")
@@ -310,13 +314,17 @@ class TestVocabProvider(unittest.TestCase):
                 import json
 
                 json.dump(index_payload, f)
-            with patch("src.vocab_provider.get_corrections_file_path", return_value=__import__("pathlib").Path(idx_path)):
+            with patch(
+                "src.vocab_provider.get_corrections_file_path", return_value=__import__("pathlib").Path(idx_path)
+            ):
                 result = collect_misrecognitions(["en"])
         self.assertEqual(len(result), 30)
+
 
 # ---------------------------------------------------------------------------
 # Integration smoke-test (only runs if mlx-lm is installed)
 # ---------------------------------------------------------------------------
+
 
 @unittest.skipUnless(
     __import__("importlib").util.find_spec("mlx_lm") is not None,
@@ -346,6 +354,7 @@ class TestAiEditorIntegration(unittest.TestCase):
     def test_load_does_not_download_when_model_missing(self):
         """load() must return quickly without downloading when model is not cached."""
         import time
+
         editor = AiEditor(model_name="mlx-community/this-model-does-not-exist-xyz123")
         start = time.time()
         editor.load()  # Should return fast, not hang downloading

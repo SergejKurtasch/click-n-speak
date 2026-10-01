@@ -1,9 +1,9 @@
-import numpy as np
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import mlx_whisper  # needed for mocking or ensuring it's not actually called
+import numpy as np
+
 from src.transcriber import WhisperTranscriber, _collapse_consecutive_word_repetition
+
 
 def test_collapse_consecutive_word_repetition():
     # Consecutive duplicates are collapsed

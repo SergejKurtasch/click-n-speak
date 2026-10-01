@@ -1,19 +1,22 @@
 """Tests for stability fixes: transcriber timeout, micro-chunk skip, hallucination filter, is_processing reset."""
 
-import time
 import queue
 import threading
+import time
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
 
 from src.transcriber import (
-    WhisperTranscriber,
-    TranscriberProcessWrapper,
     MIN_FINAL_CHUNK_SAMPLES,
-    TRANSCRIBER_TIMEOUT_SECONDS,
+    PREWARM_MAX_TOKENS,
+    REALTIME_MAX_TOKENS,
+    TranscriberProcessWrapper,
+    WhisperTranscriber,
     _collapse_consecutive_word_repetition,
 )
+
 
 # Alias for backwards-compat with older test references
 def _has_consecutive_word_repetition(text: str, min_count: int) -> bool:
@@ -116,9 +119,43 @@ def test_long_silent_chunk_not_filtered_by_rms(mock_call):
     with patch("src.transcriber.log_info"):
         transcriber = WhisperTranscriber(model_name="dummy")
         long_silence = np.zeros(48001, dtype=np.float32)  # just over 3s
-        result = transcriber.transcribe(long_silence, is_final_chunk=False)
+        transcriber.transcribe(long_silence, is_final_chunk=False)
         # Whisper gets called (RMS filter doesn't trigger for long chunks)
         mock_call.assert_called_once()
+
+
+@patch("src.transcriber._call_mlx_transcribe")
+def test_forced_prewarm_bypasses_silence_guard(mock_call):
+    """Forced prewarm must call mlx_whisper even though its input is silence."""
+    mock_call.return_value = {"text": "", "language": "ru"}
+    with patch("src.transcriber.log_info"):
+        transcriber = WhisperTranscriber(model_name="dummy")
+        transcriber.prewarm(language="ru")
+
+    mock_call.assert_called_once()
+    _, kwargs = mock_call.call_args
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["sample_len"] == PREWARM_MAX_TOKENS
+    assert kwargs["condition_on_previous_text"] is False
+    assert kwargs["language"] == "ru"
+
+
+@patch("src.transcriber._call_mlx_transcribe")
+def test_realtime_transcription_has_bounded_decoder(mock_call):
+    """Realtime chunks must disable temperature fallback and cap generated tokens."""
+    mock_call.return_value = {"text": "Hello world", "language": "en"}
+    with patch("src.transcriber.log_info"):
+        transcriber = WhisperTranscriber(model_name="dummy")
+        result = transcriber.transcribe(
+            np.full(16000, 0.1, dtype=np.float32),
+            allowed_languages=["en"],
+            is_final_chunk=False,
+        )
+
+    assert result == "Hello world"
+    _, kwargs = mock_call.call_args
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["sample_len"] == REALTIME_MAX_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +223,34 @@ def test_hallucination_generic_subtitry_filtered(mock_call):
 # ---------------------------------------------------------------------------
 
 
+def test_transcriber_spawn_target_does_not_capture_wrapper():
+    """The macOS spawn target must not pickle locks stored on the wrapper."""
+    input_queue = MagicMock(name="input_queue")
+    output_queue = MagicMock(name="output_queue")
+    prewarm_queue = MagicMock(name="prewarm_queue")
+    process = MagicMock(name="process")
+
+    with (
+        patch(
+            "src.transcriber.mp.Queue",
+            side_effect=[input_queue, output_queue, prewarm_queue],
+        ),
+        patch("src.transcriber.mp.Process", return_value=process) as process_cls,
+    ):
+        wrapper = TranscriberProcessWrapper(model_name="dummy/model")
+
+    _, process_kwargs = process_cls.call_args
+    assert process_kwargs["target"] is TranscriberProcessWrapper._run_loop
+    assert process_kwargs["args"] == (
+        input_queue,
+        output_queue,
+        prewarm_queue,
+        "dummy/model",
+    )
+    assert wrapper not in process_kwargs["args"]
+    process.start.assert_called_once_with()
+
+
 def test_transcriber_timeout_returns_empty():
     """TranscriberProcessWrapper.transcribe() should return '' after timeout if process hangs."""
     wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
@@ -214,23 +279,18 @@ def test_transcriber_timeout_returns_empty():
 
 
 # ---------------------------------------------------------------------------
-# Fix 4: is_processing reset on worker timeout
+# Fix 4: processing remains blocked on worker timeout
 # ---------------------------------------------------------------------------
 
 
-def test_is_processing_reset_on_worker_timeout():
-    """is_processing must be False after worker_thread.join() times out."""
+def test_is_processing_remains_true_on_worker_timeout():
+    """Soft timeout must not allow a new session while the worker is alive."""
     from src.app import SVoiceRecApp
 
     with patch("src.app.AudioRecorder"), \
          patch("src.app.TranscriberProcessWrapper"), \
          patch("src.app.HotkeyHandler"), \
          patch("src.app.send_notification"), \
-         patch("src.app.get_ui_strings", return_value={
-             "transcribing_title": "", "transcribing_body": "",
-             "still_working_title": "", "still_working_body": "",
-             "ready_title": "", "ready_body": "",
-         }), \
          patch("src.app.get_primary_language", return_value="ru"), \
          patch("src.app.log_info"), \
          patch("src.app.log_error"), \
@@ -247,6 +307,7 @@ def test_is_processing_reset_on_worker_timeout():
         app.recorder = MagicMock()
         app.recorder.stop.return_value = None
         app.transcriber = MagicMock()
+        app.transcriber._last_transcribe_returned_at = 0.0
         app.menu_bar = None
         app._main_thread_queue = queue.Queue()
         app._transcription_cycle_id = 0
@@ -254,6 +315,8 @@ def test_is_processing_reset_on_worker_timeout():
         app._timer_lock = threading.Lock()
         app._preview_panel = None
         app._still_working_delay_seconds = 999  # don't fire during test
+        app._worker_overdue = False
+        app._start_overdue_worker_watchdog = MagicMock()
 
         # Create a worker thread that never finishes
         never_done = threading.Event()
@@ -267,8 +330,86 @@ def test_is_processing_reset_on_worker_timeout():
         with patch.object(threading.Thread, 'join', fast_join):
             app.stop_recording_and_process()
 
-        assert app.is_processing is False, "is_processing should be reset after worker timeout"
+        assert app.is_processing is True
+        assert app._worker_overdue is True
+        app._start_overdue_worker_watchdog.assert_called_once()
         never_done.set()  # cleanup
+
+
+def test_start_recording_repairs_flags_when_previous_worker_is_alive():
+    """Rejected recording start must not leave a false recording state."""
+    from src.app import SVoiceRecApp
+
+    app = SVoiceRecApp.__new__(SVoiceRecApp)
+    app.is_recording = True
+    app.is_processing = False
+    app.worker_thread = MagicMock()
+    app.worker_thread.is_alive.return_value = True
+    app._preview_panel = None
+
+    app.start_recording()
+
+    assert app.is_recording is False
+    assert app.is_processing is True
+
+
+def test_transcribe_detects_generation_change() -> None:
+    """A process restart must wake an old blocking transcription request."""
+    from src.transcriber import TranscriberProcessWrapper, TranscriberRestartedError
+
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper._generation = 1
+    wrapper._last_transcribe_returned_at = 0.0
+
+    def _change_generation() -> None:
+        time.sleep(0.03)
+        wrapper._generation = 2
+
+    threading.Thread(target=_change_generation, daemon=True).start()
+    with pytest.raises(TranscriberRestartedError):
+        wrapper.transcribe(np.zeros(1600, dtype=np.float32), timeout_override=1.0)
+
+
+def test_overdue_worker_watchdog_restarts_current_session() -> None:
+    """Hard timeout must restart the child without clearing processing state."""
+    from src.app import SVoiceRecApp
+
+    app = SVoiceRecApp.__new__(SVoiceRecApp)
+    app._session_id = 3
+    app._transcription_cycle_id = 8
+    app.is_processing = True
+    app.transcribed_parts = ["partial"]
+    app._needs_buffered_finalization = False
+    app.transcriber = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.return_value = True
+
+    app._watch_overdue_worker(worker, 3, 8, 0.01)
+
+    worker.join.assert_called_once_with(timeout=0.01)
+    app.transcriber._restart_process.assert_called_once_with()
+    assert app._needs_buffered_finalization is True
+    assert app.is_processing is True
+
+
+def test_overdue_worker_without_partials_requests_buffered_finalization() -> None:
+    """An interrupted final request must finish with a user-visible no-audio path."""
+    from src.app import SVoiceRecApp
+
+    app = SVoiceRecApp.__new__(SVoiceRecApp)
+    app._session_id = 3
+    app._transcription_cycle_id = 8
+    app.transcribed_parts = []
+    app._needs_buffered_finalization = False
+    app.transcriber = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.return_value = True
+
+    app._watch_overdue_worker(worker, 3, 8, 0.01)
+
+    assert app._needs_buffered_finalization is True
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +418,9 @@ def test_is_processing_reset_on_worker_timeout():
 
 def test_min_speech_duration_filtering():
     """Audio shorter than min_speech_duration must not be returned by recorder.stop()."""
-    from src.recorder import AudioRecorder
     import numpy as np
+
+    from src.recorder import AudioRecorder
 
     recorder = AudioRecorder(sample_rate=16000, min_speech_duration=1.0)
     recorder.recording = True
@@ -304,9 +446,10 @@ def test_keep_alive_memory_pressure():
     and returns the cached value immediately, so we test the underlying
     _check_memory_pressure_now() directly.
     """
-    from src.app import SVoiceRecApp, MEMORY_PRESSURE_THRESHOLD_PERCENT
     import sys
     from unittest.mock import patch
+
+    from src.app import MEMORY_PRESSURE_THRESHOLD_PERCENT, SVoiceRecApp
 
     app = SVoiceRecApp.__new__(SVoiceRecApp)
 
@@ -330,9 +473,9 @@ def test_keep_alive_memory_pressure():
 
 def test_recorder_stop_thread_timeout():
     """Test that recorder stop doesn't block indefinitely."""
-    from src.recorder import AudioRecorder
-    import threading
     import time
+
+    from src.recorder import AudioRecorder
     
     recorder = AudioRecorder(sample_rate=16000)
     
@@ -397,6 +540,52 @@ def test_prewarm_sent_when_model_is_cold():
     )
     cmd = wrapper.input_queue.get_nowait()
     assert cmd["action"] == "prewarm"
+    assert isinstance(cmd["request_id"], int)
+
+
+def test_prewarm_waits_for_matching_confirmation():
+    """Synchronous prewarm must ignore stale acknowledgements and match request id."""
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper._prewarm_result_queue = queue.Queue()
+    wrapper._prewarm_request_id = 4
+    wrapper.model_name = "dummy"
+    wrapper._process = MagicMock()
+    wrapper._last_transcribe_returned_at = 0.0
+
+    wrapper._prewarm_result_queue.put({"request_id": 3, "success": True})
+    wrapper._prewarm_result_queue.put({"request_id": 5, "success": True})
+
+    with patch("src.transcriber.log_info"), patch("src.transcriber.log_error"):
+        assert wrapper.pre_warm(wait=True, timeout=0.5) is True
+
+    cmd = wrapper.input_queue.get_nowait()
+    assert cmd["request_id"] == 5
+
+
+def test_prewarm_timeout_returns_false():
+    """Missing child confirmation must fail without pretending the model is warm."""
+    wrapper = TranscriberProcessWrapper.__new__(TranscriberProcessWrapper)
+    wrapper.input_queue = queue.Queue()
+    wrapper.output_queue = queue.Queue()
+    wrapper._prewarm_result_queue = queue.Queue()
+    wrapper._prewarm_request_id = 0
+    wrapper.model_name = "dummy"
+    wrapper._process = MagicMock()
+    wrapper._last_transcribe_returned_at = 0.0
+
+    with patch("src.transcriber.log_error"):
+        assert wrapper.pre_warm(wait=True, timeout=0.01) is False
+
+
+def test_cloud_prewarm_accepts_confirmed_interface():
+    """Cloud STT must remain compatible with local confirmed-prewarm call sites."""
+    from src.cloud_transcriber import CloudSTTTranscriber
+
+    transcriber = CloudSTTTranscriber("openai", "gpt-4o-mini-transcribe")
+
+    assert transcriber.pre_warm(wait=True, timeout=0.01, language="ru") is True
 
 
 def test_last_transcribe_returned_at_updated_after_transcribe():

@@ -26,13 +26,15 @@ from .permissions import (
     open_accessibility_settings,
     open_input_monitoring_settings,
     request_microphone_sync,
-    wait_for_accessibility,
 )
 
 log = logging.getLogger(__name__)
 
 _ACCESSIBILITY_WAIT_TIMEOUT = 120.0
-_INPUT_MONITORING_WAIT_TIMEOUT = 120.0
+# Input Monitoring: shorter timeout because on macOS 15+ (Darwin 24+) CGEventTap
+# may not reflect a grant for a running process anyway — a restart is required.
+# 30s is enough for the user to toggle the switch in System Settings.
+_INPUT_MONITORING_WAIT_TIMEOUT = 30.0
 
 # Set to True while the wizard is running so background timers skip their notifications
 _WIZARD_ACTIVE = False
@@ -68,6 +70,18 @@ def run_setup_wizard() -> None:
         log.error("Setup wizard failed: %s", exc)
     finally:
         _WIZARD_ACTIVE = False
+
+
+def _check_im_combined() -> bool:
+    """Check Input Monitoring via TCC.db or CGEventTap — whichever works.
+
+    On macOS 15+ (Darwin 24+), after granting Input Monitoring in System Settings
+    while the app is already running, CGEventTapCreate may return nil until the process
+    restarts.  check_input_monitoring_fast() reads TCC.db directly and reflects the
+    grant immediately (on systems where the DB is accessible).  Combining both checks
+    makes the wizard resilient across macOS versions.
+    """
+    return check_input_monitoring_fast() or check_input_monitoring()
 
 
 def _run_wizard() -> None:
@@ -174,21 +188,27 @@ def _run_wizard() -> None:
             log.info("User skipped accessibility setup.")
 
     # ── Step: Input Monitoring ───────────────────────────────────────────────
+    # Track whether the wizard detected Input Monitoring being granted.
+    # Used as a fallback in the final check: on macOS 15+ (Darwin 24+),
+    # CGEventTapCreate may return nil for an already-running process even after
+    # the user grants the permission, requiring a restart.  If the wait loop
+    # detected the grant (via TCC.db or CGEventTap), we trust that result even
+    # if the final CGEventTap check fails.
+    im_was_granted_in_wizard = False
+
     if need_im:
         step += 1
         label = i18n.t("wizard.step_label", step=step, total=total_steps)
 
-        # Trigger the native macOS permission dialog NOW (first CGEventTap attempt).
-        # This must happen before we show any wizard instructions, so the system
-        # dialog appears while the user reads our guidance — not earlier during
-        # the wizard preamble.
-        already_granted = check_input_monitoring()
+        # Use combined check: TCC.db (fast, no CGEventTap) first, then CGEventTap.
+        # Avoids triggering the TCC dialog prematurely — the dialog should appear
+        # while the user is reading the wizard's Input Monitoring explanation.
+        already_granted = _check_im_combined()
 
         if already_granted:
             log.info("Input Monitoring already granted — skipping prompt.")
+            im_was_granted_in_wizard = True
         else:
-            # Dialog may have just appeared in the background (first-ever request),
-            # or was previously denied (dialog won't appear again — go to Settings).
             clicked = _alert(
                 i18n.t("wizard.perm_input_title", label=label),
                 i18n.t("wizard.perm_input_body"),
@@ -196,9 +216,9 @@ def _run_wizard() -> None:
             )
             if clicked == 0:
                 open_input_monitoring_settings()
-                _wait_for_permission_with_dialog(
+                im_was_granted_in_wizard = _wait_for_permission_with_dialog(
                     title=i18n.t("wizard.perm_input_waiting_title"),
-                    check_fn=check_input_monitoring,
+                    check_fn=_check_im_combined,
                     timeout=_INPUT_MONITORING_WAIT_TIMEOUT,
                     granted_title=i18n.t("wizard.perm_input_granted_title"),
                     granted_body=i18n.t("wizard.perm_input_granted_body"),
@@ -209,7 +229,10 @@ def _run_wizard() -> None:
     # ── Done ─────────────────────────────────────────────────────────────────
     mic_ok = check_microphone() == "granted"
     acc_ok = check_accessibility()
-    im_ok = check_input_monitoring()
+    # Use combined check for final result: on newer macOS CGEventTap alone may
+    # return nil for a running process even after grant.  Also trust the wizard's
+    # own detection (im_was_granted_in_wizard) as a last resort.
+    im_ok = _check_im_combined() or im_was_granted_in_wizard
 
     if mic_ok and acc_ok and im_ok:
         # Permissions were just granted in this session — the pynput listener can't
@@ -251,22 +274,23 @@ def _wait_for_permission_with_dialog(
     timeout: float,
     granted_title: str,
     granted_body: str,
-) -> None:
+) -> bool:
     """Poll until check_fn() returns True or timeout elapses.
 
     Drives the main run loop in 0.5s ticks so AppKit events keep processing.
     Shows a confirmation alert when the permission is detected.
+    Returns True if the permission was detected before timeout, False otherwise.
     """
     try:
-        from AppKit import NSRunLoop, NSDefaultRunLoopMode, NSDate  # type: ignore
+        from AppKit import NSDate, NSDefaultRunLoopMode, NSRunLoop  # type: ignore
     except ImportError:
         # Headless fallback (e.g. tests without AppKit)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if check_fn():
-                return
+                return True
             time.sleep(1.0)
-        return
+        return False
 
     granted = [False]
     cancel = [False]
@@ -292,10 +316,11 @@ def _wait_for_permission_with_dialog(
         if granted[0]:
             log.info("%s detected.", title)
             _alert(granted_title, granted_body, [i18n.t("btn.next")])
-            return
+            return True
 
     cancel[0] = True
     t.join(timeout=2.0)
 
     if not granted[0]:
         log.info("Permission not detected within timeout for: %s", title)
+    return granted[0]

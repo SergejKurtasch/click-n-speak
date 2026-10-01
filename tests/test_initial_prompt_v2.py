@@ -1,17 +1,15 @@
 """Tests for v2 initial-prompt schema: parse_prompt_terms, deduplicate_prompt_terms,
 build_initial_prompt, and migrate_config_to_v2."""
 
-import pytest
 from src.utils import (
+    LANG_PROMPTS,
     build_initial_prompt,
     deduplicate_prompt_terms,
     get_allowed_languages,
-    LANG_PROMPTS,
     migrate_config_to_v2,
     normalize_ukrainian_lang_codes,
     parse_prompt_terms,
 )
-
 
 # ---------------------------------------------------------------------------
 # parse_prompt_terms

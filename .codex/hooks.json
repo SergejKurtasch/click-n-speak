@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|exec|exec_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -lc '\"$(git rev-parse --show-toplevel)/.codex/hooks/post-commit-check.sh\"'"
+          }
+        ]
+      }
+    ]
+  }
+}

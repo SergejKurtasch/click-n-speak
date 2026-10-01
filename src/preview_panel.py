@@ -2,37 +2,40 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from queue import Queue
+
 import objc
 from AppKit import (
-    NSPanel,
-    NSNonactivatingPanelMask,
-    NSFloatingWindowLevel,
+    NSApplication,
     NSBorderlessWindowMask,
     NSColor,
-    NSVisualEffectView,
-    NSVisualEffectMaterialHUDWindow,
-    NSRect,
-    NSPoint,
-    NSSize,
-    NSTextField,
-    NSTextAlignmentLeft,
-    NSFont,
-    NSScreen,
-    NSImageView,
-    NSImage,
     NSEvent,
-    NSObject,
-    NSApplication,
-    NSScrollView,
-    NSTextView,
-    NSMenuItem,
-    NSForegroundColorAttributeName,
-    NSFontAttributeName,
     NSEventModifierFlagCommand,
+    NSFloatingWindowLevel,
+    NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSImage,
+    NSImageView,
+    NSMenuItem,
+    NSNonactivatingPanelMask,
+    NSObject,
+    NSPanel,
+    NSPoint,
+    NSRect,
+    NSScreen,
+    NSScrollView,
+    NSSize,
+    NSTextAlignmentLeft,
+    NSTextField,
+    NSTextView,
+    NSVisualEffectMaterialHUDWindow,
+    NSVisualEffectView,
 )
 from Foundation import NSAttributedString
+
 from .log_analyzer import TERM_STOPLIST
 from .utils import get_menu_icon_path, log_exception, log_info
+
 
 class KeyablePanel(NSPanel):
     def canBecomeKeyWindow(self):
@@ -263,9 +266,12 @@ class TranscriptionPreviewPanel:
 
         screen = NSScreen.mainScreen()
         frame = screen.visibleFrame()
-        if x < frame.origin.x: x = frame.origin.x
-        elif x + width > frame.origin.x + frame.size.width: x = frame.origin.x + frame.size.width - width
-        if y < frame.origin.y: y = frame.origin.y
+        if x < frame.origin.x:
+            x = frame.origin.x
+        elif x + width > frame.origin.x + frame.size.width:
+            x = frame.origin.x + frame.size.width - width
+        if y < frame.origin.y:
+            y = frame.origin.y
 
         rect = NSRect(NSPoint(x, y), NSSize(width, height))
 

@@ -1,15 +1,15 @@
 """Tests for audio settings refactor: new defaults, menu removal, short-phrase handling."""
 
+from unittest.mock import MagicMock, patch
+
 import numpy as np
-import pytest
-from unittest.mock import patch, MagicMock, call
 
 from src.recorder import AudioRecorder
-
 
 # ---------------------------------------------------------------------------
 # 1. New default values
 # ---------------------------------------------------------------------------
+
 
 def test_recorder_default_silence_duration():
     recorder = AudioRecorder(sample_rate=16000)
@@ -32,27 +32,26 @@ def test_app_passes_new_defaults_to_recorder():
         return MagicMock()
 
     # Pass a non-existent path so load_config falls back to empty defaults
-    with patch("src.app.AudioRecorder", side_effect=fake_recorder), \
-         patch("src.app.TranscriberProcessWrapper"), \
-         patch("src.app.HotkeyHandler"), \
-         patch("src.app.log_info"), \
-         patch("src.app.log_error"):
+    with patch("src.app.AudioRecorder", side_effect=fake_recorder), patch("src.app.TranscriberProcessWrapper"), patch(
+        "src.app.HotkeyHandler"
+    ), patch("src.app.log_info"), patch("src.app.log_error"):
         try:
             SVoiceRecApp("/tmp/nonexistent_config_abc123.json")
         except Exception:
             pass
 
-    assert captured.get("silence_duration") == 0.5, (
-        f"Expected silence_duration=0.5, got {captured.get('silence_duration')}"
-    )
-    assert captured.get("min_speech_duration") == 0.5, (
-        f"Expected min_speech_duration=0.5, got {captured.get('min_speech_duration')}"
-    )
+    assert (
+        captured.get("silence_duration") == 0.5
+    ), f"Expected silence_duration=0.5, got {captured.get('silence_duration')}"
+    assert (
+        captured.get("min_speech_duration") == 0.5
+    ), f"Expected min_speech_duration=0.5, got {captured.get('min_speech_duration')}"
 
 
 def test_config_overrides_silence_duration(tmp_path):
     """A value in config.json must still override the default."""
     import json as _json
+
     from src.app import SVoiceRecApp
 
     config_file = tmp_path / "config.json"
@@ -67,11 +66,9 @@ def test_config_overrides_silence_duration(tmp_path):
         captured.update(kwargs)
         return MagicMock()
 
-    with patch("src.app.AudioRecorder", side_effect=fake_recorder), \
-         patch("src.app.TranscriberProcessWrapper"), \
-         patch("src.app.HotkeyHandler"), \
-         patch("src.app.log_info"), \
-         patch("src.app.log_error"):
+    with patch("src.app.AudioRecorder", side_effect=fake_recorder), patch("src.app.TranscriberProcessWrapper"), patch(
+        "src.app.HotkeyHandler"
+    ), patch("src.app.log_info"), patch("src.app.log_error"):
         try:
             SVoiceRecApp(str(config_file))
         except Exception:
@@ -84,6 +81,7 @@ def test_config_overrides_silence_duration(tmp_path):
 # ---------------------------------------------------------------------------
 # 2. Short-phrase silence trigger threshold
 # ---------------------------------------------------------------------------
+
 
 def test_short_phrase_triggers_after_0_5s_silence():
     """With default silence_duration=0.5, a short phrase (<4s) must trigger after 0.5s of silence."""
@@ -150,9 +148,59 @@ def test_old_1s_default_would_not_have_fired():
     assert len(fired) == 0, "0.5s silence with old 1.0s threshold must NOT fire"
 
 
+def test_target_micro_pause_waits_for_stable_endpoint():
+    """A 0.4s pause after target must not split a phrase into a tiny tail."""
+    recorder = AudioRecorder(
+        sample_rate=16000,
+        silence_duration=1.0,
+        target_speech_duration=4.0,
+        min_speech_duration=0.5,
+    )
+    recorder.recording = True
+    recorder.has_speech_in_chunk = True
+    recorder.audio_data = [np.ones((64000, 1), dtype=np.float32)]
+    recorder.current_chunk_duration = 4.0
+    recorder.silence_counter = 0.39
+
+    fired = []
+    recorder.chunk_callback = lambda audio: fired.append(len(audio))
+
+    with patch("src.recorder.HAVE_VAD", False):
+        recorder._callback(np.zeros((160, 1), dtype=np.float32), 160, None, None)
+        assert fired == []
+        recorder._callback(np.zeros((6560, 1), dtype=np.float32), 6560, None, None)
+
+    assert len(fired) == 1
+
+
+def test_normal_pause_near_target_waits_for_speech_to_resume():
+    """A normal endpoint just before target must not create a tiny tail."""
+    recorder = AudioRecorder(
+        sample_rate=16000,
+        silence_duration=1.0,
+        target_speech_duration=4.0,
+        min_speech_duration=0.5,
+    )
+    recorder.recording = True
+    recorder.has_speech_in_chunk = True
+    recorder.audio_data = [np.ones((61600, 1), dtype=np.float32)]
+    recorder.current_chunk_duration = 3.85
+    recorder.silence_counter = 0.99
+
+    fired = []
+    recorder.chunk_callback = lambda audio: fired.append(len(audio))
+
+    with patch("src.recorder.HAVE_VAD", False):
+        recorder._callback(np.zeros((160, 1), dtype=np.float32), 160, None, None)
+        recorder._callback(np.ones((3200, 1), dtype=np.float32), 3200, None, None)
+
+    assert fired == []
+
+
 # ---------------------------------------------------------------------------
 # 3. min_speech_duration filtering — updated for new default (0.5)
 # ---------------------------------------------------------------------------
+
 
 def test_min_speech_duration_filters_noise_chunk():
     """Chunks with less than min_speech_duration (0.5s default) must be discarded."""
@@ -233,9 +281,11 @@ def test_stop_returns_chunk_above_min_speech_duration():
 # 4. Menu does not contain removed items
 # ---------------------------------------------------------------------------
 
+
 def test_silence_delay_not_in_menu():
     """'Silence Delay' and 'Min Speech Duration' must not appear in menu_bar.py."""
     from pathlib import Path
+
     source = (Path(__file__).parent.parent / "src" / "menu_bar.py").read_text(encoding="utf-8")
     assert "Silence Delay" not in source, "'Silence Delay' must be removed from menu_bar.py"
     assert "Min Speech Duration" not in source, "'Min Speech Duration' must be removed from menu_bar.py"
@@ -244,14 +294,16 @@ def test_silence_delay_not_in_menu():
 def test_set_sensitivity_method_removed():
     """set_sensitivity callback must no longer exist on ClickNSpeakApp."""
     from src.menu_bar import ClickNSpeakApp
-    assert not hasattr(ClickNSpeakApp, "set_sensitivity"), (
-        "set_sensitivity method must be removed after Silence Delay menu removal"
-    )
+
+    assert not hasattr(
+        ClickNSpeakApp, "set_sensitivity"
+    ), "set_sensitivity method must be removed after Silence Delay menu removal"
 
 
 def test_set_min_speech_duration_method_removed():
     """set_min_speech_duration callback must no longer exist on ClickNSpeakApp."""
     from src.menu_bar import ClickNSpeakApp
-    assert not hasattr(ClickNSpeakApp, "set_min_speech_duration"), (
-        "set_min_speech_duration method must be removed after Min Speech Duration menu removal"
-    )
+
+    assert not hasattr(
+        ClickNSpeakApp, "set_min_speech_duration"
+    ), "set_min_speech_duration method must be removed after Min Speech Duration menu removal"

@@ -1,8 +1,9 @@
 import json
 
-from src.correction_analyzer import remove_replacement_pair_from_index
+from src import utils
 from src.ai_editor import AiEditor
 from src.app import _should_apply_direct_replacements_after_refine
+from src.correction_analyzer import remove_replacement_pair_from_index
 from src.utils import migrate_config_to_v6
 from src.vocab_provider import (
     add_term_to_user_terms,
@@ -179,6 +180,35 @@ def test_migrate_config_to_v6_idempotent():
     cfg = {"schema_version": 6, "manual_replacements": [{"from": "a", "to": "b", "added_at": "x"}]}
     migrate_config_to_v6(cfg)
     assert cfg["manual_replacements"][0]["from"] == "a"
+
+
+def test_migrate_config_to_v10_replacement_policy_defaults() -> None:
+    cfg: dict = {"schema_version": 9, "future_extension": {"owner": "test"}}
+
+    migrated = utils.migrate_config_to_v10(cfg)
+
+    assert migrated["schema_version"] == 10
+    assert migrated["approved_auto_replacements"] == []
+    assert migrated["rejected_replacements"] == []
+    assert migrated["replacement_policy_initialized"] is False
+    assert migrated["future_extension"] == {"owner": "test"}
+
+
+def test_migrate_config_to_v10_is_idempotent() -> None:
+    cfg: dict = {
+        "schema_version": 10,
+        "approved_auto_replacements": [
+            {
+                "from": "Cogni",
+                "to": "Cognee",
+                "approved_at": "2026-09-04T12:00:00Z",
+            }
+        ],
+        "rejected_replacements": [],
+        "replacement_policy_initialized": True,
+    }
+
+    assert utils.migrate_config_to_v10(cfg.copy()) == cfg
 
 
 def test_remove_replacement_pair_from_index_none_container(tmp_path):

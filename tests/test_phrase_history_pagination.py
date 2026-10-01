@@ -12,14 +12,10 @@ Tests for:
   5. public refresh_last_phrases_submenu() resets page count to 5
 """
 
-import sys
-import types
-import unittest
-from unittest.mock import MagicMock, call, patch
-from pathlib import Path
 import tempfile
-import textwrap
-
+import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
 # phrase_history tests (pure Python, no native deps)

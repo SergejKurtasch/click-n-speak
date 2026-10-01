@@ -19,13 +19,12 @@ from AppKit import (
     NSPoint,
     NSRect,
     NSScreen,
-    NSSize,
     NSScrollView,
+    NSSize,
     NSTextAlignmentRight,
     NSTextField,
     NSView,
     NSViewHeightSizable,
-    NSViewMaxXMargin,
     NSViewMaxYMargin,
     NSViewMinXMargin,
     NSViewMinYMargin,
@@ -37,6 +36,7 @@ from AppKit import (
 )
 from Foundation import NSObject
 
+from . import i18n
 from .utils import canonical_term_key, log_error
 
 _WIN_W = 520
@@ -86,13 +86,13 @@ def _make_summary(items: list[dict[str, Any]], total_singles: int) -> str:
     same = sum(1 for it in items if it.get("source") != "manual" and not _is_cross_script(str(it.get("from", "")), str(it.get("to", ""))))
     parts = []
     if manual:
-        parts.append(f"{manual} manual")
+        parts.append(i18n.t("replacements.summary_manual", n=manual))
     if cross:
-        parts.append(f"{cross} cross-script")
+        parts.append(i18n.t("replacements.summary_cross", n=cross))
     if same:
-        parts.append(f"{same} same-script")
-    suffix = f" · {total_singles} hidden singles" if total_singles else ""
-    return "  ·  ".join(parts) + suffix if parts else "no pairs"
+        parts.append(i18n.t("replacements.summary_same", n=same))
+    suffix = i18n.t("replacements.summary_hidden_singles", n=total_singles) if total_singles else ""
+    return "  ·  ".join(parts) + suffix if parts else i18n.t("replacements.summary_empty")
 
 
 class _ReplacementsPanelDelegate(NSObject):
@@ -156,7 +156,7 @@ class ReplacementsPanel:
             self._all_items.append(d)
         # Sort: manual → cross-script → same-script, then count desc.
         self._all_items.sort(key=_sort_key)
-        # Switches mark pairs for removal — default off so «Удалить выбранные» cannot wipe the list.
+        # Switches mark pairs for removal — default off so "delete selected" cannot wipe the list.
         self._checkbox_states = {self._row_key(d): False for d in self._all_items}
         self._apply_filter()
         self._build_window()
@@ -228,16 +228,14 @@ class ReplacementsPanel:
         self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, mask, NSBackingStoreBuffered, False
         )
-        self._window.setTitle_("Пары автозамены")
+        self._window.setTitle_(i18n.t("replacements.window_title"))
         self._window.setReleasedWhenClosed_(False)
         self._window.setMinSize_(NSSize(_WIN_W, fixed_h + _MIN_LIST_H))
 
         content = self._window.contentView()
 
         desc = self._make_label(
-            "Подсказки для редактора и прямая замена в тексте (если AI не менял вывод). "
-            "Ручные пары задаются ниже; «авто» собираются из ваших правок в попапе. "
-            "Включите переключатель у пары и нажмите «Удалить выбранные», чтобы убрать её из списка.",
+            i18n.t("replacements.description"),
             NSRect(NSPoint(_MARGIN, label_y), NSSize(_WIN_W - 2 * _MARGIN, _LABEL_H)),
             font_size=12.0,
         )
@@ -277,13 +275,13 @@ class ReplacementsPanel:
             item["checkbox"] = checkbox
 
             if item.get("source") == "manual":
-                badge_txt = "manual"
+                badge_txt = i18n.t("replacements.badge_manual")
             elif _is_cross_script(str(item.get("from", "")), str(item.get("to", ""))):
                 c = int(item.get("count") or 0)
-                badge_txt = f"{c}× / cross"
+                badge_txt = i18n.t("replacements.badge_cross", c=c)
             else:
                 c = int(item.get("count") or 0)
-                badge_txt = f"{c}× / авто"
+                badge_txt = i18n.t("replacements.badge_auto", c=c)
             badge = self._make_label(
                 badge_txt,
                 NSRect(NSPoint(list_w - 85, row_y), NSSize(80, _ROW_H - 4)),
@@ -308,7 +306,11 @@ class ReplacementsPanel:
         content.addSubview_(summary_lbl)
 
         if singles_count > 0 or self._show_singles:
-            toggle_lbl = "Скрыть редкие" if self._show_singles else f"Показать редкие ({singles_count})"
+            toggle_lbl = (
+                i18n.t("replacements.hide_rare")
+                if self._show_singles
+                else i18n.t("replacements.show_rare", n=singles_count)
+            )
             toggle_btn = self._make_button(toggle_lbl, summary_y - 3, _WIN_W - _MARGIN - 140, 140, _SUMMARY_H + 6)
             toggle_btn.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)
             toggle_btn.setTarget_(self._delegate)
@@ -318,7 +320,7 @@ class ReplacementsPanel:
         af = NSTextField.alloc().initWithFrame_(
             NSRect(NSPoint(_MARGIN, add_y), NSSize(_FIELD_W, _ADD_ROW_H - 2))
         )
-        af.setPlaceholderString_("из …")
+        af.setPlaceholderString_(i18n.t("replacements.placeholder_from"))
         af.setFont_(NSFont.systemFontOfSize_(13.0))
         content.addSubview_(af)
         self._add_from_field = af
@@ -334,7 +336,7 @@ class ReplacementsPanel:
         at = NSTextField.alloc().initWithFrame_(
             NSRect(NSPoint(_MARGIN + _FIELD_W + 36, add_y), NSSize(_FIELD_W, _ADD_ROW_H - 2))
         )
-        at.setPlaceholderString_("в …")
+        at.setPlaceholderString_(i18n.t("replacements.placeholder_to"))
         at.setFont_(NSFont.systemFontOfSize_(13.0))
         content.addSubview_(at)
         self._add_to_field = at
@@ -349,13 +351,13 @@ class ReplacementsPanel:
         content.addSubview_(add_btn)
 
         col_w = (_WIN_W - 2 * _MARGIN - 8) // 2
-        del_btn = self._make_button("Удалить выбранные", btn_y, _MARGIN, col_w)
+        del_btn = self._make_button(i18n.t("replacements.btn_delete_selected"), btn_y, _MARGIN, col_w)
         del_btn.setAutoresizingMask_(NSViewMaxYMargin)
         del_btn.setTarget_(self._delegate)
         del_btn.setAction_("deleteSelected:")
         content.addSubview_(del_btn)
 
-        done_btn = self._make_button("Готово", btn_y, _MARGIN + col_w + 8, col_w)
+        done_btn = self._make_button(i18n.t("replacements.btn_done"), btn_y, _MARGIN + col_w + 8, col_w)
         done_btn.setAutoresizingMask_(NSViewMaxYMargin)
         done_btn.setTarget_(self._delegate)
         done_btn.setAction_("done:")

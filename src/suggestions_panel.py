@@ -15,10 +15,9 @@ from AppKit import (
     NSPoint,
     NSRect,
     NSScreen,
-    NSSize,
     NSScrollView,
+    NSSize,
     NSTextField,
-    NSTextAlignmentRight,
     NSView,
     NSViewHeightSizable,
     NSViewMaxYMargin,
@@ -31,7 +30,8 @@ from AppKit import (
 )
 from Foundation import NSObject
 
-from .utils import LANG_NAMES, log_error, log_info
+from . import i18n
+from .utils import LANG_NAMES, log_error
 
 _PAGE_SIZE = 10
 _WIN_W = 480
@@ -133,7 +133,8 @@ class SuggestionsPanel:
         candidates_by_lang: {"en": [{"term": "PCA", "count": 12}], "ru": [...]}
         on_accept(accepted, rejected) — accepted/rejected are lists of the same dicts
         on_skip()  — user wants to be reminded later
-        on_auto()  — user opts into auto mode
+        on_auto(accepted, rejected) — user opts into auto mode; accepted/rejected
+            reflect the checkbox state at confirmation time, same as on_accept
         """
         self._candidates_by_lang = dict(candidates_by_lang)
         self._on_accept = on_accept
@@ -231,7 +232,7 @@ class SuggestionsPanel:
         self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, mask, NSBackingStoreBuffered, False
         )
-        self._window.setTitle_("Новые термины для словаря")
+        self._window.setTitle_(i18n.t("suggestions.window_title"))
         self._window.setReleasedWhenClosed_(False)
         self._window.setMinSize_(NSSize(_WIN_W, fixed_h + _MIN_LIST_H))
 
@@ -239,7 +240,7 @@ class SuggestionsPanel:
 
         # Description label
         desc = self._make_label(
-            "Выберите термины для словаря Whisper (из последних 100 фраз):",
+            i18n.t("suggestions.description"),
             NSRect(NSPoint(_MARGIN, label_y), NSSize(_WIN_W - 2 * _MARGIN, _LABEL_H)),
             font_size=12.0,
         )
@@ -248,7 +249,7 @@ class SuggestionsPanel:
 
         # Explanatory help text
         help_label = self._make_label(
-            "Добавленные слова помогут Whisper лучше их узнавать. Удалить можно позже в Manage Terms.",
+            i18n.t("suggestions.help_text"),
             NSRect(NSPoint(_MARGIN, help_y), NSSize(_WIN_W - 2 * _MARGIN, _HELP_H)),
             font_size=11.0,
             secondary=True,
@@ -259,13 +260,13 @@ class SuggestionsPanel:
 
         # "Select all" / "Deselect all" mini-buttons
         mini_w = 120
-        sel_btn = self._make_button("Выбрать все", select_row_y, _MARGIN, mini_w, height=_SELECT_ROW_H)
+        sel_btn = self._make_button(i18n.t("suggestions.select_all"), select_row_y, _MARGIN, mini_w, height=_SELECT_ROW_H)
         sel_btn.setAutoresizingMask_(NSViewMinYMargin)
         sel_btn.setTarget_(self._delegate)
         sel_btn.setAction_("selectAll:")
         content.addSubview_(sel_btn)
 
-        desel_btn = self._make_button("Снять все", select_row_y, _MARGIN + mini_w + 8, mini_w, height=_SELECT_ROW_H)
+        desel_btn = self._make_button(i18n.t("suggestions.deselect_all"), select_row_y, _MARGIN + mini_w + 8, mini_w, height=_SELECT_ROW_H)
         desel_btn.setAutoresizingMask_(NSViewMinYMargin)
         desel_btn.setTarget_(self._delegate)
         desel_btn.setAction_("deselectAll:")
@@ -305,7 +306,7 @@ class SuggestionsPanel:
                 doc.addSubview_(header_lbl)
 
                 sec_sel = self._make_button(
-                    "выбрать", current_y, list_w - 158, 70, height=_ROW_H - 6
+                    i18n.t("suggestions.select_section"), current_y, list_w - 158, 70, height=_ROW_H - 6
                 )
                 sec_sel.setTag_(lang_idx)
                 sec_sel.setTarget_(self._delegate)
@@ -313,7 +314,7 @@ class SuggestionsPanel:
                 doc.addSubview_(sec_sel)
 
                 sec_desel = self._make_button(
-                    "снять", current_y, list_w - 82, 70, height=_ROW_H - 6
+                    i18n.t("suggestions.deselect_section"), current_y, list_w - 82, 70, height=_ROW_H - 6
                 )
                 sec_desel.setTag_(lang_idx)
                 sec_desel.setTarget_(self._delegate)
@@ -355,7 +356,7 @@ class SuggestionsPanel:
                 NSRect(NSPoint(_MARGIN, show_more_y), NSSize(190, _SHOW_MORE_BTN_H))
             )
             btn.setAutoresizingMask_(NSViewMaxYMargin)
-            btn.setTitle_(f"Показать ещё {more_count}")
+            btn.setTitle_(i18n.t("suggestions.show_more", count=more_count))
             btn.setTarget_(self._delegate)
             btn.setAction_("showMore:")
             btn.setBezelStyle_(2)
@@ -364,20 +365,20 @@ class SuggestionsPanel:
         # Bottom buttons — three equal-width columns
         col_w = (_WIN_W - 2 * _MARGIN - 16) // 3
 
-        auto_btn = self._make_button("Авто-режим", btn_y, _MARGIN, col_w)
+        auto_btn = self._make_button(i18n.t("btn.auto_mode"), btn_y, _MARGIN, col_w)
         auto_btn.setAutoresizingMask_(NSViewMaxYMargin)
         auto_btn.setTarget_(self._delegate)
         auto_btn.setAction_("autoMode:")
         content.addSubview_(auto_btn)
 
-        skip_btn = self._make_button("Напомнить позже", btn_y, _MARGIN + col_w + 8, col_w)
+        skip_btn = self._make_button(i18n.t("btn.remind_later"), btn_y, _MARGIN + col_w + 8, col_w)
         skip_btn.setAutoresizingMask_(NSViewMaxYMargin)
         skip_btn.setTarget_(self._delegate)
         skip_btn.setAction_("skip:")
         skip_btn.setKeyEquivalent_("\x1b")
         content.addSubview_(skip_btn)
 
-        accept_btn = self._make_button("Добавить выбранные", btn_y, _MARGIN + 2 * (col_w + 8), col_w)
+        accept_btn = self._make_button(i18n.t("btn.add_selected"), btn_y, _MARGIN + 2 * (col_w + 8), col_w)
         accept_btn.setAutoresizingMask_(NSViewMaxYMargin)
         accept_btn.setTarget_(self._delegate)
         accept_btn.setAction_("accept:")
@@ -394,7 +395,12 @@ class SuggestionsPanel:
     # Button actions (called by _PanelDelegate)
     # ------------------------------------------------------------------
 
-    def _do_accept(self) -> None:
+    def _split_visible_by_checkbox(self) -> tuple[list[dict], list[dict]]:
+        """Split currently visible items into (accepted, rejected) per checkbox state.
+
+        Items beyond `_visible_count` (not yet paged in via "Show more") are
+        left untouched in either list — they stay in pending_suggestions.
+        """
         accepted: list[dict] = []
         rejected: list[dict] = []
         n = min(self._visible_count, len(self._items))
@@ -405,6 +411,10 @@ class SuggestionsPanel:
                 accepted.append(entry)
             else:
                 rejected.append(entry)
+        return accepted, rejected
+
+    def _do_accept(self) -> None:
+        accepted, rejected = self._split_visible_by_checkbox()
         self._close_window()
         if self._on_accept:
             try:
@@ -421,12 +431,30 @@ class SuggestionsPanel:
                 log_error(f"SuggestionsPanel on_skip error: {exc}")
 
     def _do_auto(self) -> None:
+        accepted, rejected = self._split_visible_by_checkbox()
+        if not self._confirm_auto_mode(len(accepted)):
+            return
         self._close_window()
         if self._on_auto:
             try:
-                self._on_auto()
+                self._on_auto(accepted, rejected)
             except Exception as exc:
                 log_error(f"SuggestionsPanel on_auto error: {exc}")
+
+    @staticmethod
+    def _confirm_auto_mode(accepted_count: int) -> bool:
+        """Warn the user that auto mode adds selected terms now and applies
+        to all future candidates without review — this is a one-click,
+        hard-to-notice behavioral change, so it must not fire silently."""
+        from AppKit import NSAlert, NSWarningAlertStyle
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(i18n.t("suggestions.confirm_auto_title"))
+        alert.setInformativeText_(i18n.t("suggestions.confirm_auto_body", n=accepted_count))
+        alert.setAlertStyle_(NSWarningAlertStyle)
+        alert.addButtonWithTitle_(i18n.t("suggestions.btn_confirm_auto"))
+        alert.addButtonWithTitle_(i18n.t("btn.cancel"))
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        return alert.runModal() == 1000  # NSAlertFirstButtonReturn
 
     def _do_show_more(self) -> None:
         self._save_checkbox_states()
@@ -454,7 +482,7 @@ class SuggestionsPanel:
         lang_counts: dict[str, int] = {}
         for item in self._items:
             lang_counts[item["lang"]] = lang_counts.get(item["lang"], 0) + item["count"]
-        return sorted(lang_counts.keys(), key=lambda l: -lang_counts[l])
+        return sorted(lang_counts.keys(), key=lambda lang: -lang_counts[lang])
 
     def _do_select_section(self, idx: int) -> None:
         if idx >= len(self._ordered_langs):

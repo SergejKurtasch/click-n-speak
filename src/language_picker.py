@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from .utils import log_error, log_info, save_config_to_disk
 from . import i18n
+from .utils import log_error, log_info, save_config_to_disk
 
 _SUPPORTED_LANGS: list[tuple[str, str, str]] = [
     ("ru", "🇷🇺", "Русский"),
@@ -43,7 +43,7 @@ def _get_picker_delegate_class() -> type:
     global _PickerDelegateClass
     if _PickerDelegateClass is not None:
         return _PickerDelegateClass
-    from objc import objc_method, lookUpClass
+    from objc import lookUpClass, objc_method
     NSObject = lookUpClass("NSObject")
 
     class _PickerDelegate(NSObject):  # type: ignore[valid-type]

@@ -13,6 +13,7 @@ venv/
 # Cache
 .mypy_cache/
 .ruff_cache/
+.cache/
 
 # OS
 .DS_Store
@@ -41,9 +42,24 @@ CLAUDE.md
 CLAUDE_HISTORY.md
 .claude/
 
-# AI assistant local tooling — not for repo
-.agents/
-.codex/
+# AI assistant tooling — track the shared contract, ignore everything else
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/update-codex-md/
+!.agents/skills/update-codex-md/SKILL.md
+
+.codex/*
+!.codex/config.toml
+!.codex/agents/
+!.codex/agents/**
+!.codex/hooks.json
+!.codex/hooks/
+.codex/hooks/*
+!.codex/hooks/post-commit-check.sh
+!.codex/rules/
+.codex/rules/*
+!.codex/rules/default.rules
 
 # Untracked dev files
 scripts/launcher.c
@@ -52,3 +68,20 @@ scripts/launcher.c
 transparent Vector Illustration
 training1.md
 training2.md
+
+# Swift build artifacts
+.build/
+*.xcodeproj
+dist/swift/
+
+# Agent worktrees
+.worktrees/
+
+# STT bake-off spike artifacts
+spikes/stt-bakeoff/models/
+spikes/stt-bakeoff/whisperkit-src/
+spikes/stt-bakeoff/golden/audio/
+spikes/stt-bakeoff/golden/audio_16k/
+
+# Vendored whisper.cpp (regenerate: scripts/build_whisper_xcframework.sh)
+Packages/CNSTranscription/Vendor/

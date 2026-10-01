@@ -1,10 +1,7 @@
-import queue
-import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from src.app import SVoiceRecApp
 
 @pytest.mark.skip(
     reason="Test predates multiprocessing refactor: WhisperTranscriber no longer "

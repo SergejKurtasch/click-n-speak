@@ -1,0 +1,45 @@
+{
+    "schema_version": 10,
+    "primary_language": "uk",
+    "additional_languages": [
+        "en"
+    ],
+    "user_terms": {
+        "uk": [
+            {
+                "term": "\u043d\u0435\u0439\u0440\u043e\u043c\u0435\u0440\u0435\u0436\u0430",
+                "source": "manual",
+                "added_at": "2026-01-01T00:00:00+00:00",
+                "last_seen": "2026-01-01T00:00:00+00:00",
+                "use_count": 3
+            },
+            {
+                "term": "\u0448\u0442\u0443\u0447\u043d\u0438\u0439 \u0456\u043d\u0442\u0435\u043b\u0435\u043a\u0442",
+                "source": "auto",
+                "added_at": "2026-01-02T00:00:00+00:00",
+                "last_seen": "2026-01-02T00:00:00+00:00",
+                "use_count": 1
+            }
+        ]
+    },
+    "pending_suggestions": {},
+    "prompt_snapshots": {},
+    "skipped_terms": {
+        "uk": {
+            "mlx": 200,
+            "pca": 50
+        }
+    },
+    "prompt_update_mode": "suggest",
+    "manual_replacements": [],
+    "stt_backend": "local",
+    "stt_cloud_model": "gemini-2.5-flash-lite",
+    "approved_auto_replacements": [],
+    "rejected_replacements": [],
+    "replacement_policy_initialized": false,
+    "last_notified_update_version": null,
+    "language_auto_detect": false,
+    "last_metrics_snapshot_ts": null,
+    "notify_on_metrics": true,
+    "last_metrics_notification_ts": null
+}

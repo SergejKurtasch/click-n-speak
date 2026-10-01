@@ -22,20 +22,6 @@ def _make_app():
          patch("src.app.TranscriberProcessWrapper"), \
          patch("src.app.HotkeyHandler"), \
          patch("src.app.send_notification"), \
-         patch("src.app.get_ui_strings", return_value={
-             "transcribing_title": "Распознаю...",
-             "transcribing_body": "",
-             "still_working_title": "Всё ещё...",
-             "still_working_body": "",
-                 "ready_title": "",
-                 "ready_body": "",
-                 "edit_confirm_title": "Подтверди",
-                 "transcription_instruction": "",
-                 "popup_title_with_hotkey": "Редактируй",
-                 "toast_added": "Added: {term}",
-                 "toast_invalid_term": "Bad term",
-                 "toast_exists": "Exists",
-             }), \
          patch("src.app.get_primary_language", return_value="ru"), \
          patch("src.app.build_initial_prompt", return_value=""), \
          patch("src.app.log_info"), \
@@ -57,6 +43,7 @@ def _make_app():
         app.stop_worker = threading.Event()
         app.recorder = MagicMock()
         app.transcriber = MagicMock()
+        app.transcriber._last_transcribe_returned_at = 0.0
         app.menu_bar = None
         app._main_thread_queue = queue.Queue()
         app._transcription_cycle_id = 0
@@ -124,6 +111,24 @@ def test_process_chunk_no_longer_skips_non_final_on_stop():
     # transcriber.transcribe must have been called despite stop_worker being set
     app.transcriber.transcribe.assert_called_once()
     assert "слово" in app.transcribed_parts
+
+
+def test_final_chunk_survives_telemetry_failure():
+    """Telemetry must not turn a successfully queued final chunk into a drop."""
+    app = _make_app()
+    final_audio = np.zeros(16000, dtype=np.float32)
+    app.recorder.stop.return_value = final_audio
+
+    with patch(
+        "src.app.emit_runtime_event",
+        side_effect=[RuntimeError("telemetry failed"), None],
+    ):
+        app.stop_recording_and_process()
+
+    queued = app.chunk_queue.get_nowait()
+    assert queued.is_final is True
+    assert queued.audio is final_audio
+    assert app._needs_buffered_finalization is False
 
 
 def test_worker_finalizes_buffered_partials_after_no_final_audio_timeout():

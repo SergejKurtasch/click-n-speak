@@ -93,7 +93,7 @@ def request_microphone_sync(timeout: float = 30.0) -> bool:
     AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVMediaTypeAudio, _handler)
 
     try:
-        from AppKit import NSRunLoop, NSDefaultRunLoopMode, NSDate  # type: ignore
+        from AppKit import NSDate, NSDefaultRunLoopMode, NSRunLoop  # type: ignore
         loop = NSRunLoop.currentRunLoop()
         start = _time.monotonic()
         while not done[0] and (_time.monotonic() - start) < timeout:
@@ -133,13 +133,12 @@ def check_accessibility() -> bool:
 
 
 def _activate_system_settings() -> None:
-    import threading
 
     def _do_activate() -> None:
         import time
         time.sleep(0.5)
         try:
-            from AppKit import NSWorkspace, NSApplicationActivateIgnoringOtherApps  # type: ignore
+            from AppKit import NSApplicationActivateIgnoringOtherApps, NSWorkspace  # type: ignore
             for app in NSWorkspace.sharedWorkspace().runningApplications():
                 bundle = app.bundleIdentifier() or ""
                 if "systempreferences" in bundle or "systemsettings" in bundle:
@@ -185,13 +184,13 @@ def check_input_monitoring() -> bool:
     """
     try:
         from Quartz import (  # type: ignore
-            CGEventTapCreate,
             CFMachPortInvalidate,
-            kCGSessionEventTap,
-            kCGHeadInsertEventTap,
-            kCGEventTapOptionListenOnly,
             CGEventMaskBit,
+            CGEventTapCreate,
             kCGEventKeyDown,
+            kCGEventTapOptionListenOnly,
+            kCGHeadInsertEventTap,
+            kCGSessionEventTap,
         )
 
         def _cb(proxy, type_, event, refcon):

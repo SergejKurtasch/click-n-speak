@@ -4,9 +4,15 @@ import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import rumps
+
 from . import i18n
+
+if TYPE_CHECKING:
+    from .app_updater import AppUpdater
+    from .updater import UpdateInfo
 
 # ---------------------------------------------------------------------------
 # Whisper model registry — ordered fastest → most accurate
@@ -37,16 +43,38 @@ _MODEL_ROW_H = 22.0
 
 _HAVE_MODEL_ROWS = False
 try:
-    from Foundation import NSObject as _NSObjectRow  # type: ignore
     import objc as _objc_row  # type: ignore
-    from AppKit import (  # type: ignore
-        NSMenu as _NSMenuRow, NSMenuItem as _NSMenuItemRow,
-        NSView as _NSViewRow, NSButton as _NSButtonRow,
-        NSTextField as _NSTextFieldRow, NSImageView as _NSImageViewRow,
-        NSImage as _NSImageRow, NSFont as _NSFontRow,
+    from AppKit import (
+        NSButton as _NSButtonRow,
+    )
+    from AppKit import (
         NSButtonTypeMomentaryPushIn as _NSBtnTypePush,
+    )
+    from AppKit import (
+        NSFont as _NSFontRow,
+    )
+    from AppKit import (
+        NSImage as _NSImageRow,
+    )
+    from AppKit import (
+        NSImageView as _NSImageViewRow,
+    )
+    from AppKit import (
         NSMakeRect as _NSMakeRectRow,
     )
+    from AppKit import (  # type: ignore
+        NSMenu as _NSMenuRow,
+    )
+    from AppKit import (
+        NSMenuItem as _NSMenuItemRow,
+    )
+    from AppKit import (
+        NSTextField as _NSTextFieldRow,
+    )
+    from AppKit import (
+        NSView as _NSViewRow,
+    )
+    from Foundation import NSObject as _NSObjectRow  # type: ignore
 
     class _ModelRowDelegate(_NSObjectRow):
         """Per-model ObjC target: routes 'switch' and 'delete' button actions."""
@@ -145,22 +173,26 @@ _MODEL_SIZE_BYTES: dict[str, int] = {
     "mlx-community/whisper-base-mlx":        74_000_000,
 }
 
-from .ai_editor import get_gemini_api_key, set_gemini_api_key
-from .phrase_history import get_last_phrases
-from .updater import check_for_update
-from .permissions import (
+from .ai_editor import get_gemini_api_key, set_gemini_api_key  # noqa: E402
+from .autostart import is_launch_at_login_enabled, set_launch_at_login  # noqa: E402
+from .cloud_transcriber import (  # noqa: E402
+    CLOUD_STT_MODELS,
+    DEFAULT_CLOUD_STT_MODEL,
+    get_openai_api_key,
+    set_openai_api_key,
+)
+from .correction_analyzer import remove_replacement_pair_from_index  # noqa: E402
+from .dataset_logger import _DEFAULT_DATASET_PATH  # noqa: E402
+from .metrics import dead_weight_terms, top_helping_terms  # noqa: E402
+from .permissions import (  # noqa: E402
     check_input_monitoring,
     check_microphone,
     open_input_monitoring_settings,
     open_microphone_settings,
 )
-from .autostart import is_launch_at_login_enabled, set_launch_at_login
-from .correction_analyzer import remove_replacement_pair_from_index
-from .dataset_logger import _DEFAULT_DATASET_PATH
-from .metrics import dead_weight_terms, top_helping_terms
-from .replacements_panel import ReplacementsPanel
-from .vocab_provider import list_replacement_rows_for_ui, normalize_replacement_side
-from .utils import (
+from .phrase_history import get_last_phrases  # noqa: E402
+from .replacements_panel import ReplacementsPanel  # noqa: E402
+from .utils import (  # noqa: E402
     _term_str,
     build_initial_prompt,
     canonical_term_key,
@@ -187,7 +219,7 @@ from .utils import (
     send_notification,
     write_text_atomic,
 )
-
+from .vocab_provider import list_replacement_rows_for_ui, normalize_replacement_side  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Language Selection Panel (NSPanel — stays open across multiple clicks)
@@ -214,9 +246,9 @@ LANG_LABELS = {
 # LANG_PROMPTS is now defined in utils.py and imported above.
 
 try:
-    from Foundation import NSObject
-    from AppKit import NSView, NSMakeRect
     import objc as _objc
+    from AppKit import NSMakeRect, NSView
+    from Foundation import NSObject
 
     class _LangMenuController(NSObject):
         """Builds the language selection NSMenu with sticky view-based items.
@@ -226,19 +258,27 @@ try:
         """
 
         @_objc.python_method
-        def configure(self, config: dict, on_primary, on_additional) -> None:
+        def configure(self, config: dict, on_primary, on_additional, on_auto=None) -> None:
             self._config = config
             self._on_primary = on_primary
             self._on_additional = on_additional
+            self._on_auto = on_auto
             self._primary_btns: dict = {}
             self._additional_btns: dict = {}
+            self._auto_btn = None
 
         @_objc.python_method
         def build_submenu(self):
             from AppKit import (
-                NSMenu, NSMenuItem, NSButton, NSTextField, NSFont,
-                NSButtonTypeRadio, NSButtonTypeSwitch,
-                NSControlStateValueOn, NSControlStateValueOff,
+                NSButton,
+                NSButtonTypeRadio,
+                NSButtonTypeSwitch,
+                NSControlStateValueOff,
+                NSControlStateValueOn,
+                NSFont,
+                NSMenu,
+                NSMenuItem,
+                NSTextField,
             )
 
             VIEW_W = 220
@@ -253,6 +293,7 @@ try:
 
             primary = self._config.get("primary_language", "ru")
             additional = list(self._config.get("additional_languages") or [])
+            is_auto = bool(self._config.get("language_auto_detect"))
 
             def _header_item(text: str) -> None:
                 view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, HEADER_H))
@@ -271,6 +312,22 @@ try:
                 mi.setEnabled_(False)
                 menu.addItem_(mi)
 
+            def _auto_item() -> None:
+                view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, ROW_H))
+                btn = NSButton.alloc().initWithFrame_(
+                    NSMakeRect(MARGIN, 1, VIEW_W - 2 * MARGIN, ROW_H - 2)
+                )
+                btn.setButtonType_(NSButtonTypeRadio)
+                btn.setTitle_("Auto — detect language")
+                btn.setState_(NSControlStateValueOn if is_auto else NSControlStateValueOff)
+                btn.setTarget_(self)
+                btn.setAction_("autoClicked:")
+                view.addSubview_(btn)
+                self._auto_btn = btn
+                mi = NSMenuItem.alloc().init()
+                mi.setView_(view)
+                menu.addItem_(mi)
+
             def _radio_item(idx: int, lang: str) -> None:
                 view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, VIEW_W, ROW_H))
                 btn = NSButton.alloc().initWithFrame_(
@@ -278,7 +335,7 @@ try:
                 )
                 btn.setButtonType_(NSButtonTypeRadio)
                 btn.setTitle_(LANG_LABELS[lang])
-                btn.setState_(NSControlStateValueOn if lang == primary else NSControlStateValueOff)
+                btn.setState_(NSControlStateValueOn if (lang == primary and not is_auto) else NSControlStateValueOff)
                 btn.setTarget_(self)
                 btn.setAction_("primaryClicked:")
                 btn.setTag_(idx)
@@ -295,7 +352,7 @@ try:
                 )
                 btn.setButtonType_(NSButtonTypeSwitch)
                 btn.setTitle_(LANG_LABELS[lang])
-                btn.setState_(NSControlStateValueOn if lang in additional else NSControlStateValueOff)
+                btn.setState_(NSControlStateValueOn if (lang in additional and not is_auto) else NSControlStateValueOff)
                 btn.setTarget_(self)
                 btn.setAction_("additionalClicked:")
                 btn.setTag_(idx)
@@ -305,6 +362,8 @@ try:
                 mi.setView_(view)
                 menu.addItem_(mi)
 
+            _auto_item()
+            menu.addItem_(NSMenuItem.separatorItem())
             _header_item("Primary Language")
             for i, lang in enumerate(LANGS):
                 _radio_item(i, lang)
@@ -317,24 +376,46 @@ try:
             return menu
 
         def primaryClicked_(self, sender):
-            from AppKit import NSControlStateValueOn, NSControlStateValueOff
+            from AppKit import NSControlStateValueOff, NSControlStateValueOn
             idx = sender.tag()
             if idx < 0 or idx >= len(LANGS):
                 return
             lang = LANGS[idx]
             for lk, btn in self._primary_btns.items():
                 btn.setState_(NSControlStateValueOn if lk == lang else NSControlStateValueOff)
+            if self._auto_btn is not None:
+                self._auto_btn.setState_(NSControlStateValueOff)
             self._on_primary(lang)
 
         def additionalClicked_(self, sender):
-            from AppKit import NSControlStateValueOn
+            from AppKit import NSControlStateValueOff, NSControlStateValueOn
             idx = sender.tag()
             if idx < 0 or idx >= len(LANGS):
                 return
             lang = LANGS[idx]
+            was_auto = (
+                self._auto_btn is not None
+                and self._auto_btn.state() == NSControlStateValueOn
+            )
+            if self._auto_btn is not None:
+                self._auto_btn.setState_(NSControlStateValueOff)
+            if was_auto:
+                # Restore primary language radio visually when leaving auto mode
+                primary = self._config.get("primary_language", "ru")
+                for lk, btn in self._primary_btns.items():
+                    btn.setState_(NSControlStateValueOn if lk == primary else NSControlStateValueOff)
             # NSButton (Switch type) auto-toggles before the action fires;
             # sender.state() already reflects the new state.
             self._on_additional(lang, sender.state() == NSControlStateValueOn)
+
+        def autoClicked_(self, sender):
+            from AppKit import NSControlStateValueOff
+            for btn in self._primary_btns.values():
+                btn.setState_(NSControlStateValueOff)
+            for btn in self._additional_btns.values():
+                btn.setState_(NSControlStateValueOff)
+            if self._on_auto is not None:
+                self._on_auto()
 
     _HAVE_LANG_MENU = True
 
@@ -398,7 +479,7 @@ try:
 
         @_objc.python_method
         def _header_item(self, text: str):
-            from AppKit import NSMenuItem, NSTextField, NSFont
+            from AppKit import NSFont, NSMenuItem, NSTextField
             view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self._VIEW_W, self._HEADER_H))
             lbl = NSTextField.alloc().initWithFrame_(
                 NSMakeRect(self._MARGIN, 2, self._VIEW_W - 2 * self._MARGIN, self._HEADER_H - 4)
@@ -417,37 +498,24 @@ try:
 
         @_objc.python_method
         def _phrase_item(self, index: int, display_title: str):
-            from AppKit import (
-                NSMenuItem, NSButton, NSButtonTypeMomentaryLight,
-                NSTextAlignmentLeft, NSImage,
+            from AppKit import NSImage, NSMenuItem
+            mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                display_title, "copyClicked:", ""
             )
-            view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self._VIEW_W, self._ROW_H))
-            btn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(self._MARGIN, 1, self._VIEW_W - 2 * self._MARGIN, self._ROW_H - 2)
-            )
-            btn.setButtonType_(NSButtonTypeMomentaryLight)
-            btn.setTitle_(display_title)
-            btn.setBordered_(False)
-            btn.setAlignment_(NSTextAlignmentLeft)
-            btn.setTag_(index)
-            btn.setTarget_(self)
-            btn.setAction_("copyClicked:")
+            mi.setTarget_(self)
+            mi.setTag_(index)
             icon_path = get_menu_item_icon_path("copy-phrase")
             if icon_path:
                 img = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
                 if img:
                     img.setSize_((16, 16))
                     img.setTemplate_(True)
-                    btn.setImage_(img)
-                    btn.setImagePosition_(2)  # NSImageLeft
-            view.addSubview_(btn)
-            mi = NSMenuItem.alloc().init()
-            mi.setView_(view)
+                    mi.setImage_(img)
             return mi
 
         @_objc.python_method
         def _load_more_item(self):
-            from AppKit import NSMenuItem, NSButton, NSButtonTypeMomentaryLight, NSTextAlignmentCenter
+            from AppKit import NSButton, NSButtonTypeMomentaryLight, NSMenuItem, NSTextAlignmentCenter
             row_h = self._ROW_H + 6
             view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self._VIEW_W, row_h))
             btn = NSButton.alloc().initWithFrame_(
@@ -482,8 +550,14 @@ try:
         @_objc.python_method
         def _show_copied_tooltip(self) -> None:
             from AppKit import (
-                NSPanel, NSTextField, NSFont, NSColor, NSEvent,
-                NSBackingStoreBuffered, NSFloatingWindowLevel, NSTextAlignmentCenter,
+                NSBackingStoreBuffered,
+                NSColor,
+                NSEvent,
+                NSFloatingWindowLevel,
+                NSFont,
+                NSPanel,
+                NSTextAlignmentCenter,
+                NSTextField,
             )
             # Cancel any in-flight dismiss timer and close a previous tooltip that
             # is still visible (fast double-click within the 0.75s window).
@@ -642,9 +716,9 @@ class ClickNSpeakApp(rumps.App):
         # In-app update state machine
         # States: "idle" | "available" | "downloading" | "staging" | "ready" | "installing" | "error"
         self._update_state: str = "idle"
-        self._update_info: "UpdateInfo | None" = None  # type: ignore[name-defined]
+        self._update_info: "UpdateInfo | None" = None
         self._update_progress_pct: int = 0
-        self._update_downloader: "AppUpdater | None" = None  # type: ignore[name-defined]
+        self._update_downloader: "AppUpdater | None" = None
         self._update_item: "rumps.MenuItem | None" = None  # set in setup_menu
         self._update_last_error: str = ""
         self._update_last_progress_refresh: float = 0.0
@@ -797,7 +871,7 @@ class ClickNSpeakApp(rumps.App):
         """Watches initial_prompt_{lang}.txt for all active languages; updates user_terms on change."""
         primary = get_primary_language(self.config)
         additional = list(self.config.get("additional_languages") or [])
-        all_langs = [primary] + [l for l in additional if l != primary]
+        all_langs = [primary] + [lang for lang in additional if lang != primary]
 
         for lang in all_langs:
             prompt_path = self._get_prompt_path(lang)
@@ -861,8 +935,11 @@ class ClickNSpeakApp(rumps.App):
     @rumps.timer(1.0)
     def _run_wizard_if_pending(self, _) -> None:
         """One-shot timer: runs the setup wizard and checks Input Monitoring on first tick."""
-        # Check Input Monitoring and Microphone once after NSApp has started
-        if self._input_monitoring_ok is None:
+        # Check Input Monitoring only when no wizard/picker is pending.
+        # Calling CGEventTapCreate before the wizard triggers the TCC Input Monitoring
+        # dialog at the wrong time — before the wizard explains what the app needs.
+        # After the wizard runs, we refresh the state explicitly below.
+        if self._input_monitoring_ok is None and not self._wizard_pending and not self._language_picker_pending:
             self._input_monitoring_ok = check_input_monitoring()
             self._update_input_monitoring_item()
             if not self._input_monitoring_ok:
@@ -901,6 +978,11 @@ class ClickNSpeakApp(rumps.App):
                 self._update_accessibility_menu_item()
                 self._microphone_ok = check_microphone() == "granted"
                 self._update_microphone_item()
+                # Refresh Input Monitoring state after wizard — the wizard may have
+                # guided the user through granting it, so the cached False from
+                # before the wizard is now stale.
+                self._input_monitoring_ok = check_input_monitoring()
+                self._update_input_monitoring_item()
             except Exception as exc:
                 log_error(f"Setup wizard error: {exc}")
 
@@ -1065,6 +1147,8 @@ class ClickNSpeakApp(rumps.App):
 
         # Model selection submenu
         current_model = self.config.get("model_name", "mlx-community/whisper-large-v3-turbo")
+        current_backend = self.config.get("stt_backend", "local")
+        current_cloud_model = self.config.get("stt_cloud_model", DEFAULT_CLOUD_STT_MODEL)
         self._model_menu_item = rumps.MenuItem(i18n.t("menu.model"), **_icon("model"))
         self.menu.add(self._model_menu_item)
 
@@ -1072,6 +1156,49 @@ class ClickNSpeakApp(rumps.App):
             model_ns_menu = _NSMenuRow.alloc().initWithTitle_("Model")
             model_ns_menu.setAutoenablesItems_(False)
             self._model_menu_item._menuitem.setSubmenu_(model_ns_menu)
+
+            def _section_header(text: str):
+                view = _NSViewRow.alloc().initWithFrame_(_NSMakeRectRow(0, 0, _MODEL_ROW_W, 20))
+                lbl = _NSTextFieldRow.alloc().initWithFrame_(_NSMakeRectRow(14, 2, _MODEL_ROW_W - 28, 16))
+                lbl.setStringValue_(text)
+                lbl.setBezeled_(False)
+                lbl.setDrawsBackground_(False)
+                lbl.setEditable_(False)
+                lbl.setSelectable_(False)
+                lbl.setFont_(_NSFontRow.boldSystemFontOfSize_(11))
+                view.addSubview_(lbl)
+                mi = _NSMenuItemRow.alloc().init()
+                mi.setView_(view)
+                mi.setEnabled_(False)
+                return mi
+
+            model_ns_menu.addItem_(_section_header(i18n.t("menu.stt_cloud_section")))
+
+            for backend in ("gemini", "openai"):
+                for label, model_id in CLOUD_STT_MODELS[backend]:
+                    row_key = f"cloud:{backend}:{model_id}"
+                    delegate = _ModelRowDelegate.alloc().init().configure(
+                        ns_menu=model_ns_menu,
+                        switch_fn=lambda b=backend, mid=model_id, lbl=label: self._do_switch_cloud_model(b, mid, lbl),
+                        delete_fn=None,
+                    )
+                    ns_item, icon_view, lbl_field, trash_btn = _build_model_row_ns_item(delegate)
+                    lbl_field.setStringValue_(label)
+                    is_active = current_backend == backend and current_cloud_model == model_id
+                    ns_item.setState_(1 if is_active else 0)
+                    model_ns_menu.addItem_(ns_item)
+
+                    self._model_row_refs[row_key] = {
+                        "ns_item": ns_item,
+                        "icon_view": icon_view,
+                        "label": lbl_field,
+                        "trash_btn": trash_btn,
+                        "delegate": delegate,
+                    }
+                    self._update_model_row_view(row_key)
+
+            model_ns_menu.addItem_(_NSMenuItemRow.separatorItem())
+            model_ns_menu.addItem_(_section_header(i18n.t("menu.stt_local_section")))
 
             for label, model_id in WHISPER_MODELS:
                 delegate = _ModelRowDelegate.alloc().init().configure(
@@ -1082,7 +1209,8 @@ class ClickNSpeakApp(rumps.App):
                 ns_item, icon_view, lbl_field, trash_btn = _build_model_row_ns_item(delegate)
                 size = WHISPER_MODEL_SIZES.get(model_id, "?")
                 lbl_field.setStringValue_(f"{label} · {size}")
-                ns_item.setState_(1 if model_id == current_model else 0)
+                is_active = current_backend == "local" and model_id == current_model
+                ns_item.setState_(1 if is_active else 0)
                 model_ns_menu.addItem_(ns_item)
 
                 self._model_row_refs[model_id] = {
@@ -1094,15 +1222,31 @@ class ClickNSpeakApp(rumps.App):
                 }
         else:
             # Fallback: plain rumps items (no inline trash button)
+            self._cloud_model_label_map: dict[str, tuple[str, str]] = {}
+            for backend in ("gemini", "openai"):
+                for label, model_id in CLOUD_STT_MODELS[backend]:
+                    item = rumps.MenuItem(label, callback=self.change_model_cloud)
+                    if current_backend == backend and current_cloud_model == model_id:
+                        item.state = 1
+                    self._cloud_model_label_map[label] = (backend, model_id)
+                    self._model_menu_item.add(item)
+            self._model_menu_item.add(None)
+
             _dl_icon = get_menu_item_icon_path("download-model")
             for label, model_id in WHISPER_MODELS:
                 size = WHISPER_MODEL_SIZES.get(model_id, "?")
                 item = rumps.MenuItem(f"{label} · {size}", callback=self.change_model)
                 if _dl_icon:
                     item.set_icon(str(_dl_icon), dimensions=[16, 16], template=True)
-                if model_id == current_model:
+                if current_backend == "local" and model_id == current_model:
                     item.state = 1
                 self._model_menu_item.add(item)
+
+        # API Keys submenu — Gemini (AI editor + cloud STT) and OpenAI (cloud STT)
+        api_keys_menu = rumps.MenuItem(i18n.t("menu.api_keys"), **_icon("api-keys"))
+        api_keys_menu.add(rumps.MenuItem(i18n.t("menu.gemini_api_key"), callback=self._on_set_gemini_api_key))
+        api_keys_menu.add(rumps.MenuItem(i18n.t("menu.openai_api_key"), callback=self._on_set_openai_api_key))
+        self.menu.add(api_keys_menu)
 
         # Language selection — native submenu, stays open after clicks via NSMenuItem.setView_()
         lang_item = rumps.MenuItem(i18n.t("menu.languages"), **_icon("languages"))
@@ -1114,6 +1258,7 @@ class ClickNSpeakApp(rumps.App):
                     self.config,
                     self._apply_primary_language,
                     self._apply_additional_language,
+                    self._apply_auto_detect,
                 )
                 ns_submenu = self._lang_menu_controller.build_submenu()
                 lang_item._menuitem.setSubmenu_(ns_submenu)
@@ -1133,8 +1278,6 @@ class ClickNSpeakApp(rumps.App):
         self._ai_backend_gemini_item = rumps.MenuItem(i18n.t("menu.ai_gemini"), callback=self._on_set_ai_backend_gemini)
         self._ai_backend_submenu.add(self._ai_backend_local_item)
         self._ai_backend_submenu.add(self._ai_backend_gemini_item)
-        self._ai_backend_submenu.add(None)
-        self._ai_backend_submenu.add(rumps.MenuItem(i18n.t("menu.set_gemini_key"), callback=self._on_set_gemini_api_key))
         self.menu.add(self._ai_backend_submenu)
         self._update_ai_backend_submenu_state()
 
@@ -1333,7 +1476,7 @@ class ClickNSpeakApp(rumps.App):
 
     def _render_model_menu_item(self, model_id: str) -> str:
         """Return the title string for a model menu item based on current state."""
-        label = next((l for l, mid in WHISPER_MODELS if mid == model_id), model_id)
+        label = next((label for label, mid in WHISPER_MODELS if mid == model_id), model_id)
         size = WHISPER_MODEL_SIZES.get(model_id, "?")
         state = self._download_state.get(model_id)
         if state == "downloading":
@@ -1410,7 +1553,7 @@ class ClickNSpeakApp(rumps.App):
     ):
         """Return the appropriate NSImage for the model row's left icon slot."""
         try:
-            from AppKit import NSImage, NSImageSymbolConfiguration, NSColor  # type: ignore
+            from AppKit import NSColor, NSImage, NSImageSymbolConfiguration  # type: ignore
             if is_cached:
                 symbol = "checkmark.circle.fill" if is_active else "circle.fill"
                 img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, None)
@@ -1437,9 +1580,26 @@ class ClickNSpeakApp(rumps.App):
         refs = self._model_row_refs.get(model_id)
         if not refs:
             return
-        label_name = next((l for l, mid in WHISPER_MODELS if mid == model_id), model_id)
+
+        if model_id.startswith("cloud:"):
+            _, backend, cloud_model_id = model_id.split(":", 2)
+            label_name = next(
+                (label for label, mid in CLOUD_STT_MODELS.get(backend, []) if mid == cloud_model_id),
+                cloud_model_id,
+            )
+            is_active = (
+                self.config.get("stt_backend") == backend
+                and self.config.get("stt_cloud_model", DEFAULT_CLOUD_STT_MODEL) == cloud_model_id
+            )
+            refs["label"].setStringValue_(label_name)
+            refs["icon_view"].setImage_(self._get_model_left_nsimage(model_id, is_active, True, None))
+            refs["trash_btn"].setHidden_(True)
+            refs["ns_item"].setState_(1 if is_active else 0)
+            return
+
+        label_name = next((label for label, mid in WHISPER_MODELS if mid == model_id), model_id)
         is_cached = self._cached_models.get(model_id, False)
-        is_active = self.config.get("model_name") == model_id
+        is_active = self.config.get("stt_backend", "local") == "local" and self.config.get("model_name") == model_id
         state = self._download_state.get(model_id)
         pct = self._download_progress.get(model_id, 0)
 
@@ -1475,7 +1635,7 @@ class ClickNSpeakApp(rumps.App):
             return
 
         log_info(f"Switching model to {model_id}")
-        self.main_app.update_config({"model_name": model_id})
+        self.main_app.update_config({"model_name": model_id, "stt_backend": "local"})
 
         if self._model_row_refs:
             for mid in self._model_row_refs:
@@ -1499,6 +1659,43 @@ class ClickNSpeakApp(rumps.App):
             return
         self._do_switch_model(model_id, clean_label)
 
+    def _do_switch_cloud_model(self, backend: str, model_id: str, label: str) -> None:
+        """Switch the STT backend to a cloud provider model.
+
+        Prompts for an API key if none is configured yet; the switch is
+        aborted if the user cancels the key dialog without saving one.
+        """
+        get_key = get_gemini_api_key if backend == "gemini" else get_openai_api_key
+        if not get_key():
+            self._show_api_key_dialog(backend)
+            if not get_key():
+                return
+
+        log_info(f"Switching STT backend to {backend}/{model_id}")
+        self.main_app.update_config({"stt_backend": backend, "stt_cloud_model": model_id})
+
+        if self._model_row_refs:
+            for mid in self._model_row_refs:
+                self._update_model_row_view(mid)
+        else:
+            for item in self._model_menu_item.values():
+                if hasattr(item, "state"):
+                    item.state = 0
+            for item in self._model_menu_item.values():
+                if getattr(item, "title", "") == label:
+                    item.state = 1
+                    break
+
+    def change_model_cloud(self, sender):
+        """Fallback callback used when custom row views are unavailable."""
+        mapping = getattr(self, "_cloud_model_label_map", {})
+        entry = mapping.get(sender.title)
+        if not entry:
+            log_error(f"change_model_cloud: unknown label '{sender.title}'")
+            return
+        backend, model_id = entry
+        self._do_switch_cloud_model(backend, model_id, sender.title)
+
     def _is_whisper_model_cached(self, model_id: str) -> bool:
         """Return True if the model is fully present in the local HuggingFace cache.
 
@@ -1507,8 +1704,9 @@ class ClickNSpeakApp(rumps.App):
         (config.json, README) means the download was interrupted before weights arrived.
         """
         try:
-            from huggingface_hub import snapshot_download  # type: ignore
             import pathlib
+
+            from huggingface_hub import snapshot_download  # type: ignore
             local_path = snapshot_download(repo_id=model_id, local_files_only=True)
             _WEIGHT_SUFFIXES = {".npz", ".safetensors", ".bin", ".pt", ".gguf"}
             return any(
@@ -1608,8 +1806,8 @@ class ClickNSpeakApp(rumps.App):
         Only one download runs at a time.
         """
         log_info(f"_start_whisper_model_download: entry for {model_id}")
-        from .model_downloader import ModelDownloader
         from .model_download_panel import ModelDownloadPanel
+        from .model_downloader import ModelDownloader
 
         # Iterate over the constant WHISPER_MODELS list, not the mutable _download_state dict,
         # to avoid RuntimeError if the download thread mutates _download_state concurrently.
@@ -1700,7 +1898,7 @@ class ClickNSpeakApp(rumps.App):
         self._cached_models[model_id] = True
 
         # Switch active model — no restart needed
-        self.main_app.update_config({"model_name": model_id})
+        self.main_app.update_config({"model_name": model_id, "stt_backend": "local"})
 
         # Refresh all rows (icon, trash btn, checkmark)
         self._refresh_model_menu_titles()
@@ -1788,7 +1986,7 @@ class ClickNSpeakApp(rumps.App):
                 self.main_app.update_config({"model_name": fallback_id})
                 # Refresh again so the new active model gets its checkmark
                 self._refresh_model_menu_titles()
-                fallback_label = next((l for l, mid in WHISPER_MODELS if mid == fallback_id), "")
+                fallback_label = next((label for label, mid in WHISPER_MODELS if mid == fallback_id), "")
                 self.main_app.notify(
                     i18n.t("notify.model_deleted_title", label=label),
                     i18n.t("notify.model_deleted_fallback_body", fallback=fallback_label),
@@ -1807,6 +2005,7 @@ class ClickNSpeakApp(rumps.App):
     def _apply_primary_language(self, lang: str) -> None:
         """Apply a primary language change (called from the language panel)."""
         log_info(f"Setting primary language to {lang}")
+        self.config["language_auto_detect"] = False
         self.config["primary_language"] = lang
         self._update_language_hint_and_prompt()
         # update_config saves to disk and calls load_config_data internally —
@@ -1816,6 +2015,7 @@ class ClickNSpeakApp(rumps.App):
 
     def _apply_additional_language(self, lang: str, is_on: bool) -> None:
         """Toggle an additional language (called from the language panel)."""
+        self.config["language_auto_detect"] = False
         additional = list(self.config.get("additional_languages") or [])
         if not additional and isinstance(self.config.get("languages"), list) and len(self.config["languages"]) > 1:
             additional = [str(x).lower().strip() for x in self.config["languages"][1:] if x]
@@ -1826,6 +2026,14 @@ class ClickNSpeakApp(rumps.App):
         self.config["additional_languages"] = additional
         self._update_language_hint_and_prompt()
         log_info(f"Additional languages: {additional}")
+        self.main_app.update_config(self.config)
+
+    def _apply_auto_detect(self) -> None:
+        """Switch to auto-detect mode: Whisper receives no language hint."""
+        log_info("Setting language to auto-detect mode")
+        self.config["language_auto_detect"] = True
+        self.config["additional_languages"] = []
+        self._update_language_hint_and_prompt()
         self.main_app.update_config(self.config)
 
     def _update_language_hint_and_prompt(self):
@@ -1962,26 +2170,26 @@ class ClickNSpeakApp(rumps.App):
             self._edit_prompt_for_lang_external(lang)
             return
 
-        from Foundation import NSRect, NSPoint, NSSize  # type: ignore
         from AppKit import (  # type: ignore
             NSBackingStoreBuffered,
             NSButton,
             NSFont,
             NSMakeRect,
             NSPanel,
+            NSScreen,
             NSScrollView,
             NSTextField,
             NSTextView,
             NSViewHeightSizable,
+            NSViewMaxXMargin,
             NSViewMaxYMargin,
             NSViewMinYMargin,
             NSViewWidthSizable,
             NSWindowStyleMaskClosable,
             NSWindowStyleMaskResizable,
             NSWindowStyleMaskTitled,
-            NSScreen,
-            NSViewMaxXMargin,
         )
+        from Foundation import NSPoint, NSRect, NSSize  # type: ignore
 
         lang = normalize_lang_code(lang)
 
@@ -2496,25 +2704,16 @@ class ClickNSpeakApp(rumps.App):
         self.main_app.notify(i18n.t("notify.settings_title"), i18n.t("notify.update_mode_body", mode=mode_label))
 
     def transcribe_audio_file(self, _: rumps.MenuItem) -> None:
-        """Opens a file selection dialog and starts file transcription."""
+        """Opens the drop-zone window for audio file selection."""
         if self.main_app.is_recording or self.main_app.is_processing:
             self.main_app.notify(i18n.t("notify.busy_title"), i18n.t("notify.busy_processing"))
             return
 
         try:
-            # osascript dialog to pick a file
-            script = 'set theFile to choose file with prompt "Select Audio File" of type {"public.audio", "wav", "m4a"} \n POSIX path of theFile'
-            result = subprocess.check_output(['osascript', '-e', script])
-            file_path = result.decode('utf-8').strip()
-            
-            if file_path and os.path.exists(file_path):
-                self.main_app.start_file_transcription(file_path)
-            
-        except subprocess.CalledProcessError:
-            # User canceled the dialog
-            pass
+            from .file_drop_panel import FileDropPanel
+            FileDropPanel(self.main_app.start_file_transcription).show()
         except Exception as e:
-            log_error(f"Error selecting audio file: {e}")
+            log_error(f"Error opening file drop panel: {e}")
             self.main_app.notify(i18n.t("notify.record_error_title"), i18n.t("notify.file_open_error"))
 
     # ------------------------------------------------------------------
@@ -2632,7 +2831,7 @@ class ClickNSpeakApp(rumps.App):
             log_info("_open_suggestions_panel: no pending suggestions.")
             return
 
-        def on_accept(accepted: list[dict], rejected: list[dict]) -> None:
+        def apply_accept_reject(accepted: list[dict], rejected: list[dict]) -> None:
             from .app import _apply_candidates_to_user_terms
             if accepted:
                 by_lang: dict[str, list[dict]] = {}
@@ -2665,6 +2864,9 @@ class ClickNSpeakApp(rumps.App):
                     new_pending[lang] = remaining
             self.config["pending_suggestions"] = new_pending
             self.config["initial_prompt"] = build_initial_prompt(self.config)
+
+        def on_accept(accepted: list[dict], rejected: list[dict]) -> None:
+            apply_accept_reject(accepted, rejected)
             self.save_config()
             self.main_app.load_config_data(self.config)
             self.update_suggest_menu_badge()
@@ -2672,8 +2874,12 @@ class ClickNSpeakApp(rumps.App):
         def on_skip() -> None:
             pass  # pending remains, shown again at next startup
 
-        def on_auto() -> None:
-            self._apply_all_pending_suggestions()
+        def on_auto(accepted: list[dict], rejected: list[dict]) -> None:
+            # Only the terms the user left checked are applied now — same
+            # semantics as on_accept. Everything else stays pending and will
+            # be picked up by the normal auto-analysis sweep once
+            # prompt_update_mode is "auto".
+            apply_accept_reject(accepted, rejected)
             self.config["prompt_update_mode"] = "auto"
             self._update_mode_submenu_state()
             self.save_config()
@@ -2716,7 +2922,7 @@ class ClickNSpeakApp(rumps.App):
     # In-app update state machine
     # ------------------------------------------------------------------
 
-    def set_update_available(self, info: "UpdateInfo") -> None:  # type: ignore[name-defined]
+    def set_update_available(self, info: "UpdateInfo") -> None:
         """Called from main thread when update check finds a new version."""
         if self._update_state in ("downloading", "staging", "ready", "installing"):
             return  # already in progress
@@ -2724,7 +2930,7 @@ class ClickNSpeakApp(rumps.App):
         self._update_state = "available"
         self._refresh_update_item()
 
-    def set_update_staged(self, info: "UpdateInfo") -> None:  # type: ignore[name-defined]
+    def set_update_staged(self, info: "UpdateInfo") -> None:
         """Called at launch when a staged .app.new is found — skip download, go straight to ready."""
         self._update_info = info
         self._update_state = "ready"
@@ -2943,26 +3149,51 @@ class ClickNSpeakApp(rumps.App):
 
     # Strict format check: "AIzaSy" + 33 base64url chars = 39 chars total
     _GEMINI_KEY_RE = __import__("re").compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
+    # OpenAI keys: "sk-" prefix followed by at least 10 token chars
+    _OPENAI_KEY_RE = __import__("re").compile(r"^sk-[A-Za-z0-9_\-]{10,}$")
 
     def _on_set_gemini_api_key(self, _) -> None:
-        """Show a dialog to enter and save the Gemini API key to macOS Keychain."""
+        self._show_api_key_dialog("gemini")
+
+    def _on_set_openai_api_key(self, _) -> None:
+        self._show_api_key_dialog("openai")
+
+    def _show_api_key_dialog(self, provider: str) -> None:
+        """Show a dialog to enter and save a cloud API key (Gemini/OpenAI) to macOS Keychain."""
+        if provider == "gemini":
+            title_key, body_key, body_existing_key = "dialog.gemini_key_title", "dialog.gemini_key_body", "dialog.gemini_key_body_existing"
+            placeholder, key_re = "AIzaSy…", self._GEMINI_KEY_RE
+            get_key, set_key = get_gemini_api_key, set_gemini_api_key
+        else:
+            title_key, body_key, body_existing_key = "dialog.openai_key_title", "dialog.openai_key_body", "dialog.openai_key_body_existing"
+            placeholder, key_re = "sk-…", self._OPENAI_KEY_RE
+            get_key, set_key = get_openai_api_key, set_openai_api_key
+
         try:
-            from AppKit import NSAlert, NSSecureTextField, NSMakeRect, NSApp, NSPasteboard, NSPasteboardTypeString, NSFloatingWindowLevel  # type: ignore
+            from AppKit import (  # type: ignore
+                NSAlert,
+                NSApp,
+                NSFloatingWindowLevel,
+                NSMakeRect,
+                NSPasteboard,
+                NSPasteboardTypeString,
+                NSSecureTextField,
+            )
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(i18n.t("dialog.gemini_key_title"))
-            existing = get_gemini_api_key()
-            hint = i18n.t("dialog.gemini_key_body_existing") if existing else i18n.t("dialog.gemini_key_body")
+            alert.setMessageText_(i18n.t(title_key))
+            existing = get_key()
+            hint = i18n.t(body_existing_key) if existing else i18n.t(body_key)
             alert.setInformativeText_(hint)
             alert.addButtonWithTitle_(i18n.t("btn.save"))
             alert.addButtonWithTitle_(i18n.t("btn.cancel"))
 
             field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
-            field.setPlaceholderString_("AIzaSy…")
+            field.setPlaceholderString_(placeholder)
 
-            # Auto-fill from clipboard only if it matches the exact Gemini key format
+            # Auto-fill from clipboard only if it matches the exact key format for this provider
             pb = NSPasteboard.generalPasteboard()
             candidate = (pb.stringForType_(NSPasteboardTypeString) or "").strip()
-            if self._GEMINI_KEY_RE.match(candidate):
+            if key_re.match(candidate):
                 field.setStringValue_(candidate)
 
             alert.setAccessoryView_(field)
@@ -2980,14 +3211,14 @@ class ClickNSpeakApp(rumps.App):
                 key = field.stringValue().strip()
                 if key:
                     try:
-                        set_gemini_api_key(key)
-                        log_info("Gemini API key saved to Keychain.")
+                        set_key(key)
+                        log_info(f"{provider.capitalize()} API key saved to Keychain.")
                         self.main_app.notify(i18n.t("notify.ai_editor_title"), i18n.t("notify.ai_key_saved"))
                     except Exception as save_exc:
-                        log_error(f"Failed to save Gemini API key to Keychain: {save_exc}")
+                        log_error(f"Failed to save {provider} API key to Keychain: {save_exc}")
                         self.main_app.notify(i18n.t("notify.ai_editor_error_title"), i18n.t("notify.ai_key_error", err=str(save_exc)))
         except Exception as exc:
-            log_error(f"Set Gemini API key dialog failed: {exc}")
+            log_error(f"Set {provider} API key dialog failed: {exc}")
 
     def _download_ai_model(self, _) -> None:
         """Open a new Terminal window and run the download script with visible progress."""

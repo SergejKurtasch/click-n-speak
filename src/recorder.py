@@ -5,6 +5,7 @@ from typing import Callable, Optional
 import numpy as np
 import sounddevice as sd
 
+from . import i18n as _i18n
 from .utils import (
     SOUND_RECORDING_START,
     SOUND_RECORDING_STOP,
@@ -14,14 +15,17 @@ from .utils import (
     play_sound,
     send_notification,
 )
-from . import i18n as _i18n
 
 try:
     import webrtcvad
+
     HAVE_VAD = True
 except ImportError:
     HAVE_VAD = False
 
+
+_STABLE_TARGET_PAUSE_SECONDS = 0.8
+_TARGET_BOUNDARY_GRACE_SECONDS = 0.5
 
 
 class AudioRecorder:
@@ -31,7 +35,7 @@ class AudioRecorder:
         device_id=None,
         silence_threshold=0.01,
         silence_duration=0.5,
-        target_speech_duration=4.0,
+        target_speech_duration=3.0,
         max_speech_duration=8.0,
         min_speech_duration=0.5,
         on_fatal_error: Optional[Callable[[], None]] = None,
@@ -54,14 +58,17 @@ class AudioRecorder:
         self.chunk_callback = None
         self.has_speech_in_chunk = False
         self.current_chunk_duration = 0  # Track time since last split
+        self._deferred_normal_pause = False
         self.vad_buffer = bytearray()
         self._close_thread = None  # Track ongoing stream-close operation
 
         if HAVE_VAD:
-            self.vad = webrtcvad.Vad(2) # 0-3 aggressiveness (2 is moderate)
+            self.vad = webrtcvad.Vad(2)  # 0-3 aggressiveness (2 is moderate)
             log_info("WebRTC VAD initialized for silence detection.")
         else:
-            log_info("webrtcvad not found, falling back to RMS energy. Run 'pip install webrtcvad' for better accuracy.")
+            log_info(
+                "webrtcvad not found, falling back to RMS energy. Run 'pip install webrtcvad' for better accuracy."
+            )
 
         # If device_id is provided in config, pin it; otherwise scan at init and before each start.
         self._device_id_from_config = device_id is not None
@@ -104,14 +111,15 @@ class AudioRecorder:
             # indata is natively float32, webrtcvad requires 16-bit PCM
             pcm_data = (indata[:, 0] * 32767).astype(np.int16).tobytes()
             self.vad_buffer.extend(pcm_data)
-            
-            frame_length = int(self.sample_rate * 0.03) * 2 # 30ms 16-bit
+
+            frame_length = int(self.sample_rate * 0.03) * 2  # 30ms 16-bit
             while len(self.vad_buffer) >= frame_length:
                 frame = bytes(self.vad_buffer[:frame_length])
                 del self.vad_buffer[:frame_length]  # O(1) in-place vs O(n) slice assignment
                 if self.vad.is_speech(frame, self.sample_rate):
                     self.silence_counter = 0
                     self.has_speech_in_chunk = True
+                    self._deferred_normal_pause = False
                 else:
                     self.silence_counter += 0.03
         else:
@@ -122,10 +130,11 @@ class AudioRecorder:
             else:
                 self.silence_counter = 0
                 self.has_speech_in_chunk = True
+                self._deferred_normal_pause = False
 
         # Adaptive silence threshold:
-        # 1. Normal: 1.0s (default)
-        # 2. After target_speech_duration: 0.4s (micro-pause)
+        # 1. Normal: configured silence duration
+        # 2. After target_speech_duration: a stable endpoint (up to 0.8s)
         # 3. After max_speech_duration: 0s (force split)
 
         effective_silence_duration = self.silence_duration
@@ -135,8 +144,33 @@ class AudioRecorder:
             effective_silence_duration = 0  # Force split immediately
             trigger_type = "FORCE (Max duration)"
         elif self.current_chunk_duration >= self.target_speech_duration:
-            effective_silence_duration = 0.4  # Micro-pause threshold
+            # A 0.4s hesitation frequently precedes more speech. Waiting for
+            # a stable pause avoids sending a short tail to a second Whisper
+            # request while never exceeding the ordinary user-configured pause.
+            effective_silence_duration = min(self.silence_duration, _STABLE_TARGET_PAUSE_SECONDS)
             trigger_type = "MICRO (Target duration)"
+
+        # Keep a normal endpoint immediately before the target attached to the
+        # current phrase. Otherwise a resumed word can be stranded in a tiny
+        # final chunk after the next micro-pause check.
+        if (
+            self.current_chunk_duration < self.target_speech_duration
+            and self.current_chunk_duration
+            >= max(
+                0,
+                self.target_speech_duration - _TARGET_BOUNDARY_GRACE_SECONDS,
+            )
+            and self.silence_counter >= effective_silence_duration
+        ):
+            self._deferred_normal_pause = True
+            return
+
+        if (
+            self.current_chunk_duration < self.max_speech_duration
+            and self._deferred_normal_pause
+            and self.silence_counter < (self.silence_duration + _TARGET_BOUNDARY_GRACE_SECONDS)
+        ):
+            return
 
         # If silence duration exceeded and we have some audio, trigger chunk callback
         if self.silence_counter >= effective_silence_duration:
@@ -158,6 +192,7 @@ class AudioRecorder:
             self.silence_counter = 0
             self.has_speech_in_chunk = False
             self.current_chunk_duration = 0
+            self._deferred_normal_pause = False
 
     def _trigger_chunk(self):
         if not self.audio_data:
@@ -187,10 +222,7 @@ class AudioRecorder:
                 # Starting a new stream while the close thread holds the PortAudio mutex
                 # would either deadlock or produce a stream that captures no audio.
                 # Trigger an auto-restart instead.
-                log_error(
-                    "Previous audio stream close did not complete after 12s. "
-                    "Triggering automatic restart."
-                )
+                log_error("Previous audio stream close did not complete after 12s. " "Triggering automatic restart.")
                 # Notification already sent by the proactive watchdog in
                 # _stop_stream_with_timeout; _on_fatal_error is guarded against
                 # double-call via _restart_pending in SVoiceRecApp.
@@ -215,6 +247,7 @@ class AudioRecorder:
         self.silence_counter = 0
         self.has_speech_in_chunk = False
         self.current_chunk_duration = 0
+        self._deferred_normal_pause = False
         self.vad_buffer = bytearray()
         self._stop_event.clear()
 

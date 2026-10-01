@@ -1,0 +1,51 @@
+{
+  "schema_version": 2,
+  "candidate": {
+    "git_revision": "REPLACE_WITH_EXACT_GIT_REVISION",
+    "version": "1.1.0",
+    "app": {
+      "path": "/absolute/path/to/Click-n-speak.app",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "dmg": {
+      "path": "/absolute/path/to/Click-n-speak.dmg",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "model_revisions": {"whisper": "REPLACE_WITH_PINNED_REVISION", "qwen": "REPLACE_WITH_PINNED_REVISION"},
+    "model_artifacts": {
+      "whisper": {"path": "/absolute/path/to/whisper-model", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+      "qwen": {"path": "/absolute/path/to/qwen-model", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}
+    },
+    "os": "REPLACE_WITH_MACOS_VERSION",
+    "hardware": "REPLACE_WITH_HARDWARE"
+  },
+  "results": {
+    "permissions.clean_install": {
+      "status": "skipped",
+      "operator": "",
+      "completed_at": null,
+      "artifact": {
+        "path": "docs/releases/manual/permissions-clean-install.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "distribution.signed_notarized_dmg": {
+      "status": "skipped",
+      "operator": "",
+      "completed_at": null,
+      "artifact": {
+        "path": "docs/releases/manual/notarization.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "soak.eight_hour": {
+      "status": "skipped",
+      "operator": "",
+      "completed_at": null,
+      "artifact": {
+        "path": "docs/releases/manual/soak-eight-hour.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  }
+}

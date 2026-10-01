@@ -462,7 +462,12 @@ _WHISPER_LANG_CODE: dict[str, str] = {"ua": "uk"}
 
 
 def get_allowed_languages(config: dict) -> list[str]:
-    """Return the list of languages allowed for recognition: primary + additional (no duplicates)."""
+    """Return the list of languages allowed for recognition: primary + additional (no duplicates).
+
+    Returns [] when language_auto_detect is True — Whisper will auto-detect the language.
+    """
+    if config.get("language_auto_detect"):
+        return []
     primary = normalize_lang_code(get_primary_language(config))
     additional = config.get("additional_languages")
     if not isinstance(additional, list):
@@ -803,13 +808,17 @@ def build_initial_prompt(config: dict) -> str:
     Token-accurate truncation: adds terms one-by-one until the BPE token budget
     (_MAX_PROMPT_TOKENS) is reached, so Cyrillic-heavy prompts don't silently
     overflow Whisper's 224-token limit.
+
+    Returns "" when language_auto_detect is True — Whisper receives no hint.
     """
+    if config.get("language_auto_detect"):
+        return ""
     primary = get_primary_language(config)
     additional = list(config.get("additional_languages") or [])
 
     # Language hints for every active language.
-    all_langs = [primary] + [l for l in additional if l != primary]
-    lang_hint = " ".join(LANG_PROMPTS[l] for l in all_langs if l in LANG_PROMPTS)
+    all_langs = [primary] + [lang for lang in additional if lang != primary]
+    lang_hint = " ".join(LANG_PROMPTS[lang] for lang in all_langs if lang in LANG_PROMPTS)
 
     user_terms: dict = config.get("user_terms") or {}
 
@@ -1048,6 +1057,46 @@ def migrate_config_to_v7(config: dict) -> dict:
     return config
 
 
+def migrate_config_to_v8(config: dict) -> dict:
+    """Add language_auto_detect for pure auto-detection mode (no language hint to Whisper).
+
+    Idempotent when schema_version >= 8.
+    """
+    if config.get("schema_version", 1) >= 8:
+        config.setdefault("language_auto_detect", False)
+        return config
+
+    config.setdefault("language_auto_detect", False)
+    config["schema_version"] = 8
+    return config
+
+
+def migrate_config_to_v9(config: dict) -> dict:
+    """Add stt_backend / stt_cloud_model for cloud speech-to-text selection.
+
+    Idempotent when schema_version >= 9.
+    """
+    if config.get("schema_version", 1) >= 9:
+        config.setdefault("stt_backend", "local")
+        config.setdefault("stt_cloud_model", "gemini-2.5-flash-lite")
+        return config
+
+    config.setdefault("stt_backend", "local")
+    config.setdefault("stt_cloud_model", "gemini-2.5-flash-lite")
+    config["schema_version"] = 9
+    return config
+
+
+def migrate_config_to_v10(config: dict) -> dict:
+    """Add durable automatic replacement approval and rejection state."""
+    config.setdefault("approved_auto_replacements", [])
+    config.setdefault("rejected_replacements", [])
+    config.setdefault("replacement_policy_initialized", False)
+    if config.get("schema_version", 1) < 10:
+        config["schema_version"] = 10
+    return config
+
+
 def normalize_ukrainian_lang_codes(config: dict) -> dict:
     """Normalize legacy 'ua' codes to canonical internal 'uk'.
 
@@ -1113,7 +1162,7 @@ def update_term_usage(config: dict, phrase: str) -> bool:
     tokens: set[str] = set(re.findall(r"[\w'-]+", phrase_lower))
     now_iso = datetime.now(timezone.utc).isoformat()
     dirty = False
-    for lang, terms in (config.get("user_terms") or {}).items():
+    for _lang, terms in (config.get("user_terms") or {}).items():
         for item in terms:
             if not isinstance(item, dict):
                 continue
@@ -1187,7 +1236,7 @@ def apply_decay(config: dict, max_age_days: int | None = None) -> int:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=max_age_days)
     n_slow = 0
-    for lang, terms in (config.get("user_terms") or {}).items():
+    for _lang, terms in (config.get("user_terms") or {}).items():
         for item in terms:
             if not isinstance(item, dict):
                 continue

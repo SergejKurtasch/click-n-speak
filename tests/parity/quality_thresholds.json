@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "source": "Accepted Python/bake-off baseline declared before Epoch 10 candidate measurement",
+  "thresholds": {
+    "overall_wer": {"direction": "maximum", "value": 0.08},
+    "russian_wer": {"direction": "maximum", "value": 0.08},
+    "english_wer": {"direction": "maximum", "value": 0.12},
+    "code_switch_wer": {"direction": "maximum", "value": 0.12},
+    "short_command_accuracy": {"direction": "minimum", "value": 0.70},
+    "term_recall": {"direction": "minimum", "value": 0.75},
+    "hotkey_to_hud_p95_seconds": {"direction": "maximum", "value": 0.25},
+    "stop_to_popup_p95_seconds": {"direction": "maximum", "value": 20.0},
+    "warm_decode_p50_seconds": {"direction": "maximum", "value": 4.0},
+    "warm_decode_p95_seconds": {"direction": "maximum", "value": 6.0},
+    "cold_decode_p50_seconds": {"direction": "maximum", "value": 6.5},
+    "cold_decode_p95_seconds": {"direction": "maximum", "value": 8.0},
+    "local_editor_p95_seconds": {"direction": "maximum", "value": 8.0},
+    "peak_rss_mb": {"direction": "maximum", "value": 2200.0},
+    "rss_growth_100_sessions_mb": {"direction": "maximum", "value": 512.0},
+    "audio_callback_p95_ms": {"direction": "maximum", "value": 10.0},
+    "audio_overflow_count": {"direction": "maximum", "value": 0.0}
+  }
+}

@@ -1,0 +1,42 @@
+{"id": "001", "text": "Останови запись", "decode_s": 2.499, "detected_language": "ru"}
+{"id": "002", "text": "Открой лог файлы", "decode_s": 1.204, "detected_language": "ru"}
+{"id": "003", "text": "Сделай Commit", "decode_s": 1.167, "detected_language": "ru"}
+{"id": "004", "text": "Проверьте тесты, пожалуйста", "decode_s": 1.234, "detected_language": "ru"}
+{"id": "005", "text": "Прежде чем менять код, изучи все части проекта, где это может затрагиваться.", "decode_s": 1.27, "detected_language": "ru"}
+{"id": "006", "text": "Извлеки текст из этих двух аудиофайлов и сохрани в отдельный документ.", "decode_s": 1.291, "detected_language": "ru"}
+{"id": "007", "text": "Объясни еще раз подробнее, что делает эта модель в ноутбуке.", "decode_s": 1.25, "detected_language": "ru"}
+{"id": "008", "text": "Как на макбуке посмотреть сколько осталось свободного места в настройках?", "decode_s": 1.245, "detected_language": "ru"}
+{"id": "009", "text": "Добавь обработку ошибок в эту функцию и напиши для нее тест.", "decode_s": 1.257, "detected_language": "ru"}
+{"id": "010", "text": "Проверь орфографию и пунктуацию в этом абзаце, не меняя смысл.", "decode_s": 1.284, "detected_language": "ru"}
+{"id": "011", "text": "Разбей эту большую функцию на несколько маленьких и понятных", "decode_s": 1.238, "detected_language": "ru"}
+{"id": "012", "text": "Почему сборка падает на этом шаге и как это быстро починить?", "decode_s": 1.251, "detected_language": "ru"}
+{"id": "013", "text": "Сделай сводку встречи в три предложения для отправки коллегам", "decode_s": 1.233, "detected_language": "ru"}
+{"id": "014", "text": "Перепиши это предложение в активном залоге и покороче", "decode_s": 1.235, "detected_language": "ru"}
+{"id": "015", "text": "Мне нужно, чтобы сначала списывались бонусы и только потом деньги с карты", "decode_s": 1.241, "detected_language": "ru"}
+{"id": "016", "text": "Составь план на завтра из пяти пунктов по приоритету.", "decode_s": 1.248, "detected_language": "ru"}
+{"id": "017", "text": "Проверь, нет ли утечки памяти в этом цикле обработки.", "decode_s": 1.25, "detected_language": "ru"}
+{"id": "018", "text": "Добавь логирование на каждый сетевой запрос и запись на диск", "decode_s": 1.258, "detected_language": "ru"}
+{"id": "019", "text": "Сформулирую три варианта заголовка для поста, покороче и без воды.", "decode_s": 1.274, "detected_language": "ru"}
+{"id": "020", "text": "Помоги сделать коммит в текущей ветке, а потом создай новую ветку", "decode_s": 1.292, "detected_language": "ru"}
+{"id": "021", "text": "Напиши короткое сопроводительное письмо, cover letter для вакансии.", "decode_s": 1.264, "detected_language": "ru"}
+{"id": "022", "text": "Проведи код ревью последнего коммита и укажи самые критические ошибки", "decode_s": 1.268, "detected_language": "ru"}
+{"id": "023", "text": "Поправь эту рекомендацию с учетом того, что я опубликую ее на LinkedIn.", "decode_s": 1.286, "detected_language": "ru"}
+{"id": "024", "text": "Собери отчет и выгрузи его в PDF одним файлом", "decode_s": 1.241, "detected_language": "ru"}
+{"id": "025", "text": "Дай инструкции, как получить GitHub токен для доступа к репозиторию.", "decode_s": 1.261, "detected_language": "ru"}
+{"id": "026", "text": "есть ли у Cognee какой-то MCP сервер или в этом нет смысла", "decode_s": 1.259, "detected_language": "ru"}
+{"id": "027", "text": "Собери Initial Prompt из словаря терминов и передай его в Whisper", "decode_s": 1.313, "detected_language": "ru"}
+{"id": "028", "text": "Запусти CVVL модель в трех конфигурациях и сравни C-Index.", "decode_s": 1.319, "detected_language": "ru"}
+{"id": "029", "text": "Сравни Whisper и WhisperKit по скорости и точности на русском языке.", "decode_s": 1.322, "detected_language": "ru"}
+{"id": "030", "text": "Оберни вызов Gemini API в тайм-аут и обработай ошибку сети.", "decode_s": 1.307, "detected_language": "ru"}
+{"id": "031", "text": "Новые Pkl файлы для обучения readmission модели, сохранив папку Checkpoints", "decode_s": 1.294, "detected_language": "ru"}
+{"id": "032", "text": "Как в курсор открыть предпросмотр Markdown файла в красивом виде", "decode_s": 1.308, "detected_language": "ru"}
+{"id": "033", "text": "Добавь LinkedIn и HuggingFace в словарь пользовательских терминов", "decode_s": 1.291, "detected_language": "ru"}
+{"id": "034", "text": "Подбери гиперпараметры XGBoost через Abtuna и сохрани лучшие", "decode_s": 1.317, "detected_language": "ru"}
+{"id": "035", "text": "Запусти 350 прогонов CVVL модели и сохрани результаты", "decode_s": 1.328, "detected_language": "ru"}
+{"id": "036", "text": "Исправь все ошибки, у которых оценка больше 10, начиная с самых критических.", "decode_s": 1.359, "detected_language": "ru"}
+{"id": "037", "text": "На макбуке M1 покажи сколько осталось свободного места в гигабайтах", "decode_s": 1.344, "detected_language": "ru"}
+{"id": "038", "text": "Прежде чем вносить изменения, внимательно изучи всю структуру проекта, найди все места, где используется эта функция, и только потом аккуратно примени правки, ничего не сломав.", "decode_s": 1.571, "detected_language": "ru"}
+{"id": "039", "text": "Я зашел на GitLab, чтобы сделать мерч-реквест текущей ветки. Подскажи, что написать в title и в description на английском языке.", "decode_s": 1.464, "detected_language": "ru"}
+{"id": "040", "text": "Please review the pull request and suggest a shorter title", "decode_s": 1.278, "detected_language": "en"}
+{"id": "041", "text": "Summarize the readmission model results in three bullet points.", "decode_s": 1.295, "detected_language": "en"}
+{"id": "042", "text": "Generate a cover letter for senior data scientist role", "decode_s": 1.3, "detected_language": "en"}
