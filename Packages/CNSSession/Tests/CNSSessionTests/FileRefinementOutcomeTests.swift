@@ -4,56 +4,32 @@ import CNSCore
 import CNSTranscription
 @testable import CNSSession
 
-@MainActor
-private func makeFileSessionController(
-    config: Config,
-    transcriber: FakeTranscriber,
-    aiEditor: FakeAiEditor?,
-    runtimeDescriptor: RuntimeDescriptor
-) -> SessionController {
-    SessionController(
-        config: config,
-        transcriber: transcriber,
-        aiEditor: aiEditor,
-        recorder: FakeRecorder(),
-        panel: FakePanel(),
-        delivery: FakeDelivery(),
-        frontmost: FakeFrontmost(),
-        runtimeDescriptorProvider: { runtimeDescriptor }
-    )
-}
-
-private func makeRuntimeDescriptor(
-    editorKind: RuntimeServiceKind = .cloud
-) -> RuntimeDescriptor {
-    RuntimeDescriptor(
-        transcriber: TranscriberDescriptor(
-            backend: "mock", modelID: "mock", kind: .local, readiness: .ready
-        ),
-        aiEditor: AiEditorDescriptor(
-            backend: "mock", modelID: nil, kind: editorKind, readiness: .ready
-        )
-    )
-}
-
 @Suite("File Refinement Outcomes")
 struct FileRefinementOutcomeTests {
     private let url = URL(fileURLWithPath: "/tmp/test.wav")
     private let config = Config()
-    
+
     @Test("Refine=false sets .notRequested and never calls editor")
     func notRequested() async throws {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
         let editor = FakeAiEditor()
         editor.refinedText = "refined text"
-        let runtimeDescriptor = makeRuntimeDescriptor()
-        let sut = await makeFileSessionController(
+
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
-            runtimeDescriptor: runtimeDescriptor
-        )
-        
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            runtimeDescriptorProvider: {
+                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
+                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
+                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
+            }
+        ) }
+
         let result = await sut.transcribeFile(url: url, refine: false, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .notRequested)
@@ -64,14 +40,22 @@ struct FileRefinementOutcomeTests {
     @Test("Disabled editor maps to .unavailable and preserves raw text")
     func unavailable() async throws {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
-        
-        let sut = await makeFileSessionController(
+
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: nil,
-            runtimeDescriptor: makeRuntimeDescriptor(editorKind: .disabled)
-        )
-        
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            runtimeDescriptorProvider: {
+                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
+                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .disabled, readiness: .ready)
+                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
+            }
+        ) }
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .unavailable)
@@ -82,14 +66,22 @@ struct FileRefinementOutcomeTests {
     func notRunOnFailure() async throws {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "", status: .failed(.init(kind: .fileDecode, message: "decode error"))))
         let editor = FakeAiEditor()
-        
-        let sut = await makeFileSessionController(
+
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
-            runtimeDescriptor: makeRuntimeDescriptor()
-        )
-        
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            runtimeDescriptorProvider: {
+                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
+                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
+                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
+            }
+        ) }
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.refinement == .notRun)
         if case .failed = result.status { } else { Issue.record("Expected failed") }
@@ -102,14 +94,22 @@ struct FileRefinementOutcomeTests {
         let editor = FakeAiEditor()
         editor.refineStatus = .timeout
         editor.refinedText = "timed out text" // shouldn't be used
-        
-        let sut = await makeFileSessionController(
+
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
-            runtimeDescriptor: makeRuntimeDescriptor()
-        )
-        
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            runtimeDescriptorProvider: {
+                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
+                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
+                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
+            }
+        ) }
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .timedOut)
@@ -121,14 +121,22 @@ struct FileRefinementOutcomeTests {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
         let editor = FakeAiEditor()
         editor.refineStatus = .error
-        
-        let sut = await makeFileSessionController(
+
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
-            runtimeDescriptor: makeRuntimeDescriptor()
-        )
-        
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            runtimeDescriptorProvider: {
+                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
+                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
+                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
+            }
+        ) }
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .failed)
@@ -141,14 +149,22 @@ struct FileRefinementOutcomeTests {
         let editor = FakeAiEditor()
         editor.refineStatus = .ok
         editor.refinedText = "refined text"
-        
-        let sut = await makeFileSessionController(
+
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
-            runtimeDescriptor: makeRuntimeDescriptor()
-        )
-        
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            runtimeDescriptorProvider: {
+                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
+                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
+                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
+            }
+        ) }
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "refined text")
         #expect(result.refinement == .applied)
@@ -161,14 +177,22 @@ struct FileRefinementOutcomeTests {
         let editor = FakeAiEditor()
         editor.refineStatus = .unchanged
         editor.refinedText = "some other text"
-        
-        let sut = await makeFileSessionController(
+
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
-            runtimeDescriptor: makeRuntimeDescriptor()
-        )
-        
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            runtimeDescriptorProvider: {
+                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
+                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
+                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
+            }
+        ) }
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .unchanged)
@@ -180,14 +204,22 @@ struct FileRefinementOutcomeTests {
         let transcriber = FakeTranscriber(fileResult: FileTranscriptionResult(text: "raw text", status: .success))
         let editor = FakeAiEditor()
         editor.refineStatus = .skipped
-        
-        let sut = await makeFileSessionController(
+
+        let sut = await MainActor.run { SessionController(
             config: config,
             transcriber: transcriber,
             aiEditor: editor,
-            runtimeDescriptor: makeRuntimeDescriptor()
-        )
-        
+            recorder: FakeRecorder(),
+            panel: FakePanel(),
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost(),
+            runtimeDescriptorProvider: {
+                let transcriber = TranscriberDescriptor(backend: "mock", modelID: "mock", kind: .local, readiness: .ready)
+                let editor = AiEditorDescriptor(backend: "mock", modelID: nil, kind: .cloud, readiness: .ready)
+                return RuntimeDescriptor(transcriber: transcriber, aiEditor: editor)
+            }
+        ) }
+
         let result = await sut.transcribeFile(url: url, refine: true, progress: { _ in })
         #expect(result.text == "raw text")
         #expect(result.refinement == .skipped)

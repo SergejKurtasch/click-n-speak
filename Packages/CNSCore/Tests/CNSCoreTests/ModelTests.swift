@@ -19,7 +19,7 @@ func singleFileModel(
     checksum: String? = nil,
     expectedSize: Int64? = nil,
     format: ModelArtifact.Format = .ggml,
-    id: String = "fixture-model"
+    id: String = "fixture-model-\(UUID().uuidString)"
 ) -> ModelInfo {
     let url = URL(string: "https://example.invalid/fixture.bin")!
     let artifact = ModelArtifact(
@@ -359,7 +359,7 @@ struct ModelManagerTests {
             try ModelManager.delete(model, paths: paths)
         }
         #expect(FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))
-        
+
         ModelArtifactAccessRegistry.shared.releaseUse(token)
         try ModelManager.delete(model, paths: paths)
         #expect(!FileManager.default.fileExists(atPath: paths.modelFile(for: model).path))

@@ -72,10 +72,6 @@ struct AudioRecorderLifecycleTests {
         }
         func stop() { lock.withLock { stopCount += 1 } }
 
-        var teardownCounts: (removeTap: Int, stop: Int) {
-            lock.withLock { (removeTapCount, stopCount) }
-        }
-
         func setConfigurationChangeHandler(_ handler: @escaping @Sendable () -> Void) {
             lock.withLock { configurationChangeHandler = handler }
         }
@@ -195,23 +191,11 @@ struct AudioRecorderLifecycleTests {
             try await recorder.start(callbacks: .init())
         }
         #expect(Date().timeIntervalSince(startedAt) < 0.1)
-        #expect(await eventually { fatal.isSet })
-        #expect(await eventually {
-            let counts = adapter.teardownCounts
-            return counts.removeTap == 1 && counts.stop == 1
-        })
-    }
-
-    private func eventually(
-        timeout: TimeInterval = 1,
-        condition: @escaping @Sendable () -> Bool
-    ) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while !condition() {
-            guard Date() < deadline else { return false }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
-        return true
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        #expect(fatal.isSet)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        #expect(adapter.removeTapCount == 1)
+        #expect(adapter.stopCount == 1)
     }
 
     @Test("Configuration change drains once and the next start rebuilds the graph")

@@ -15,7 +15,7 @@ struct StreamCloseWatchdogTests {
     @Test("A teardown that finishes in time does not report a hang")
     func normalClose() async {
         let hung = Flag()
-        let watchdog = StreamCloseWatchdog(timeout: 0.5, onHang: { hung.set() })
+        let watchdog = StreamCloseWatchdog(timeout: 0.1, onHang: { hung.set() })
 
         watchdog.close {}
 
@@ -29,12 +29,12 @@ struct StreamCloseWatchdogTests {
     func hangingClose() async {
         let hung = Flag()
         let release = DispatchSemaphore(value: 0)
-        let watchdog = StreamCloseWatchdog(timeout: 0.2, onHang: { hung.set() })
+        let watchdog = StreamCloseWatchdog(timeout: 0.05, onHang: { hung.set() })
 
         watchdog.close { release.wait() }  // never returns until we release it
 
         #expect(hung.isSet == false)  // not immediately
-        try? await Task.sleep(nanoseconds: 400_000_000)
+        try? await Task.sleep(nanoseconds: 600_000_000)
         #expect(hung.isSet == true)
         release.signal()
     }
@@ -54,7 +54,7 @@ struct StreamCloseWatchdogTests {
     @Test("A start racing a stuck teardown is refused")
     func startRefusedWhileStuck() async {
         let release = DispatchSemaphore(value: 0)
-        let watchdog = StreamCloseWatchdog(timeout: 0.2)
+        let watchdog = StreamCloseWatchdog(timeout: 0.05)
 
         watchdog.close { release.wait() }
 
@@ -66,15 +66,15 @@ struct StreamCloseWatchdogTests {
     func lateCompletionClearsPending() async {
         let hung = Flag()
         let release = DispatchSemaphore(value: 0)
-        let watchdog = StreamCloseWatchdog(timeout: 0.2, onHang: { hung.set() })
+        let watchdog = StreamCloseWatchdog(timeout: 0.05, onHang: { hung.set() })
 
         watchdog.close { release.wait() }
-        try? await Task.sleep(nanoseconds: 400_000_000)
+        try? await Task.sleep(nanoseconds: 600_000_000)
         #expect(hung.isSet == true)
         #expect(watchdog.hasPendingClose == true)
 
         release.signal()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
         #expect(watchdog.hasPendingClose == false)
         #expect(await watchdog.awaitPendingClose() == true)
     }

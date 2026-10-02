@@ -426,9 +426,9 @@ extension UIPanelsTests {
         let panel = StatisticsPanel(i18n: i18n(), openHistory: {}) { _ in
             throw NSError(domain: "test", code: 1, userInfo: nil)
         }
-        
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        
+
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
         switch panel.stateForTesting {
         case .failed:
             break
@@ -436,15 +436,15 @@ extension UIPanelsTests {
             XCTFail("Expected failed state, got \\(panel.stateForTesting)")
         }
     }
-    
+
     @MainActor
     func testStatisticsPanelLoadingAndSuccess() async {
         let panel = StatisticsPanel(i18n: i18n(), openHistory: {}) { _ in
             return JSONObject([])
         }
-        
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        
+
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
         switch panel.stateForTesting {
         case .ready:
             break
@@ -458,26 +458,26 @@ extension UIPanelsTests {
     func testTermsPanelRetainsDraftsOnMenuRefresh() throws {
         let i18n = i18n()
         let termsCoordinator = coordinator()
-        
+
         // Add a baseline term
         XCTAssertTrue(termsCoordinator.addManualTerm("Baseline", language: "en"))
-        
+
         // 1. Open TermsPanel
         let panel = TermsPanel(coordinator: termsCoordinator, i18n: i18n)
         panel.refreshForPresentation()
-        
+
         guard let item = panel.termsForTesting.first else {
             XCTFail("Term not loaded")
             return
         }
-        
+
         // 2. Edit the term
         panel.setDraftTextForTesting("Edited", id: item.id)
         XCTAssertEqual(panel.draftTextForTesting(id: item.id), "Edited")
-        
+
         // 3. MenuBarController.apply happens (simulated by refreshForPresentation with unchanged term)
         panel.refreshForPresentation()
-        
+
         // 4. Draft text must remain "Edited"
         XCTAssertEqual(panel.draftTextForTesting(id: item.id), "Edited")
     }

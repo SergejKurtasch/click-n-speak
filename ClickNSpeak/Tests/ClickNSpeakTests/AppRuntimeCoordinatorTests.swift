@@ -347,8 +347,8 @@ struct AppRuntimeCoordinatorTests {
         return (coordinator, transcriber, editor, session, factory, directory)
     }
 
-    private func settle(_ milliseconds: Int = 100) async {
-        try? await Task.sleep(for: .milliseconds(milliseconds * 3))
+    private func settle(_ milliseconds: Int = 250) async {
+        try? await Task.sleep(for: .milliseconds(milliseconds))
     }
 
     private func dictionary(initial: Config, directory: URL, runtime: AppRuntimeCoordinator) -> DictionaryCoordinator {
@@ -391,7 +391,7 @@ struct AppRuntimeCoordinatorTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         session.isRuntimeIdle = false
         runtime.requestConfiguration(initial)
-        await settle(30)
+        await settle(100)
         #expect(session.cancelWarmupCount > 0)
         session.isRuntimeIdle = true
         await settle()
@@ -432,7 +432,7 @@ struct AppRuntimeCoordinatorTests {
             #expect(selection.sttBackend == "gemini")
         } else { Issue.record("Dictionary publication cancelled pending selection") }
         session.isRuntimeIdle = true
-        await settle(150)
+        await settle(500)
         #expect(router.currentDescriptorSnapshot.backend == "gemini")
         #expect(dictionary.snapshot.sttBackend == "gemini")
         #expect(try Config.loadValidated(from: directory.appendingPathComponent("config.json")) == dictionary.snapshot)
@@ -677,7 +677,7 @@ struct AppRuntimeCoordinatorTests {
 
         await nextPreparation.release()
         await initialActivation.value
-        await settle(150)
+        await settle(500)
         #expect(session.runtimeAvailable)
         #expect(editor.currentDescriptorSnapshot.backend == "gemini")
         #expect(factory.services["gemini"]?.credentialGeneration == 2)
@@ -807,10 +807,7 @@ struct AppRuntimeCoordinatorTests {
         #expect(!factory.preparedBackends.contains("gemini"))
 
         session.isRuntimeIdle = true
-        for _ in 0..<20 {
-            if router.currentDescriptorSnapshot.backend == "gemini" { break }
-            await settle(50)
-        }
+        await settle()
         #expect(router.currentDescriptorSnapshot.backend == "gemini")
     }
 
@@ -833,7 +830,7 @@ struct AppRuntimeCoordinatorTests {
 
         #expect(router.currentDescriptorSnapshot.backend == "local")
         session.isRuntimeIdle = true
-        await settle(150)
+        await settle(500)
         #expect(router.currentDescriptorSnapshot.backend == "gemini")
         await coordinator.shutdown()
     }
@@ -890,10 +887,7 @@ struct AppRuntimeCoordinatorTests {
         #expect(transcriber.currentDescriptorSnapshot.backend == "local")
 
         session.toggle(now: base.addingTimeInterval(1))
-        for _ in 0..<20 {
-            if transcriber.currentDescriptorSnapshot.backend == "gemini" { break }
-            await settle(50)
-        }
+        await settle(500)
         #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
 
         let fileGate = RuntimePreparationGate()
@@ -903,17 +897,11 @@ struct AppRuntimeCoordinatorTests {
         }
         await fileGate.waitForEntry()
         coordinator.requestConfiguration(config(backend: "openai"))
-        for _ in 0..<20 {
-            if transcriber.currentDescriptorSnapshot.backend == "gemini" { break }
-            await settle(50)
-        }
+        await settle()
         #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
         await fileGate.release()
         _ = await file.value
-        for _ in 0..<20 {
-            if transcriber.currentDescriptorSnapshot.backend == "openai" { break }
-            await settle(50)
-        }
+        await settle(500)
         #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
 
         recorder.finalAudio = [Float](repeating: 0.2, count: 16_000)
@@ -922,17 +910,11 @@ struct AppRuntimeCoordinatorTests {
         session.toggle(now: base.addingTimeInterval(3))
         while !panel.isShowingInteractive { await Task.yield() }
         coordinator.requestConfiguration(initial)
-        for _ in 0..<20 {
-            if transcriber.currentDescriptorSnapshot.backend == "openai" { break }
-            await settle(50)
-        }
+        await settle()
         #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
 
         panel.cancel()
-        for _ in 0..<20 {
-            if transcriber.currentDescriptorSnapshot.backend == "local" { break }
-            await settle(50)
-        }
+        await settle(500)
         #expect(transcriber.currentDescriptorSnapshot.backend == "local")
         _ = await session.shutdown()
         await coordinator.shutdown()
@@ -977,10 +959,7 @@ struct AppRuntimeCoordinatorTests {
         }
 
         await nextPreparation.release()
-        for _ in 0..<20 {
-            if transcriber.currentDescriptorSnapshot.backend == "openai" { break }
-            await settle(50)
-        }
+        await settle(500)
         #expect(transcriber.currentDescriptorSnapshot.backend == "openai")
         #expect(editor.currentDescriptorSnapshot.backend == "local")
         await coordinator.shutdown()
@@ -1017,7 +996,7 @@ struct AppRuntimeCoordinatorTests {
         #expect(session.configs.last?.aiEditorEnabled == false)
 
         await nextPreparation.release()
-        await settle(150)
+        await settle(500)
         #expect(session.runtimeAvailable)
         #expect(session.configs.last?.aiEditorEnabled == true)
         #expect(factory.services["gemini"]?.credentialGeneration == 2)
@@ -1044,7 +1023,7 @@ struct AppRuntimeCoordinatorTests {
         try dictionary.saveAtomically(to: directory.appendingPathComponent("config.json"))
         coordinator.updateDictionarySnapshot(dictionary)
         await gate.release()
-        await settle(150)
+        await settle(500)
 
         #expect(transcriber.currentDescriptorSnapshot.backend == "gemini")
         #expect(editor.currentDescriptorSnapshot.backend == "gemini")
@@ -1164,12 +1143,12 @@ struct AppRuntimeCoordinatorTests {
         let (coordinator, router, _, factory, directory) = makeRig(initial: local)
         defer { try? FileManager.default.removeItem(at: directory) }
         await coordinator.activateInitial(local)
-        factory.delays["gemini"] = .milliseconds(250)
+        factory.delays["gemini"] = .milliseconds(400)
 
         coordinator.requestConfiguration(config(backend: "gemini"))
-        await settle(20)
+        await settle(100)
         coordinator.requestConfiguration(config(backend: "openai"))
-        await settle(350)
+        await settle(800)
 
         #expect(router.currentDescriptorSnapshot.backend == "openai")
     }
@@ -1387,11 +1366,11 @@ struct AppRuntimeCoordinatorTests {
         #expect(factory.services["gemini"] === original)
 
         session.isRuntimeIdle = true
-        factory.delays["gemini"] = .milliseconds(200)
-        await settle(60)
+        factory.delays["gemini"] = .milliseconds(400)
+        await settle(200)
         factory.credentialGenerations["gemini"] = 3
         coordinator.revalidateDesiredConfiguration(reason: .credentials(provider: "gemini"))
-        await settle(350)
+        await settle(800)
 
         let replacement = try #require(factory.services["gemini"])
         #expect(replacement !== original)

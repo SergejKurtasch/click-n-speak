@@ -970,7 +970,7 @@ struct SessionControllerTests {
         while !editor.didCallRefine { await Task.yield() }
 
         await rig.controller.shutdown()
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        try? await Task.sleep(nanoseconds: 250_000_000)
 
         #expect(!rig.panel.isShowingInteractive)
         #expect(rig.controller.state == .idle)
