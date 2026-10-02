@@ -2,146 +2,52 @@ import Foundation
 import Testing
 @testable import CNSCore
 
-@Suite("Python ↔ Swift data compatibility")
+@Suite("Swift configuration migration compatibility")
 struct ParityDataCompatibilityTests {
     private static let fixedNow = "2026-07-14T12:00:00.123456+00:00"
 
-    private func repositoryRoot() throws -> URL {
-        var candidate = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        for _ in 0..<12 {
-            if FileManager.default.fileExists(
-                atPath: candidate.appendingPathComponent("tests/parity/swift_parity_scenarios.json").path
-            ) {
-                return candidate
-            }
-            candidate.deleteLastPathComponent()
-        }
-        throw CocoaError(.fileNoSuchFile)
-    }
-
-    private func schemaFixtures(repositoryRoot: URL) throws -> [[String: Any]] {
-        let url = repositoryRoot.appendingPathComponent("tests/parity/fixtures/config_schemas.json")
+    private func schemaFixtures() throws -> [[String: Any]] {
+        let url = try #require(Bundle.module.url(
+            forResource: "config_schemas", withExtension: "json", subdirectory: "Fixtures"
+        ))
         let root = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         )
         return try #require(root["fixtures"] as? [[String: Any]])
     }
 
-    private func runPythonBridge(
-        repositoryRoot: URL,
-        input: URL,
-        output: URL,
-        markUpdate: Bool = false
-    ) throws {
-        let python = repositoryRoot.appendingPathComponent("venv/bin/python")
-        guard FileManager.default.isExecutableFile(atPath: python.path) else {
-            throw CocoaError(.executableNotLoadable)
-        }
-        let process = Process()
-        process.executableURL = python
-        process.currentDirectoryURL = repositoryRoot
-        process.arguments = [
-            repositoryRoot.appendingPathComponent("scripts/parity_config_bridge.py").path,
-            "--input", input.path,
-            "--output", output.path,
-        ] + (markUpdate ? ["--mark-python-update"] : [])
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-        try process.run()
-        process.waitUntilExit()
-        let diagnostic = String(
-            data: outputPipe.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        ) ?? ""
-        #expect(process.terminationStatus == 0, "Python bridge failed: \(diagnostic)")
-        if process.terminationStatus != 0 {
-            throw CocoaError(.executableRuntimeMismatch)
-        }
+    private func object(from raw: [String: Any]) throws -> JSONObject {
+        let data = try JSONSerialization.data(withJSONObject: raw)
+        return try #require(JSONValue.parse(data: data).objectValue)
     }
 
-    @Test("Every supported schema round-trips Python → Swift → Python")
-    func pythonSwiftPythonRoundTrip() throws {
-        let root = try repositoryRoot()
-        let fixtures = try schemaFixtures(repositoryRoot: root)
+    @Test("Every supported schema migrates and round-trips through Swift")
+    func schemaMigrationRoundTrip() throws {
+        let fixtures = try schemaFixtures()
         #expect(Set(fixtures.compactMap { $0["id"] as? String }).count == 10)
 
         for fixture in fixtures {
             let fixtureID = try #require(fixture["id"] as? String)
             let rawConfig = try #require(fixture["config"] as? [String: Any])
+            let migrated = Config.migrated(try object(from: rawConfig), now: Self.fixedNow)
+            #expect(migrated.schemaVersion == 10, "Migration failed for \(fixtureID)")
+            #expect(migrated.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
+
             let temporary = FileManager.default.temporaryDirectory
-                .appendingPathComponent("cns-parity-\(fixtureID)-\(UUID().uuidString)", isDirectory: true)
+                .appendingPathComponent("cns-swift-parity-\(fixtureID)-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: temporary) }
 
-            let original = temporary.appendingPathComponent("original.json")
-            try JSONSerialization.data(withJSONObject: rawConfig, options: [.prettyPrinted])
-                .write(to: original)
-            let pythonMigrated = temporary.appendingPathComponent("python-migrated.json")
-            try runPythonBridge(repositoryRoot: root, input: original, output: pythonMigrated)
-
-            let swiftLoaded = Config.load(from: pythonMigrated)
-            #expect(swiftLoaded.schemaVersion == 10, "Python output did not load as v10 for \(fixtureID)")
-            #expect(swiftLoaded.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
-            if fixtureID == "schema-v10" {
-                let expected = try #require(JSONValue.parse(data: JSONSerialization.data(withJSONObject: rawConfig)).objectValue)
-                #expect(swiftLoaded.raw["approved_auto_replacements"] == expected["approved_auto_replacements"])
-                #expect(swiftLoaded.raw["rejected_replacements"] == expected["rejected_replacements"])
-            }
-            let swiftSaved = temporary.appendingPathComponent("swift-saved.json")
-            try swiftLoaded.saveAtomically(to: swiftSaved)
-
-            let pythonReloaded = temporary.appendingPathComponent("python-reloaded.json")
-            try runPythonBridge(
-                repositoryRoot: root,
-                input: swiftSaved,
-                output: pythonReloaded,
-                markUpdate: true
-            )
-            let finalSwiftLoad = Config.load(from: pythonReloaded)
-            #expect(finalSwiftLoad.schemaVersion == 10)
-            #expect(finalSwiftLoad.raw["parity_python_update"]?.boolValue == true)
-            #expect(finalSwiftLoad.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
-            if fixtureID == "schema-v10" {
-                let expected = try #require(JSONValue.parse(data: JSONSerialization.data(withJSONObject: rawConfig)).objectValue)
-                #expect(finalSwiftLoad.raw["approved_auto_replacements"] == expected["approved_auto_replacements"])
-                #expect(finalSwiftLoad.raw["rejected_replacements"] == expected["rejected_replacements"])
-            }
-        }
-    }
-
-    @Test("Every supported schema round-trips Swift → Python → Swift")
-    func swiftPythonSwiftRoundTrip() throws {
-        let root = try repositoryRoot()
-        for fixture in try schemaFixtures(repositoryRoot: root) {
-            let fixtureID = try #require(fixture["id"] as? String)
-            let rawConfig = try #require(fixture["config"] as? [String: Any])
-            let json = try JSONSerialization.data(withJSONObject: rawConfig)
-            let value = try JSONValue.parse(data: json)
-            let object = try #require(value.objectValue)
-            let swiftConfig = Config.migrated(object, now: Self.fixedNow)
-
-            let temporary = FileManager.default.temporaryDirectory
-                .appendingPathComponent("cns-parity-reverse-\(fixtureID)-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: temporary) }
-            let swiftSaved = temporary.appendingPathComponent("swift.json")
-            try swiftConfig.saveAtomically(to: swiftSaved)
-            let pythonSaved = temporary.appendingPathComponent("python.json")
-            try runPythonBridge(
-                repositoryRoot: root,
-                input: swiftSaved,
-                output: pythonSaved,
-                markUpdate: true
-            )
-
-            let reloaded = Config.load(from: pythonSaved)
+            let saved = temporary.appendingPathComponent("config.json")
+            try migrated.saveAtomically(to: saved)
+            let reloaded = Config.load(from: saved)
             #expect(reloaded.schemaVersion == 10)
-            #expect(reloaded.raw["parity_python_update"]?.boolValue == true)
             #expect(reloaded.raw["future_extension"]?.objectValue?["owner"]?.stringValue == "parity")
+
             if fixtureID == "schema-v10" {
-                #expect(reloaded.raw["approved_auto_replacements"] == object["approved_auto_replacements"])
-                #expect(reloaded.raw["rejected_replacements"] == object["rejected_replacements"])
+                let expected = try object(from: rawConfig)
+                #expect(reloaded.raw["approved_auto_replacements"] == expected["approved_auto_replacements"])
+                #expect(reloaded.raw["rejected_replacements"] == expected["rejected_replacements"])
             }
         }
     }

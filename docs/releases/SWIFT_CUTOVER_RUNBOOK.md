@@ -1,68 +1,63 @@
-# Swift Controlled Cutover and Rollback Runbook
+# Swift Release Rollout and Rollback Runbook
 
-Do not execute this runbook until the versioned go/no-go report has a written **GO** decision and the machine-readable acceptance summary has zero release-critical failures and zero release-critical skips.
+Use this runbook only after the versioned go/no-go report records **GO** and
+the machine-readable acceptance summary has zero release-critical failures or
+skips. The active product and rollback target are signed Swift releases.
 
-## 1. Freeze and identify artifacts
+## 1. Identify the candidate
 
-Record the final git revision, version, macOS/hardware, pinned model revisions, Team ID, notarization submission, DMG filename, post-staple DMG SHA-256, app-bundle SHA-256, and manifest SHA-256. Manual evidence uses schema v2 and must name this exact candidate plus the operator, completion time, evidence artifact path, and artifact SHA-256. Confirm the release manifest and GitHub release assets are byte-consistent before changing the public channel.
+Record the final Git revision, version, macOS/hardware, pinned model revisions,
+Team ID, notarization submission, DMG and app-bundle SHA-256 values, and the
+manifest SHA-256. Manual evidence must identify the exact candidate, operator,
+completion time, evidence path, and artifact SHA-256.
 
-Run acceptance against copies and the already-built candidate artifacts; do not target or replace an installed production application. The build gate receives `CNS_RESET_TCC_AFTER_BUILD=0` explicitly, so acceptance does not reset TCC.
+Run acceptance against copies and already-built candidate artifacts; never
+target or replace an installed production application. Confirm the release
+manifest and release assets are byte-consistent before changing the channel.
 
-Retain these rollback inputs:
+## 2. Back up user data
 
-- the last shipped Python DMG/application;
-- its install instructions and compatible model set;
-- the previous signed Swift/updater fixture if applicable;
-- a copied, hashed pre-cutover data backup.
+Quit every Click-n-speak instance and resolve exact source and destination
+paths. Run `scripts/swift_backup_for_cutover.sh` with an encrypted,
+user-controlled destination. Verify its filename/size/SHA-256 inventory before
+the first production launch. Do not reset TCC, delete Keychain entries, move
+model directories, or rewrite production configuration as part of the backup.
 
-## 2. Back up data before first production Swift launch
+## 3. Roll out the signed Swift release
 
-Quit every Click-n-speak instance. Resolve the exact source and destination paths, then run the backup helper explicitly. Example:
+1. Publish the notarized/stapled DMG and matching JSON manifest.
+2. Start with the approved cohort recorded in the go/no-go report.
+3. Confirm a clean install and an update from the previous signed Swift release.
+4. Monitor only privacy-safe crash, update acknowledgement, latency, memory,
+   and backend outcome signals.
 
-```bash
-scripts/swift_backup_for_cutover.sh \
-  --source-dir "$HOME/Library/Application Support/Click-n-speak" \
-  --dataset "$HOME/.clicknspeak_dataset.jsonl" \
-  --destination "/Volumes/EncryptedBackup/Click-n-speak-pre-swift-1.1.0" \
-  --candidate-version "1.1.0"
-```
+Stop rollout for permission hangs, failed injection, data loss or migration
+failure, update-loop or rollback failure, repeated crash/hang, audio leaks,
+unbounded memory, quality threshold breaches, or private content in diagnostics.
 
-The helper has no default source, refuses broad/root/repository targets, never overwrites a destination, copies only known persistence files, and writes filename/size/SHA-256 inventory without content. Store the backup on an encrypted user-controlled volume.
+## 4. Roll back safely
 
-Do not reset TCC, delete Keychain entries, move model directories, or rewrite production config as part of backup.
-
-## 3. Publish to the staged cohort
-
-1. Publish the notarized/stapled DMG and its matching JSON manifest through the existing release channel.
-2. Start with the approved limited cohort from the go/no-go report.
-3. Confirm one clean install and one update from the previous shipped release after publication.
-4. Monitor only privacy-safe crash, update acknowledgement, latency, memory, and backend outcome signals.
-5. Keep the Python artifact visible and documented for the complete rollback window.
-
-Do not delete Python source, build scripts, artifacts, or compatibility fixtures in the cutover release.
-
-## 4. Stop conditions
-
-Stop rollout immediately for permission hangs/loss, failed injection, data loss/incompatibility, update-loop or rollback failure, repeated crash/hang, audio-stream leak, unbounded memory growth, a quality threshold breach, or private content in diagnostics.
-
-Removing quarantine attributes, changing the bundle identifier, bypassing Team ID/signature checks, or editing frozen thresholds is never a recovery action.
-
-## 5. Application rollback
-
-For an update transaction that has not acknowledged a healthy launch, allow the signed update helper to restore its same-volume backup automatically. Preserve its bounded transaction record.
+For an unacknowledged update, let the signed update helper restore its
+same-volume backup and preserve the bounded transaction record.
 
 For a release-wide defect:
 
-1. stop serving the faulty release as current;
-2. quit the Swift app;
-3. preserve a copy of privacy-safe logs and the acceptance/transaction summaries;
-4. reinstall the retained Python artifact or a higher-version signed Swift fix;
-5. verify the backup inventory before restoring any data;
-6. prefer using the existing compatible data in place; restore the backup only when a measured migration/data defect requires it;
-7. rerun permission, injection, history, Keychain, and model smoke checks.
+1. Stop serving the faulty Swift release as current.
+2. Quit the app and preserve privacy-safe logs plus acceptance/transaction
+   summaries.
+3. Install the previous signed Swift release or a newer signed Swift fix.
+4. Verify the backup inventory before restoring data.
+5. Prefer compatible data in place; restore a backup only for a measured
+   migration/data defect, preserving both copies before deciding.
+6. Repeat permission, injection, history, Keychain, and model smoke checks.
 
-Never overwrite newer user data blindly with the pre-cutover backup. Compare timestamps/inventory and preserve both copies before any restore decision.
+Never overwrite newer user data blindly with a pre-release backup. Removing
+quarantine attributes, changing the bundle identifier, bypassing signature or
+Team ID checks, and editing frozen thresholds are never recovery actions.
 
-## 6. Close the rollback window
+## 5. Close the rollback window
 
-Close only after one full Swift release cycle has completed without an unresolved blocker and the decision owner records approval. Python removal is a separate cleanup epoch and must not be bundled into this cutover.
+Close the window after one complete Swift release cycle without an unresolved
+blocker and with approval recorded by the decision owner. Historical cutover
+context is retained in
+[`docs/archive/SWIFT_CUTOVER_RUNBOOK.md`](../archive/SWIFT_CUTOVER_RUNBOOK.md).

@@ -12,6 +12,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -20,7 +21,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import tomllib
 
 LOGGER = logging.getLogger("swift_acceptance")
 VALID_STATUSES = {"passed", "failed", "skipped", "missing_prerequisite"}
@@ -229,7 +229,7 @@ def scenario_gate_command(repo_root: Path, test_targets: Sequence[str]) -> list[
     parts = relative.parts
     if parts and parts[0] == "tests" and target_path.suffix == ".py":
         selected = f"{relative}::{selector}" if marker else str(relative)
-        return [str(root / "venv" / "bin" / "python"), "-m", "pytest", "-q", selected]
+        return [sys.executable, "-m", "pytest", "-q", selected]
     if len(parts) >= 2 and parts[0] == "Packages":
         if len(parts) < 4 or parts[2] != "Tests" or target_path.suffix != ".swift":
             raise ValueError(f"Swift scenario target must be an exact test source: {target}")
@@ -278,11 +278,12 @@ def require_clean_checkout(repo_root: Path) -> None:
 
 
 def project_version(repo_root: Path) -> str:
-    with (repo_root / "pyproject.toml").open("rb") as handle:
-        project = tomllib.load(handle).get("project")
-    if not isinstance(project, dict) or not isinstance(project.get("version"), str):
-        raise ValueError("Could not determine the project version")
-    return project["version"]
+    with (repo_root / "ClickNSpeak" / "Info.plist").open("rb") as handle:
+        bundle = plistlib.load(handle)
+    version = bundle.get("CFBundleShortVersionString")
+    if not isinstance(version, str) or not version:
+        raise ValueError("Could not determine the native application version")
+    return version
 
 
 def candidate_from_arguments(args: argparse.Namespace, repo_root: Path) -> dict[str, Any]:
@@ -395,16 +396,16 @@ def load_json_object(path: Path) -> dict[str, Any]:
 
 def validate_scenario_manifest(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     if payload.get("schema_version") != 1:
-        raise ValueError("Unsupported parity scenario manifest schema")
+        raise ValueError("Unsupported Swift behavior scenario manifest schema")
     scenarios = payload.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
-        raise ValueError("Parity scenario manifest must contain scenarios")
+        raise ValueError("Swift behavior scenario manifest must contain scenarios")
 
     required_keys = {
         "id",
         "area",
-        "python_reference",
-        "swift_expected",
+        "behavioral_expectation",
+        "expected_behavior",
         "required",
         "fixture_ids",
         "classification",
@@ -851,7 +852,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--candidate-version",
-        help="Release version; defaults to pyproject.toml.",
+        help="Release version; defaults to ClickNSpeak/Info.plist.",
     )
     parser.add_argument(
         "--candidate-model-revisions",
@@ -965,25 +966,21 @@ def main() -> int:
             log_path=gate_log_path(output_path, "editor_model", run_id),
         )
 
-    python_executable = repo_root / "venv" / "bin" / "python"
-    if python_executable.is_file():
-        gates["data_compat"] = run_gate(
-            name="data_compat",
-            command=[
-                str(python_executable),
-                "-m",
-                "pytest",
-                "-q",
-                "tests/parity",
-            ],
-            repo_root=repo_root,
-            environment=environment,
-            log_path=gate_log_path(output_path, "data_compat", run_id),
-        )
-    else:
-        gates["data_compat"] = GateResult(
-            "data_compat", "failed", 0.0, "tests/parity", "project venv is missing"
-        )
+    gates["data_compat"] = run_gate(
+        name="data_compat",
+        command=[
+            "swift",
+            "test",
+            "--disable-index-store",
+            "--package-path",
+            str(repo_root / "Packages" / "CNSCore"),
+            "--filter",
+            "ParityDataCompatibilityTests",
+        ],
+        repo_root=repo_root,
+        environment=environment,
+        log_path=gate_log_path(output_path, "data_compat", run_id),
+    )
 
     gates["bundle_dev"] = run_gate(
         name="bundle_dev",

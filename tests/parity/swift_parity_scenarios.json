@@ -1,15 +1,25 @@
 {
   "schema_version": 1,
   "candidate": "swift",
-  "reference": "python",
+  "reference": "swift_behavior",
   "scenarios": [
     {
       "id": "permissions.clean_install",
       "area": "permissions",
-      "python_reference": "First launch requests Microphone and Accessibility sequentially and remains responsive while System Settings is open.",
-      "swift_expected": "The nonmodal wizard requests the same permissions, polls asynchronously, and enables the hotkey only after both grants are factual.",
-      "required": {"signed_app": true, "permissions": ["microphone", "accessibility"], "models": [], "network": false},
-      "fixture_ids": ["clean-macos-user"],
+      "behavioral_expectation": "First launch requests Microphone and Accessibility sequentially and remains responsive while System Settings is open.",
+      "expected_behavior": "The nonmodal wizard requests the same permissions, polls asynchronously, and enables the hotkey only after both grants are factual.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone",
+          "accessibility"
+        ],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "clean-macos-user"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -19,10 +29,21 @@
     {
       "id": "permissions.incomplete_resume",
       "area": "permissions",
-      "python_reference": "Relaunch with one missing grant resumes setup without marking it complete.",
-      "swift_expected": "Relaunch re-queries both TCC services and resumes at the missing grant without a modal run-loop or hang.",
-      "required": {"signed_app": true, "permissions": ["microphone", "accessibility"], "models": [], "network": false},
-      "fixture_ids": ["microphone-only", "accessibility-only"],
+      "behavioral_expectation": "Relaunch with one missing grant resumes setup without marking it complete.",
+      "expected_behavior": "Relaunch re-queries both TCC services and resumes at the missing grant without a modal run-loop or hang.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone",
+          "accessibility"
+        ],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "microphone-only",
+        "accessibility-only"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -32,10 +53,20 @@
     {
       "id": "permissions.previously_granted",
       "area": "permissions",
-      "python_reference": "Previously granted permissions bypass setup and recording is immediately available.",
-      "swift_expected": "The signed app reuses existing grants for the same identity and does not reopen System Settings.",
-      "required": {"signed_app": true, "permissions": ["microphone", "accessibility"], "models": [], "network": false},
-      "fixture_ids": ["granted-before-relaunch"],
+      "behavioral_expectation": "Previously granted permissions bypass setup and recording is immediately available.",
+      "expected_behavior": "The signed app reuses existing grants for the same identity and does not reopen System Settings.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone",
+          "accessibility"
+        ],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "granted-before-relaunch"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -45,11 +76,22 @@
     {
       "id": "session.basic_recording",
       "area": "session",
-      "python_reference": "Hotkey starts recording, the second press stops it, and one editable popup appears.",
-      "swift_expected": "The explicit state machine produces one recording, one finalization, and one popup outcome.",
-      "required": {"signed_app": false, "permissions": [], "models": ["fixture-stt"], "network": false},
-      "fixture_ids": ["session-basic"],
-      "test_targets": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"],
+      "behavioral_expectation": "Hotkey starts recording, the second press stops it, and one editable popup appears.",
+      "expected_behavior": "The explicit state machine produces one recording, one finalization, and one popup outcome.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "fixture-stt"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "session-basic"
+      ],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -60,11 +102,22 @@
     {
       "id": "session.silence",
       "area": "session",
-      "python_reference": "Silence does not create hallucinated text or a duplicate completion.",
-      "swift_expected": "Short/silent guards return no-speech and complete the session exactly once.",
-      "required": {"signed_app": false, "permissions": [], "models": ["fixture-stt"], "network": false},
-      "fixture_ids": ["silence-16k"],
-      "test_targets": ["Packages/CNSTranscription/Tests/CNSTranscriptionTests/HallucinationFilterTests.swift"],
+      "behavioral_expectation": "Silence does not create hallucinated text or a duplicate completion.",
+      "expected_behavior": "Short/silent guards return no-speech and complete the session exactly once.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "fixture-stt"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "silence-16k"
+      ],
+      "test_targets": [
+        "Packages/CNSTranscription/Tests/CNSTranscriptionTests/HallucinationFilterTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -75,11 +128,22 @@
     {
       "id": "session.multichunk_order",
       "area": "session",
-      "python_reference": "Every queued speech chunk is drained on stop and text order is preserved.",
-      "swift_expected": "Typed chunks remain generation-scoped, drain in order, and none are dropped at finalization.",
-      "required": {"signed_app": false, "permissions": [], "models": ["fixture-stt"], "network": false},
-      "fixture_ids": ["three-ordered-chunks"],
-      "test_targets": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"],
+      "behavioral_expectation": "Every queued speech chunk is drained on stop and text order is preserved.",
+      "expected_behavior": "Typed chunks remain generation-scoped, drain in order, and none are dropped at finalization.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "fixture-stt"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "three-ordered-chunks"
+      ],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -90,11 +154,22 @@
     {
       "id": "session.rapid_hotkey",
       "area": "session",
-      "python_reference": "Rapid presses never overlap recorders or inject stale text.",
-      "swift_expected": "Generation checks and state gating serialize transitions and discard stale callbacks.",
-      "required": {"signed_app": false, "permissions": [], "models": ["fixture-stt"], "network": false},
-      "fixture_ids": ["rapid-toggle-sequence"],
-      "test_targets": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"],
+      "behavioral_expectation": "Rapid presses never overlap recorders or inject stale text.",
+      "expected_behavior": "Generation checks and state gating serialize transitions and discard stale callbacks.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "fixture-stt"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "rapid-toggle-sequence"
+      ],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -105,11 +180,22 @@
     {
       "id": "session.timeout_recovery",
       "area": "session",
-      "python_reference": "Soft timeout stays processing; hard timeout invalidates the stuck request and returns to a usable state.",
-      "swift_expected": "Soft/hard deadlines preserve truthful UI state, abort the matching decode generation, and recover exactly once.",
-      "required": {"signed_app": false, "permissions": [], "models": ["fixture-stt"], "network": false},
-      "fixture_ids": ["blocked-transcriber"],
-      "test_targets": ["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"],
+      "behavioral_expectation": "Soft timeout stays processing; hard timeout invalidates the stuck request and returns to a usable state.",
+      "expected_behavior": "Soft/hard deadlines preserve truthful UI state, abort the matching decode generation, and recover exactly once.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "fixture-stt"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "blocked-transcriber"
+      ],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -120,10 +206,22 @@
     {
       "id": "popup.append_dictation",
       "area": "popup",
-      "python_reference": "Hotkey while the editor is open records more speech and appends it without losing the target app.",
-      "swift_expected": "Append mode retains the original target PID and adds one space-delimited transcription to the open editor.",
-      "required": {"signed_app": true, "permissions": ["microphone", "accessibility"], "models": ["local-whisper"], "network": false},
-      "fixture_ids": ["popup-append"],
+      "behavioral_expectation": "Hotkey while the editor is open records more speech and appends it without losing the target app.",
+      "expected_behavior": "Append mode retains the original target PID and adds one space-delimited transcription to the open editor.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone",
+          "accessibility"
+        ],
+        "models": [
+          "local-whisper"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "popup-append"
+      ],
       "classification": "hybrid",
       "release_critical": true,
       "evidence_gate": "swift_fast",
@@ -133,11 +231,20 @@
     {
       "id": "popup.enter_escape_empty",
       "area": "popup",
-      "python_reference": "Enter confirms, Escape cancels, and an empty confirmation never injects stale content.",
-      "swift_expected": "Exactly one decision wins and empty/cancel paths clean up without text delivery.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["popup-keyboard"],
-      "test_targets": ["Packages/CNSUI/Tests/CNSUITests/PreviewPanelTests.swift"],
+      "behavioral_expectation": "Enter confirms, Escape cancels, and an empty confirmation never injects stale content.",
+      "expected_behavior": "Exactly one decision wins and empty/cancel paths clean up without text delivery.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "popup-keyboard"
+      ],
+      "test_targets": [
+        "Packages/CNSUI/Tests/CNSUITests/PreviewPanelTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -148,11 +255,21 @@
     {
       "id": "popup.command_d_dictionary",
       "area": "popup",
-      "python_reference": "Command-D adds the selection or caret word after validation.",
-      "swift_expected": "The same selection/caret rule reaches the transactional dictionary coordinator once.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["term-node-js", "term-cyrillic"],
-      "test_targets": ["Packages/CNSUI/Tests/CNSUITests/PreviewPanelTests.swift"],
+      "behavioral_expectation": "Command-D adds the selection or caret word after validation.",
+      "expected_behavior": "The same selection/caret rule reaches the transactional dictionary coordinator once.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "term-node-js",
+        "term-cyrillic"
+      ],
+      "test_targets": [
+        "Packages/CNSUI/Tests/CNSUITests/PreviewPanelTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -163,10 +280,20 @@
     {
       "id": "injection.stable_pid",
       "area": "injection",
-      "python_reference": "Injection waits for stable focus restoration to the captured target process.",
-      "swift_expected": "Main-actor PID checks confirm a stable target before the background delivery operation.",
-      "required": {"signed_app": true, "permissions": ["accessibility"], "models": [], "network": false},
-      "fixture_ids": ["textedit-target", "browser-target"],
+      "behavioral_expectation": "Injection waits for stable focus restoration to the captured target process.",
+      "expected_behavior": "Main-actor PID checks confirm a stable target before the background delivery operation.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "accessibility"
+        ],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "textedit-target",
+        "browser-target"
+      ],
       "classification": "hybrid",
       "release_critical": true,
       "evidence_gate": "swift_fast",
@@ -176,11 +303,21 @@
     {
       "id": "injection.clipboard_preservation",
       "area": "injection",
-      "python_reference": "All pasteboard flavors are restored unless the user copies something new during injection.",
-      "swift_expected": "The pasteboard snapshot is conditionally restored only while the temporary write still owns changeCount.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["multi-flavor-pasteboard", "concurrent-user-copy"],
-      "test_targets": ["Packages/CNSInput/Tests/CNSInputTests/TextInjectorTests.swift"],
+      "behavioral_expectation": "All pasteboard flavors are restored unless the user copies something new during injection.",
+      "expected_behavior": "The pasteboard snapshot is conditionally restored only while the temporary write still owns changeCount.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "multi-flavor-pasteboard",
+        "concurrent-user-copy"
+      ],
+      "test_targets": [
+        "Packages/CNSInput/Tests/CNSInputTests/TextInjectorTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -191,11 +328,22 @@
     {
       "id": "stt.local_quality",
       "area": "stt",
-      "python_reference": "Local Whisper meets the accepted multilingual corpus quality and latency baseline.",
-      "swift_expected": "Pinned whisper.cpp passes predeclared WER, command, terminology, latency, and RSS thresholds on the same 42-phrase corpus.",
-      "required": {"signed_app": false, "permissions": [], "models": ["ggml-large-v3-turbo"], "network": false},
-      "fixture_ids": ["golden-42-v1"],
-      "test_targets": ["Packages/CNSTranscription/Tests/CNSTranscriptionTests/Fixtures/golden_thresholds.json"],
+      "behavioral_expectation": "Local Whisper meets the accepted multilingual corpus quality and latency baseline.",
+      "expected_behavior": "Pinned whisper.cpp passes predeclared WER, command, terminology, latency, and RSS thresholds on the same 42-phrase corpus.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "ggml-large-v3-turbo"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "golden-42-v1"
+      ],
+      "test_targets": [
+        "Packages/CNSTranscription/Tests/CNSTranscriptionTests/Fixtures/golden_thresholds.json"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -206,11 +354,20 @@
     {
       "id": "stt.cloud_contracts",
       "area": "stt",
-      "python_reference": "Gemini/OpenAI requests preserve language and prompt hints and recover from bounded transient failures.",
-      "swift_expected": "Injected HTTP clients enforce provider payload, timeout, retry, cancellation, and privacy contracts.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["cloud-http-matrix"],
-      "test_targets": ["Packages/CNSTranscription/Tests/CNSTranscriptionTests/CloudSTTTranscriberTests.swift"],
+      "behavioral_expectation": "Gemini/OpenAI requests preserve language and prompt hints and recover from bounded transient failures.",
+      "expected_behavior": "Injected HTTP clients enforce provider payload, timeout, retry, cancellation, and privacy contracts.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "cloud-http-matrix"
+      ],
+      "test_targets": [
+        "Packages/CNSTranscription/Tests/CNSTranscriptionTests/CloudSTTTranscriberTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -221,10 +378,19 @@
     {
       "id": "stt.cloud_live",
       "area": "stt",
-      "python_reference": "Configured cloud STT returns usable text and actionable authentication/network errors.",
-      "swift_expected": "Real Gemini and OpenAI credentials activate only their selected backend and failures never fall back silently.",
-      "required": {"signed_app": true, "permissions": ["microphone"], "models": [], "network": true},
-      "fixture_ids": ["sanitized-live-cloud-phrases"],
+      "behavioral_expectation": "Configured cloud STT returns usable text and actionable authentication/network errors.",
+      "expected_behavior": "Real Gemini and OpenAI credentials activate only their selected backend and failures never fall back silently.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone"
+        ],
+        "models": [],
+        "network": true
+      },
+      "fixture_ids": [
+        "sanitized-live-cloud-phrases"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -234,11 +400,23 @@
     {
       "id": "stt.file_transcription",
       "area": "stt",
-      "python_reference": "Supported files decode in order, show progress, can cancel, and never modify the source.",
-      "swift_expected": "AVFoundation decoding produces bounded 16 kHz chunks, ordered output, cancellation, and an editable result.",
-      "required": {"signed_app": false, "permissions": [], "models": ["fixture-stt"], "network": false},
-      "fixture_ids": ["media-format-fixtures", "long-file-cancel"],
-      "test_targets": ["Packages/CNSTranscription/Tests/CNSTranscriptionTests/MediaAudioDecoderTests.swift"],
+      "behavioral_expectation": "Supported files decode in order, show progress, can cancel, and never modify the source.",
+      "expected_behavior": "AVFoundation decoding produces bounded 16 kHz chunks, ordered output, cancellation, and an editable result.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "fixture-stt"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "media-format-fixtures",
+        "long-file-cancel"
+      ],
+      "test_targets": [
+        "Packages/CNSTranscription/Tests/CNSTranscriptionTests/MediaAudioDecoderTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -249,11 +427,22 @@
     {
       "id": "editor.local_quality",
       "area": "editor",
-      "python_reference": "Local Qwen cleans Russian, English, and mixed text conservatively within the realtime bound.",
-      "swift_expected": "Pinned Qwen passes the golden prompt/output suite and always falls back to original text on non-success.",
-      "required": {"signed_app": false, "permissions": [], "models": ["qwen2.5-1.5b-q4"], "network": false},
-      "fixture_ids": ["editor-golden-v1"],
-      "test_targets": ["Packages/CNSEditors/Tests/CNSEditorsTests/LocalQwenGoldenTests.swift"],
+      "behavioral_expectation": "Local Qwen cleans Russian, English, and mixed text conservatively within the realtime bound.",
+      "expected_behavior": "Pinned Qwen passes the golden prompt/output suite and always falls back to original text on non-success.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "qwen2.5-1.5b-q4"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "editor-golden-v1"
+      ],
+      "test_targets": [
+        "Packages/CNSEditors/Tests/CNSEditorsTests/LocalQwenGoldenTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -264,11 +453,20 @@
     {
       "id": "editor.gemini_contract",
       "area": "editor",
-      "python_reference": "Gemini receives dictionary and correction hints and does not overlap timed-out requests.",
-      "swift_expected": "Fixture HTTP tests prove prompt parity, request ownership, timeout, cancellation, and original-text fallback.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["gemini-editor-http-matrix"],
-      "test_targets": ["Packages/CNSEditors/Tests/CNSEditorsTests/GeminiEditorTests.swift"],
+      "behavioral_expectation": "Gemini receives dictionary and correction hints and does not overlap timed-out requests.",
+      "expected_behavior": "Fixture HTTP tests prove prompt parity, request ownership, timeout, cancellation, and original-text fallback.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "gemini-editor-http-matrix"
+      ],
+      "test_targets": [
+        "Packages/CNSEditors/Tests/CNSEditorsTests/GeminiEditorTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -279,10 +477,17 @@
     {
       "id": "editor.gemini_live",
       "area": "editor",
-      "python_reference": "A valid Gemini key enables editing and an invalid key produces an actionable error.",
-      "swift_expected": "Keychain-backed activation succeeds/fails factually without logging credentials.",
-      "required": {"signed_app": true, "permissions": [], "models": [], "network": true},
-      "fixture_ids": ["sanitized-editor-live"],
+      "behavioral_expectation": "A valid Gemini key enables editing and an invalid key produces an actionable error.",
+      "expected_behavior": "Keychain-backed activation succeeds/fails factually without logging credentials.",
+      "required": {
+        "signed_app": true,
+        "permissions": [],
+        "models": [],
+        "network": true
+      },
+      "fixture_ids": [
+        "sanitized-editor-live"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -292,11 +497,22 @@
     {
       "id": "runtime.model_key_backend_switches",
       "area": "runtime",
-      "python_reference": "Model, key, and backend changes apply safely while idle and preserve the working runtime on failure.",
-      "swift_expected": "Desired and active runtimes remain distinct; latest-generation activation wins and rollback preserves the prior service.",
-      "required": {"signed_app": false, "permissions": [], "models": ["fixture-stt"], "network": false},
-      "fixture_ids": ["runtime-switch-matrix"],
-      "test_targets": ["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift"],
+      "behavioral_expectation": "Model, key, and backend changes apply safely while idle and preserve the working runtime on failure.",
+      "expected_behavior": "Desired and active runtimes remain distinct; latest-generation activation wins and rollback preserves the prior service.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "fixture-stt"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "runtime-switch-matrix"
+      ],
+      "test_targets": [
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -307,11 +523,20 @@
     {
       "id": "history.menu_pagination_copy",
       "area": "history",
-      "python_reference": "Recent phrases appear newest-first, paginate five at a time, and copy phrase text only.",
-      "swift_expected": "The injected history store supports the same structure, copy privacy, invalidation, and 100k-row bounds.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["history-0-1-5-6-100000"],
-      "test_targets": ["Packages/CNSDictionary/Tests/CNSDictionaryTests/PhraseHistoryTests.swift"],
+      "behavioral_expectation": "Recent phrases appear newest-first, paginate five at a time, and copy phrase text only.",
+      "expected_behavior": "The injected history store supports the same structure, copy privacy, invalidation, and 100k-row bounds.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "history-0-1-5-6-100000"
+      ],
+      "test_targets": [
+        "Packages/CNSDictionary/Tests/CNSDictionaryTests/PhraseHistoryTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -322,11 +547,20 @@
     {
       "id": "menu.structure_icons_state",
       "area": "menu",
-      "python_reference": "Menu ordering, labels, checkmarks, status icons, and history are coherent on every open.",
-      "swift_expected": "Immutable snapshots render the parity inventory with factual permission/runtime/download/autostart state.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["menu-snapshots"],
-      "test_targets": ["Packages/CNSUI/Tests/CNSUITests/MenuStructureTests.swift"],
+      "behavioral_expectation": "Menu ordering, labels, checkmarks, status icons, and history are coherent on every open.",
+      "expected_behavior": "Immutable snapshots render the parity inventory with factual permission/runtime/download/autostart state.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "menu-snapshots"
+      ],
+      "test_targets": [
+        "Packages/CNSUI/Tests/CNSUITests/MenuStructureTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -337,11 +571,20 @@
     {
       "id": "dictionary.learning_flow",
       "area": "dictionary",
-      "python_reference": "Confirmed edits update dataset, corrections, history, usage, suggestions, and prompt state coherently.",
-      "swift_expected": "One transactional coordinator applies the same ordered, idempotent learning flow and atomic persistence.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["correction-to-prompt"],
-      "test_targets": ["Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift"],
+      "behavioral_expectation": "Confirmed edits update dataset, corrections, history, usage, suggestions, and prompt state coherently.",
+      "expected_behavior": "One transactional coordinator applies the same ordered, idempotent learning flow and atomic persistence.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "correction-to-prompt"
+      ],
+      "test_targets": [
+        "Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -352,11 +595,20 @@
     {
       "id": "dictionary.panels_and_statistics",
       "area": "dictionary",
-      "python_reference": "Terms, Suggestions, Replacements, and Statistics reopen with current data and preserve actions.",
-      "swift_expected": "Reusable panels refresh coordinator snapshots and expose the same add/edit/delete/accept/reject/revert flows.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["dictionary-panel-snapshots"],
-      "test_targets": ["Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift"],
+      "behavioral_expectation": "Terms, Suggestions, Replacements, and Statistics reopen with current data and preserve actions.",
+      "expected_behavior": "Reusable panels refresh coordinator snapshots and expose the same add/edit/delete/accept/reject/revert flows.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "dictionary-panel-snapshots"
+      ],
+      "test_targets": [
+        "Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -367,26 +619,46 @@
     {
       "id": "data.python_swift_roundtrip",
       "area": "data",
-      "python_reference": "All supported config schemas and persistence files remain readable and unknown keys survive.",
-      "swift_expected": "Sanitized schema fixtures round-trip Python→Swift→Python and Swift→Python→Swift without loss; corrupt originals remain untouched.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["config-schema-v1-v9", "dictionary-persistence-fixtures"],
-      "test_targets": ["tests/parity/test_parity_contract.py", "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift"],
+      "behavioral_expectation": "All supported config schemas and persistence files remain readable and unknown keys survive.",
+      "expected_behavior": "Sanitized schema fixtures round-trip Swift acceptance round-trip and Swift→established behavior→Swift without loss; corrupt originals remain untouched.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "config-schema-v1-v9",
+        "dictionary-persistence-fixtures"
+      ],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
       "evidence_gate": "scenario.data.python_swift_roundtrip",
-      "evidence_location": "tests/parity and Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift",
+      "evidence_location": "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift",
       "intentional_deviation": null
     },
     {
       "id": "data.keychain_compatibility",
       "area": "data",
-      "python_reference": "Gemini/OpenAI credentials use stable Keychain service/account names and values are never exposed.",
-      "swift_expected": "Swift uses the compatible service/accounts, validates provider-specific formats, and tests only metadata through an injected store.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["keychain-fake-store"],
-      "test_targets": ["Packages/CNSCore/Tests/CNSCoreTests/CoreServicesTests.swift", "Packages/CNSUI/Tests/CNSUITests/SetupWizardTests.swift"],
+      "behavioral_expectation": "Gemini/OpenAI credentials use stable Keychain service/account names and values are never exposed.",
+      "expected_behavior": "Swift uses the compatible service/accounts, validates provider-specific formats, and tests only metadata through an injected store.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "keychain-fake-store"
+      ],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/CoreServicesTests.swift",
+        "Packages/CNSUI/Tests/CNSUITests/SetupWizardTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -397,10 +669,21 @@
     {
       "id": "lifecycle.sleep_wake",
       "area": "lifecycle",
-      "python_reference": "Wake prewarms only while idle and the next recording remains usable.",
-      "swift_expected": "Workspace wake events schedule an idle-only prewarm without stealing the first real decode.",
-      "required": {"signed_app": true, "permissions": ["microphone"], "models": ["local-whisper"], "network": false},
-      "fixture_ids": ["physical-sleep-wake"],
+      "behavioral_expectation": "Wake prewarms only while idle and the next recording remains usable.",
+      "expected_behavior": "Workspace wake events schedule an idle-only prewarm without stealing the first real decode.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone"
+        ],
+        "models": [
+          "local-whisper"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "physical-sleep-wake"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -410,10 +693,21 @@
     {
       "id": "lifecycle.device_disconnect",
       "area": "lifecycle",
-      "python_reference": "Audio-device loss stops cleanly and a later recording can recover.",
-      "swift_expected": "The recorder reports one typed failure, releases the stream, and reopens a valid device on the next session.",
-      "required": {"signed_app": true, "permissions": ["microphone"], "models": ["local-whisper"], "network": false},
-      "fixture_ids": ["physical-input-disconnect"],
+      "behavioral_expectation": "Audio-device loss stops cleanly and a later recording can recover.",
+      "expected_behavior": "The recorder reports one typed failure, releases the stream, and reopens a valid device on the next session.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone"
+        ],
+        "models": [
+          "local-whisper"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "physical-input-disconnect"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -423,10 +717,19 @@
     {
       "id": "lifecycle.network_loss",
       "area": "lifecycle",
-      "python_reference": "Cloud loss fails within a bound and later requests recover without stale overlap.",
-      "swift_expected": "Typed cloud errors preserve the session/runtime and recovery succeeds after connectivity returns.",
-      "required": {"signed_app": true, "permissions": ["microphone"], "models": [], "network": true},
-      "fixture_ids": ["network-link-conditioner"],
+      "behavioral_expectation": "Cloud loss fails within a bound and later requests recover without stale overlap.",
+      "expected_behavior": "Typed cloud errors preserve the session/runtime and recovery succeeds after connectivity returns.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone"
+        ],
+        "models": [],
+        "network": true
+      },
+      "fixture_ids": [
+        "network-link-conditioner"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -436,11 +739,22 @@
     {
       "id": "model.validation_and_activation",
       "area": "models",
-      "python_reference": "Only complete usable models become selectable and working models survive failed downloads.",
-      "swift_expected": "Exact size/format/SHA validation and atomic activation protect the working installation.",
-      "required": {"signed_app": false, "permissions": [], "models": ["fixture-model"], "network": false},
-      "fixture_ids": ["model-corruption-matrix"],
-      "test_targets": ["Packages/CNSCore/Tests/CNSCoreTests/ModelTests.swift"],
+      "behavioral_expectation": "Only complete usable models become selectable and working models survive failed downloads.",
+      "expected_behavior": "Exact size/format/SHA validation and atomic activation protect the working installation.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [
+          "fixture-model"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "model-corruption-matrix"
+      ],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/ModelTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -451,10 +765,19 @@
     {
       "id": "model.cancel_relaunch_resume",
       "area": "models",
-      "python_reference": "Cancelled or interrupted downloads can continue safely without corrupt activation.",
-      "swift_expected": "Durable partial bytes resume only with matching source identity, validator, and byte range; process termination loses no acknowledged bytes.",
-      "required": {"signed_app": true, "permissions": [], "models": ["remote-pinned-model"], "network": true},
-      "fixture_ids": ["model-range-host"],
+      "behavioral_expectation": "Cancelled or interrupted downloads can continue safely without corrupt activation.",
+      "expected_behavior": "Durable partial bytes resume only with matching source identity, validator, and byte range; process termination loses no acknowledged bytes.",
+      "required": {
+        "signed_app": true,
+        "permissions": [],
+        "models": [
+          "remote-pinned-model"
+        ],
+        "network": true
+      },
+      "fixture_ids": [
+        "model-range-host"
+      ],
       "classification": "hybrid",
       "release_critical": true,
       "evidence_gate": "swift_fast",
@@ -464,10 +787,17 @@
     {
       "id": "autostart.system_truth",
       "area": "autostart",
-      "python_reference": "Launch at Login reflects the actual registered state and explains required user approval.",
-      "swift_expected": "SMAppService status is re-queried after every action and System Settings approval is surfaced factually.",
-      "required": {"signed_app": true, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["login-items-settings"],
+      "behavioral_expectation": "Launch at Login reflects the actual registered state and explains required user approval.",
+      "expected_behavior": "SMAppService status is re-queried after every action and System Settings approval is surfaced factually.",
+      "required": {
+        "signed_app": true,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "login-items-settings"
+      ],
       "classification": "hybrid",
       "release_critical": true,
       "evidence_gate": "swift_fast",
@@ -477,11 +807,20 @@
     {
       "id": "update.metadata_candidate",
       "area": "update",
-      "python_reference": "Only a newer compatible release is offered.",
-      "swift_expected": "Pinned metadata and the candidate must pass version, channel, architecture, macOS, checksum, identity, signature, runtime, entitlement, and Gatekeeper policy.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["update-rejection-matrix"],
-      "test_targets": ["Packages/CNSCore/Tests/CNSCoreTests/UpdateCheckerTests.swift"],
+      "behavioral_expectation": "Only a newer compatible release is offered.",
+      "expected_behavior": "Pinned metadata and the candidate must pass version, channel, architecture, macOS, checksum, identity, signature, runtime, entitlement, and Gatekeeper policy.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "update-rejection-matrix"
+      ],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/UpdateCheckerTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -492,11 +831,20 @@
     {
       "id": "update.swap_rollback_fixture",
       "area": "update",
-      "python_reference": "A failed update never destroys the only working application.",
-      "swift_expected": "The helper keeps a same-volume backup and restores it after every simulated install/launch/acknowledgement failure.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["temporary-app-swap"],
-      "test_targets": ["Packages/CNSCore/Tests/CNSCoreTests/UpdateSecurityTests.swift"],
+      "behavioral_expectation": "A failed update never destroys the only working application.",
+      "expected_behavior": "The helper keeps a same-volume backup and restores it after every simulated install/launch/acknowledgement failure.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "temporary-app-swap"
+      ],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/UpdateSecurityTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -507,10 +855,23 @@
     {
       "id": "update.clean_install_tcc_rollback",
       "area": "update",
-      "python_reference": "An installed update preserves user data and grants, and a controlled failure rolls back.",
-      "swift_expected": "The same-identity notarized candidate preserves TCC, models, Keychain, autostart, and data; helper rollback restores the prior signed app.",
-      "required": {"signed_app": true, "permissions": ["microphone", "accessibility"], "models": ["local-whisper"], "network": true},
-      "fixture_ids": ["previous-signed-release", "notarized-rc"],
+      "behavioral_expectation": "An installed update preserves user data and grants, and a controlled failure rolls back.",
+      "expected_behavior": "The same-identity notarized candidate preserves TCC, models, Keychain, autostart, and data; helper rollback restores the prior signed app.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone",
+          "accessibility"
+        ],
+        "models": [
+          "local-whisper"
+        ],
+        "network": true
+      },
+      "fixture_ids": [
+        "previous-signed-release",
+        "notarized-rc"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -520,10 +881,17 @@
     {
       "id": "distribution.signed_notarized_dmg",
       "area": "distribution",
-      "python_reference": "The published application opens through Gatekeeper and carries the stable product identity.",
-      "swift_expected": "The final app and DMG have the expected Team ID, hardened runtime, nested signatures, notarization tickets, and manifest digest.",
-      "required": {"signed_app": true, "permissions": [], "models": [], "network": true},
-      "fixture_ids": ["final-release-artifacts"],
+      "behavioral_expectation": "The published application opens through Gatekeeper and carries the stable product identity.",
+      "expected_behavior": "The final app and DMG have the expected Team ID, hardened runtime, nested signatures, notarization tickets, and manifest digest.",
+      "required": {
+        "signed_app": true,
+        "permissions": [],
+        "models": [],
+        "network": true
+      },
+      "fixture_ids": [
+        "final-release-artifacts"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -533,11 +901,21 @@
     {
       "id": "ui.locales_resources",
       "area": "ui",
-      "python_reference": "Every supported locale renders complete labels and valid menu icons.",
-      "swift_expected": "EN/RU/UK/DE/ES/FR keys and placeholders match exactly and required template icons resolve.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["locale-key-audit", "icon-audit"],
-      "test_targets": ["Packages/CNSUI/Tests/CNSUITests/AppResourcesTests.swift"],
+      "behavioral_expectation": "Every supported locale renders complete labels and valid menu icons.",
+      "expected_behavior": "EN/RU/UK/DE/ES/FR keys and placeholders match exactly and required template icons resolve.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "locale-key-audit",
+        "icon-audit"
+      ],
+      "test_targets": [
+        "Packages/CNSUI/Tests/CNSUITests/AppResourcesTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -548,10 +926,22 @@
     {
       "id": "ui.ru_en_de_workflows",
       "area": "ui",
-      "python_reference": "Primary workflows are understandable and complete in the selected language.",
-      "swift_expected": "RU, EN, and DE signed-app workflows contain no truncation, fallback keys, or untranslated controls.",
-      "required": {"signed_app": true, "permissions": ["microphone", "accessibility"], "models": ["local-whisper"], "network": false},
-      "fixture_ids": ["sanitized-ui-workflow"],
+      "behavioral_expectation": "Primary workflows are understandable and complete in the selected language.",
+      "expected_behavior": "RU, EN, and DE signed-app workflows contain no truncation, fallback keys, or untranslated controls.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone",
+          "accessibility"
+        ],
+        "models": [
+          "local-whisper"
+        ],
+        "network": false
+      },
+      "fixture_ids": [
+        "sanitized-ui-workflow"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -561,10 +951,18 @@
     {
       "id": "ui.light_dark_retina_multidisplay",
       "area": "ui",
-      "python_reference": "Panels remain readable and correctly placed across appearance and display configurations.",
-      "swift_expected": "Sanitized panels pass light/dark snapshots and physical Retina/two-display placement review.",
-      "required": {"signed_app": true, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["ui-light-dark", "retina-two-display"],
+      "behavioral_expectation": "Panels remain readable and correctly placed across appearance and display configurations.",
+      "expected_behavior": "Sanitized panels pass light/dark snapshots and physical Retina/two-display placement review.",
+      "required": {
+        "signed_app": true,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "ui-light-dark",
+        "retina-two-display"
+      ],
       "classification": "hybrid",
       "release_critical": true,
       "evidence_gate": "swift_fast",
@@ -574,10 +972,19 @@
     {
       "id": "ui.keyboard_voiceover",
       "area": "accessibility",
-      "python_reference": "Core flows are keyboard operable and expose understandable accessibility labels.",
-      "swift_expected": "Keyboard-only and VoiceOver users can navigate setup, menu panels, editor, dictionary, file, and update flows.",
-      "required": {"signed_app": true, "permissions": ["accessibility"], "models": [], "network": false},
-      "fixture_ids": ["voiceover-script"],
+      "behavioral_expectation": "Core flows are keyboard operable and expose understandable accessibility labels.",
+      "expected_behavior": "Keyboard-only and VoiceOver users can navigate setup, menu panels, editor, dictionary, file, and update flows.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "accessibility"
+        ],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "voiceover-script"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -587,11 +994,22 @@
     {
       "id": "lifecycle.single_instance_shutdown",
       "area": "lifecycle",
-      "python_reference": "Only one instance owns resources and quit tears down workers, streams, timers, and monitors.",
-      "swift_expected": "The lock rejects a second owner and ordered shutdown releases each runtime resource once.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["single-instance-lock", "shutdown-order"],
-      "test_targets": ["Packages/CNSCore/Tests/CNSCoreTests/CoreServicesTests.swift", "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift"],
+      "behavioral_expectation": "Only one instance owns resources and quit tears down workers, streams, timers, and monitors.",
+      "expected_behavior": "The lock rejects a second owner and ordered shutdown releases each runtime resource once.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "single-instance-lock",
+        "shutdown-order"
+      ],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/CoreServicesTests.swift",
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -602,11 +1020,20 @@
     {
       "id": "privacy.runtime_logs",
       "area": "privacy",
-      "python_reference": "Runtime diagnostics never contain transcript, prompt, or clipboard content.",
-      "swift_expected": "Structured telemetry rejects content-bearing field names and acceptance artifacts contain identifiers/metrics only.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["telemetry-field-policy"],
-      "test_targets": ["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift"],
+      "behavioral_expectation": "Runtime diagnostics never contain transcript, prompt, or clipboard content.",
+      "expected_behavior": "Structured telemetry rejects content-bearing field names and acceptance artifacts contain identifiers/metrics only.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "telemetry-field-policy"
+      ],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
@@ -617,10 +1044,23 @@
     {
       "id": "soak.eight_hour",
       "area": "soak",
-      "python_reference": "Long-running use remains responsive without stale UI, lost rows, orphaned audio, or runaway memory.",
-      "swift_expected": "A signed eight-hour mixed lifecycle run has no crash/hang/privacy leak and remains within predeclared resource bounds.",
-      "required": {"signed_app": true, "permissions": ["microphone", "accessibility"], "models": ["local-whisper", "qwen2.5-1.5b-q4"], "network": true},
-      "fixture_ids": ["soak-plan-v1"],
+      "behavioral_expectation": "Long-running use remains responsive without stale UI, lost rows, orphaned audio, or runaway memory.",
+      "expected_behavior": "A signed eight-hour mixed lifecycle run has no crash/hang/privacy leak and remains within predeclared resource bounds.",
+      "required": {
+        "signed_app": true,
+        "permissions": [
+          "microphone",
+          "accessibility"
+        ],
+        "models": [
+          "local-whisper",
+          "qwen2.5-1.5b-q4"
+        ],
+        "network": true
+      },
+      "fixture_ids": [
+        "soak-plan-v1"
+      ],
       "classification": "manual",
       "release_critical": true,
       "evidence_gate": null,
@@ -630,32 +1070,392 @@
     {
       "id": "rollback.python_data_read",
       "area": "rollback",
-      "python_reference": "The retained Python release can reopen user data after a Swift trial.",
-      "swift_expected": "Swift preserves the shared schema and unknown keys so Python rollback can load the copied acceptance dataset.",
-      "required": {"signed_app": false, "permissions": [], "models": [], "network": false},
-      "fixture_ids": ["bidirectional-config-v1-v9"],
-      "test_targets": ["tests/parity/test_parity_contract.py"],
+      "behavioral_expectation": "Swift configuration migration preserves supported user data across a Swift round-trip.",
+      "expected_behavior": "Swift migrates supported schema versions and preserves unknown keys when configuration is read, migrated, and written again.",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [
+        "bidirectional-config-v1-v9"
+      ],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift"
+      ],
       "regression_ids": [],
       "classification": "automated",
       "release_critical": true,
       "evidence_gate": "scenario.rollback.python_data_read",
-      "evidence_location": "tests/parity/test_parity_contract.py",
+      "evidence_location": "Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift",
       "intentional_deviation": null
     },
-    {"id":"regression.R01.config_recovery","area":"data","python_reference":"config recovery","swift_expected":"config recovery","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig","ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#validBackupRestoresSafely"],"regression_ids":["R01"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R01","evidence_location":"ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig","intentional_deviation":null},
-    {"id":"regression.R02.usage_persistence","area":"dictionary","python_reference":"usage persistence","swift_expected":"usage persistence","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage","ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#dirtyUsageSurvivesCoordinatorRoundTrip"],"regression_ids":["R02"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R02","evidence_location":"Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage","intentional_deviation":null},
-    {"id":"regression.R03.file_injection_state","area":"session","python_reference":"file injection state","swift_expected":"file injection state","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#fileJobBlocksHotkey","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#injectingBlocksHotkey"],"regression_ids":["R03"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R03","evidence_location":"Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#fileJobBlocksHotkey","intentional_deviation":null},
-    {"id":"regression.R04.silent_append_draft","area":"popup","python_reference":"silent append draft","swift_expected":"silent append draft","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#silentAppendPreservesPopup"],"regression_ids":["R04"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R04","evidence_location":"Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#silentAppendPreservesPopup","intentional_deviation":null},
-    {"id":"regression.R05.append_dataset_integrity","area":"data","python_reference":"append dataset integrity","swift_expected":"append dataset integrity","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendPreservesDatasetSource","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendAfterUserEditPreservesProvenance"],"regression_ids":["R05"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R05","evidence_location":"Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendPreservesDatasetSource","intentional_deviation":null},
-    {"id":"regression.R06.middle_chunk_failure","area":"session","python_reference":"middle chunk failure","swift_expected":"middle chunk failure","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#partialFailureIsVisible"],"regression_ids":["R06"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R06","evidence_location":"Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#partialFailureIsVisible","intentional_deviation":null},
-    {"id":"regression.R07.shutdown_invalidation","area":"lifecycle","python_reference":"shutdown invalidation","swift_expected":"shutdown invalidation","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownBlocksNewActivities","Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownCannotReopenPopup"],"regression_ids":["R07"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R07","evidence_location":"Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownBlocksNewActivities","intentional_deviation":null},
-    {"id":"regression.R08.runtime_transaction","area":"runtime","python_reference":"runtime transaction","swift_expected":"runtime transaction","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#preparationCannotCommitIntoRecording"],"regression_ids":["R08"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R08","evidence_location":"ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#preparationCannotCommitIntoRecording","intentional_deviation":null},
-    {"id":"regression.R09.active_api_key_change","area":"runtime","python_reference":"active api key change","swift_expected":"active api key change","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents","ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#revalidationRebuildsActiveClient"],"regression_ids":["R09"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R09","evidence_location":"ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents","intentional_deviation":null},
-    {"id":"regression.R10.effective_language_prompt","area":"dictionary","python_reference":"effective language prompt","swift_expected":"effective language prompt","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#languageChangeRebuildsPrompt"],"regression_ids":["R10"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R10","evidence_location":"ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#languageChangeRebuildsPrompt","intentional_deviation":null},
-    {"id":"regression.R11.ui_backend_formats","area":"ui","python_reference":"ui backend formats","swift_expected":"ui backend formats","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific"],"regression_ids":["R11"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R11","evidence_location":"Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific","intentional_deviation":null},
-    {"id":"regression.R12.bounded_download_retry","area":"models","python_reference":"bounded download retry","swift_expected":"bounded download retry","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal"],"regression_ids":["R12"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R12","evidence_location":"Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal","intentional_deviation":null},
-    {"id":"regression.R13.update_exit_barrier","area":"update","python_reference":"update exit barrier","swift_expected":"update exit barrier","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation"],"regression_ids":["R13"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R13","evidence_location":"Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation","intentional_deviation":null},
-    {"id":"regression.R14.injection_failure_notice","area":"injection","python_reference":"injection failure notice","swift_expected":"injection failure notice","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSInput/Tests/CNSInputTests/SystemTextDeliveryTests.swift#missingTargetPreservesText"],"regression_ids":["R14"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R14","evidence_location":"Packages/CNSInput/Tests/CNSInputTests/SystemTextDeliveryTests.swift#missingTargetPreservesText","intentional_deviation":null},
-    {"id":"regression.R15.telemetry_acceptance_provenance","area":"privacy","python_reference":"telemetry acceptance provenance","swift_expected":"telemetry acceptance provenance","required":{"signed_app":false,"permissions":[],"models":[],"network":false},"fixture_ids":[],"test_targets":["Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames","tests/parity/test_parity_contract.py#test_passed_manual_evidence_is_bound_to_verified_candidate_artifacts"],"regression_ids":["R15"],"classification":"automated","release_critical":true,"evidence_gate":"scenario.regression.R15","evidence_location":"Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames","intentional_deviation":null}
+    {
+      "id": "regression.R01.config_recovery",
+      "area": "data",
+      "behavioral_expectation": "config recovery",
+      "expected_behavior": "config recovery",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig",
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#validBackupRestoresSafely"
+      ],
+      "regression_ids": [
+        "R01"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R01",
+      "evidence_location": "ClickNSpeak/Tests/ClickNSpeakTests/AppDelegateStartupTests.swift#startupPreservesCorruptConfig",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R02.usage_persistence",
+      "area": "dictionary",
+      "behavioral_expectation": "usage persistence",
+      "expected_behavior": "usage persistence",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage",
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#dirtyUsageSurvivesCoordinatorRoundTrip"
+      ],
+      "regression_ids": [
+        "R02"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R02",
+      "evidence_location": "Packages/CNSDictionary/Tests/CNSDictionaryTests/DictionaryCoordinatorTests.swift#testDrainAndStopWaitsForOwnedMaintenanceThenFlushesDirtyUsage",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R03.file_injection_state",
+      "area": "session",
+      "behavioral_expectation": "file injection state",
+      "expected_behavior": "file injection state",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#fileJobBlocksHotkey",
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#injectingBlocksHotkey"
+      ],
+      "regression_ids": [
+        "R03"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R03",
+      "evidence_location": "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#fileJobBlocksHotkey",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R04.silent_append_draft",
+      "area": "popup",
+      "behavioral_expectation": "silent append draft",
+      "expected_behavior": "silent append draft",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#silentAppendPreservesPopup"
+      ],
+      "regression_ids": [
+        "R04"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R04",
+      "evidence_location": "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#silentAppendPreservesPopup",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R05.append_dataset_integrity",
+      "area": "data",
+      "behavioral_expectation": "append dataset integrity",
+      "expected_behavior": "append dataset integrity",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendPreservesDatasetSource",
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendAfterUserEditPreservesProvenance"
+      ],
+      "regression_ids": [
+        "R05"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R05",
+      "evidence_location": "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#appendPreservesDatasetSource",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R06.middle_chunk_failure",
+      "area": "session",
+      "behavioral_expectation": "middle chunk failure",
+      "expected_behavior": "middle chunk failure",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#partialFailureIsVisible"
+      ],
+      "regression_ids": [
+        "R06"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R06",
+      "evidence_location": "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#partialFailureIsVisible",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R07.shutdown_invalidation",
+      "area": "lifecycle",
+      "behavioral_expectation": "shutdown invalidation",
+      "expected_behavior": "shutdown invalidation",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownBlocksNewActivities",
+        "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownCannotReopenPopup"
+      ],
+      "regression_ids": [
+        "R07"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R07",
+      "evidence_location": "Packages/CNSSession/Tests/CNSSessionTests/SessionControllerTests.swift#shutdownBlocksNewActivities",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R08.runtime_transaction",
+      "area": "runtime",
+      "behavioral_expectation": "runtime transaction",
+      "expected_behavior": "runtime transaction",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#preparationCannotCommitIntoRecording"
+      ],
+      "regression_ids": [
+        "R08"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R08",
+      "evidence_location": "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#preparationCannotCommitIntoRecording",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R09.active_api_key_change",
+      "area": "runtime",
+      "behavioral_expectation": "active api key change",
+      "expected_behavior": "active api key change",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents",
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#revalidationRebuildsActiveClient"
+      ],
+      "regression_ids": [
+        "R09"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R09",
+      "evidence_location": "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#sharedGeminiCredentialRebuildsBothComponents",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R10.effective_language_prompt",
+      "area": "dictionary",
+      "behavioral_expectation": "effective language prompt",
+      "expected_behavior": "effective language prompt",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#languageChangeRebuildsPrompt"
+      ],
+      "regression_ids": [
+        "R10"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R10",
+      "evidence_location": "ClickNSpeak/Tests/ClickNSpeakTests/AppRuntimeCoordinatorTests.swift#languageChangeRebuildsPrompt",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R11.ui_backend_formats",
+      "area": "ui",
+      "behavioral_expectation": "ui backend formats",
+      "expected_behavior": "ui backend formats",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific"
+      ],
+      "regression_ids": [
+        "R11"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R11",
+      "evidence_location": "Packages/CNSUI/Tests/CNSUITests/UIPanelsTests.swift#testFileTypesMatchPythonPickerAndCredentialValidationIsProviderSpecific",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R12.bounded_download_retry",
+      "area": "models",
+      "behavioral_expectation": "bounded download retry",
+      "expected_behavior": "bounded download retry",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal"
+      ],
+      "regression_ids": [
+        "R12"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R12",
+      "evidence_location": "Packages/CNSCore/Tests/CNSCoreTests/ModelDownloaderNetworkTests.swift#get404IsTerminal",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R13.update_exit_barrier",
+      "area": "update",
+      "behavioral_expectation": "update exit barrier",
+      "expected_behavior": "update exit barrier",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation"
+      ],
+      "regression_ids": [
+        "R13"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R13",
+      "evidence_location": "Packages/CNSCore/Tests/CNSCoreTests/UpdateProcessLifecycleTests.swift#testLiveParentPreventsAnySwapMutation",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R14.injection_failure_notice",
+      "area": "injection",
+      "behavioral_expectation": "injection failure notice",
+      "expected_behavior": "injection failure notice",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSInput/Tests/CNSInputTests/SystemTextDeliveryTests.swift#missingTargetPreservesText"
+      ],
+      "regression_ids": [
+        "R14"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R14",
+      "evidence_location": "Packages/CNSInput/Tests/CNSInputTests/SystemTextDeliveryTests.swift#missingTargetPreservesText",
+      "intentional_deviation": null
+    },
+    {
+      "id": "regression.R15.telemetry_acceptance_provenance",
+      "area": "privacy",
+      "behavioral_expectation": "telemetry acceptance provenance",
+      "expected_behavior": "telemetry acceptance provenance",
+      "required": {
+        "signed_app": false,
+        "permissions": [],
+        "models": [],
+        "network": false
+      },
+      "fixture_ids": [],
+      "test_targets": [
+        "Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames"
+      ],
+      "regression_ids": [
+        "R15"
+      ],
+      "classification": "automated",
+      "release_critical": true,
+      "evidence_gate": "scenario.regression.R15",
+      "evidence_location": "Packages/CNSCore/Tests/CNSCoreTests/RuntimeTelemetryTests.swift#testTelemetryRejectsContentBearingFieldNames",
+      "intentional_deviation": null
+    }
   ]
 }

@@ -94,13 +94,11 @@ def _write_minimal_agent_environment(root: Path) -> None:
         encoding="utf-8",
     )
     for relative_path in (
-        "ClickNSpeak/AGENTS.md",
-        "Packages/AGENTS.md",
-        "Packages/CNSSession/AGENTS.md",
-        "Packages/CNSDictionary/AGENTS.md",
-        "src/AGENTS.md",
-        "scripts/AGENTS.md",
-        "tests/AGENTS.md",
+            "ClickNSpeak/AGENTS.md",
+            "Packages/AGENTS.md",
+            "Packages/CNSSession/AGENTS.md",
+            "Packages/CNSDictionary/AGENTS.md",
+            "tests/AGENTS.md",
     ):
         guide_path = root / relative_path
         guide_path.parent.mkdir(parents=True, exist_ok=True)

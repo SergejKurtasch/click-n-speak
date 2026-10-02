@@ -87,6 +87,24 @@ private final class ScriptedModelURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private actor RetrySleepGate {
+    private var hasEntered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func enter() {
+        hasEntered = true
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func waitUntilEntered() async {
+        guard !hasEntered else { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+}
+
 @MainActor
 @Suite("ModelDownloader network integration", .serialized)
 struct ModelDownloaderNetworkTests {
@@ -323,13 +341,17 @@ struct ModelDownloaderNetworkTests {
 
     @Test("A non-cooperative retry waiter cannot overwrite cancellation")
     func lateRetryFailureCannotReplaceCancelledState() async throws {
+        let retrySleepGate = RetrySleepGate()
         let context = try makeContext(
             steps: [
                 headStep(),
                 .init(method: "GET", statusCode: 500, headers: [:], chunks: [])
             ],
             retrySleep: { _ in
-                try? await Task.sleep(for: .milliseconds(100))
+                await retrySleepGate.enter()
+                // Sleep long enough that a slow CI won't expire it before the test cancels.
+                // Cancellation will interrupt this sleep immediately.
+                try? await Task.sleep(for: .seconds(10))
                 throw URLError(.cannotConnectToHost)
             }
         )
@@ -337,7 +359,7 @@ struct ModelDownloaderNetworkTests {
 
         context.downloader.start(model: context.model)
         try await waitForRequestCount(1)
-        try await Task.sleep(for: .milliseconds(20))
+        await retrySleepGate.waitUntilEntered()
         context.downloader.cancel()
         try await Task.sleep(for: .milliseconds(50))
 
@@ -401,7 +423,10 @@ struct ModelDownloaderNetworkTests {
         }
         let paths = testPaths()
         try paths.ensureModelsDirectory()
-        let model = singleFileModel(data: modelData)
+        let model = singleFileModel(
+            data: modelData,
+            id: "network-\(UUID().uuidString)"
+        )
         if resumePrefixLength > 0 {
             let artifact = model.artifacts[0]
             let directory = paths.modelsDirectory

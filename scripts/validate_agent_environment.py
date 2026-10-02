@@ -35,8 +35,6 @@ NESTED_AGENTS_PATHS = (
     Path("Packages/AGENTS.md"),
     Path("Packages/CNSSession/AGENTS.md"),
     Path("Packages/CNSDictionary/AGENTS.md"),
-    Path("src/AGENTS.md"),
-    Path("scripts/AGENTS.md"),
     Path("tests/AGENTS.md"),
 )
 REQUIRED_RULE_PREFIXES = (

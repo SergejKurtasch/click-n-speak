@@ -23,7 +23,7 @@
 | Gate | Result | Evidence |
 |---|---|---|
 | Fast Swift packages/application | Pending | `scripts/swift_verify.sh` |
-| Python ↔ Swift data compatibility | Pending | `tests/parity` |
+| Swift configuration migration | Pending | `Packages/CNSCore/Tests/CNSCoreTests/ParityDataCompatibilityTests.swift` |
 | Local Whisper model corpus | Pending | model-gated `CNSTranscription` suite |
 | Local Qwen editor corpus | Pending | model-gated `CNSEditors` suite |
 | Release build/signature | Pending | `scripts/swift_build_app.sh release` |
@@ -60,8 +60,8 @@ Record the machine-readable comparison against `tests/parity/quality_thresholds.
 
 - Sanitized copied dataset used:
 - Original copy hash/inventory:
-- Python reload result:
 - Swift migration result:
+- Unknown-key preservation result:
 - Rollback artifact/version:
 - Rollback instructions verified:
 
@@ -85,4 +85,5 @@ Add any other deviation with owner and approval. An undocumented deviation is a 
 - Rollout cohort:
 - Rollback window end:
 
-The Python artifact and rollback instructions must remain available for at least one complete Swift release cycle.
+The previous signed release artifact and Swift rollback instructions must remain
+available for at least one complete Swift release cycle.

@@ -15,7 +15,8 @@ from typing import Any
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / "scripts" / "benchmark_realtime_latency.py"
+SWIFT_ROOT = REPO_ROOT
+SCRIPT_PATH = SWIFT_ROOT / "scripts" / "benchmark_realtime_latency.py"
 
 
 def load_benchmark_module() -> ModuleType:

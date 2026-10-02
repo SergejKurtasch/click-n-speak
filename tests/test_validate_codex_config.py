@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from scripts.validate_codex_config import validate_codex_config
@@ -9,6 +10,8 @@ REPOSITORY_ROOT = Path(__file__).parent.parent
 FIXTURES = Path(__file__).parent / "fixtures" / "codex_config"
 VALIDATOR_SCRIPT = REPOSITORY_ROOT / "scripts" / "validate_codex_config.py"
 VENV_PYTHON = REPOSITORY_ROOT / "venv" / "bin" / "python"
+if not VENV_PYTHON.exists():
+    VENV_PYTHON = Path(sys.executable)
 
 
 def test_validate_codex_config_accepts_environment_reference_and_exact_npm_pin() -> None:

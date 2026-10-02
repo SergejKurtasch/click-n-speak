@@ -16,7 +16,15 @@ PACKAGES=(
 
 for package in "${PACKAGES[@]}"; do
     echo "==> Testing $package"
-    swift test --disable-index-store --package-path "$REPO_ROOT/Packages/$package"
+    if [ "$package" = "CNSSession" ]; then
+        # Xcode 16.4's Swift 6.1.2 frontend crashes while batch-compiling this
+        # test target on the macOS arm64 runner. Compile files independently
+        # until the runner toolchain includes the upstream compiler fix.
+        swift test --disable-index-store --package-path "$REPO_ROOT/Packages/$package" \
+            -Xswiftc -disable-batch-mode
+    else
+        swift test --disable-index-store --package-path "$REPO_ROOT/Packages/$package"
+    fi
     if [ "${CNS_CLEAN_AFTER_PACKAGE:-0}" = "1" ]; then
         echo "==> Cleaning generated build artifacts for $package"
         swift package --package-path "$REPO_ROOT/Packages/$package" clean
@@ -24,7 +32,10 @@ for package in "${PACKAGES[@]}"; do
 done
 
 echo "==> Testing ClickNSpeak"
-swift test --disable-index-store --package-path "$REPO_ROOT/ClickNSpeak"
+# CNSSession's tests are also built through the aggregate package. Keep the
+# same Xcode 16.4 compiler-crash workaround in this verification path.
+swift test --disable-index-store --package-path "$REPO_ROOT/ClickNSpeak" \
+    -Xswiftc -disable-batch-mode
 
 if [ "${CNS_RUN_MODEL_TESTS:-0}" = "1" ]; then
     echo "==> Running real-model 42-phrase golden parity suite"

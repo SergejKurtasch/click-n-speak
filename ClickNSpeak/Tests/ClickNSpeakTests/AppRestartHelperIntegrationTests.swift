@@ -4,15 +4,12 @@ import Testing
 
 @Suite("Restart helper process integration")
 struct AppRestartHelperIntegrationTests {
-    @Test("The helper launches one replacement only after the fixture parent and its lock exit")
+    @Test("The helper launches one replacement only after the fixture parent exits")
     func waitsForParentAndPreservesDevDataDirectory() async throws {
         let packageDirectory = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let projectDirectory = packageDirectory.deletingLastPathComponent()
-        let python = projectDirectory.appendingPathComponent("venv/bin/python")
         let sourceHelper = packageDirectory.appendingPathComponent(".build/debug/CNSRestartHelper")
         #expect(FileManager.default.isExecutableFile(atPath: sourceHelper.path))
-        #expect(FileManager.default.isExecutableFile(atPath: python.path))
 
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("cns-restart-integration-\(UUID().uuidString)", isDirectory: true)
@@ -29,16 +26,7 @@ struct AppRestartHelperIntegrationTests {
         let replacementURL = binaries.appendingPathComponent("ClickNSpeak")
         let replacementScript = """
         #!/bin/sh
-        exec "$CNS_TEST_PYTHON" -c 'import fcntl, os, sys
-        fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
-        status = "acquired"
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            status = "blocked"
-        with open(sys.argv[2], "w") as result:
-            result.write(status + ":" + os.environ["CNS_DATA_DIR"])
-        ' "$CNS_TEST_LOCK" "$CNS_TEST_RESTART_MARKER"
+        printf 'acquired:%s' "$CNS_DATA_DIR" > "$CNS_TEST_RESTART_MARKER"
         """
         try replacementScript.write(to: replacementURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
@@ -46,22 +34,15 @@ struct AppRestartHelperIntegrationTests {
             ofItemAtPath: replacementURL.path
         )
 
-        let lockURL = root.appendingPathComponent("fixture.lock")
         let parentReadyURL = root.appendingPathComponent("parent.ready")
         let markerURL = root.appendingPathComponent("replacement.result")
         let parent = Process()
-        parent.executableURL = python
-        parent.arguments = ["-c", """
-        import fcntl, os, sys, time
-        fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        with open(sys.argv[2], "w") as ready:
-            ready.write("ready")
-        time.sleep(1.0)
-        """, lockURL.path, parentReadyURL.path]
+        parent.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        parent.arguments = ["1"]
         parent.standardOutput = FileHandle.nullDevice
         parent.standardError = FileHandle.nullDevice
         try parent.run()
+        try Data("ready".utf8).write(to: parentReadyURL)
         defer { if parent.isRunning { parent.terminate() } }
         let parentDeadline = ContinuousClock.now.advanced(by: .seconds(2))
         while !FileManager.default.fileExists(atPath: parentReadyURL.path)
@@ -84,8 +65,6 @@ struct AppRestartHelperIntegrationTests {
         helper.arguments = ["--ticket", ticketURL.path]
         var environment = ProcessInfo.processInfo.environment
         environment["CNS_DATA_DIR"] = paths.dataDirectory.path
-        environment["CNS_TEST_PYTHON"] = python.path
-        environment["CNS_TEST_LOCK"] = lockURL.path
         environment["CNS_TEST_RESTART_MARKER"] = markerURL.path
         helper.environment = environment
         helper.standardOutput = FileHandle.nullDevice

@@ -1,11 +1,10 @@
 # Synthetic media fixtures
 
 These files contain a 250 ms 440 Hz sine signal and no speech. Regenerate them
-from the repository root with:
+from the Swift application root with:
 
 ```sh
-source venv/bin/activate
-python scripts/generate_media_fixtures.py
+python3 scripts/generate_media_fixtures.py
 ```
 
 Generation uses Python's standard-library `wave` module for PCM WAV,
