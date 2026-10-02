@@ -327,12 +327,13 @@ struct AppDelegateStartupTests {
         #expect(try Data(contentsOf: paths.configFile) == original)
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         var names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
-        while names.contains(where: { $0.hasPrefix("Click-n-speak.log.sb-") })
+        while names.contains(where: { $0.hasPrefix("Click-n-speak.log.sb-") || $0.hasPrefix(".dat.nosync") })
                 && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
             names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         }
-        #expect(Set(names).isSubset(of: ["config.json", ".instance.lock", "Click-n-speak.log"]))
+        let finalNames = names.filter { !$0.hasPrefix(".dat.nosync") && !$0.hasPrefix("Click-n-speak.log.sb-") }
+        #expect(Set(finalNames).isSubset(of: ["config.json", ".instance.lock", "Click-n-speak.log"]))
         #expect(!FileManager.default.fileExists(atPath: paths.phraseHistoryFile.path))
         #expect(!FileManager.default.fileExists(atPath: paths.correctionsFile.path))
         #expect(!FileManager.default.fileExists(atPath: paths.initialPromptFile(lang: "ru").path))
