@@ -1,17 +1,27 @@
 # Click-n-speak
 
-Click-n-speak is a macOS menu-bar speech-to-text application. This repository
-contains the SwiftPM application, packages, native resources, tests, release
-scripts, and current documentation:
+Click-n-speak — это удобное macOS-приложение в строке меню для перевода речи в текст (speech-to-text).
 
-The former Python implementation is frozen outside Git at
-`/Users/sergej/Click-n-speak-python-legacy-archive` for rollback reference;
-the repository has no runtime or parity dependency on it.
+## 🚀 Установка и использование
 
-## Development
+1. Перейдите в раздел **[Releases](https://github.com/SergejKurtasch/click-n-speak/releases/latest)** на GitHub.
+2. Скачайте файл **`Click-n-speak-macOS.dmg`**.
+3. Откройте DMG и перетащите приложение в папку "Программы" (Applications).
+4. Запустите приложение. Оно появится в верхней строке меню (menu bar).
 
+**Особенности работы с моделями:**
+* Приложение **автоматически подгрузит** нужные локальные модели для распознавания голоса при первом использовании. Вам не нужно ничего скачивать вручную!
+* Если локальные модели вас не устраивают (например, работают медленно на вашем Mac или нужен другой уровень качества), вы можете использовать облачное распознавание. Просто введите свои **API ключи** (OpenAI, Gemini и т.д.) в настройках приложения.
+
+## 🛠 Для разработчиков (Development)
+
+Приложение полностью написано на нативном Swift (SwiftPM).
+
+**Запуск тестов и локальная сборка:**
 ```bash
-swift test --disable-index-store --package-path Packages/<Package>
+swift test --disable-index-store --package-path Packages/CNSCore
 swift test --disable-index-store --package-path ClickNSpeak
 bash scripts/swift_verify.sh
 ```
+
+*(Примечание: старая Python-версия приложения полностью удалена из репозитория и проект переведён на 100% нативный код Swift).*
