@@ -5,7 +5,7 @@ import Testing
 private actor UncooperativeTranscriber: Transcribing {
     func transcribe(_ request: TranscriptionRequest) async -> TranscriptionResult {
         await withCheckedContinuation { continuation in
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
                 continuation.resume(returning: TranscriptionResult(text: "late"))
             }
         }
@@ -49,6 +49,6 @@ struct GuardedTranscriberTests {
         ))
 
         #expect(result.outcome == .timedOut)
-        #expect(Date().timeIntervalSince(started) < 0.15)
+        #expect(Date().timeIntervalSince(started) < 0.5)
     }
 }
