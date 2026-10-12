@@ -56,6 +56,38 @@ struct HallucinationFilterTests {
         #expect(filter.filter("hello world", isFinal: false) == "hello world")
         #expect(filter.filter("… привет.", isFinal: true) == "привет")
     }
+
+    @Test("Whole chunk prompt echoes are dropped completely")
+    func promptEchoWholeChunk() {
+        #expect(filter.filter("English language", isFinal: true) == "")
+        #expect(filter.filter("English language.", isFinal: true) == "")
+        #expect(filter.filter("Русский язык", isFinal: true) == "")
+        #expect(filter.filter("Русский язык.", isFinal: true) == "")
+        #expect(filter.filter("Русский язык, Русский язык", isFinal: true) == "")
+        #expect(filter.filter("Это разговорная речь.", isFinal: true) == "")
+        #expect(filter.filter("Это разговорная речь. Используются профессиональные термины и аббревиатуры.", isFinal: true) == "")
+    }
+
+    @Test("Prompt language hints at boundaries are stripped")
+    func promptEchoBoundaries() {
+        let sentenceWithEnglishTail = "Если пользователь захочет собирать аппликейшн, то ему нужен установленный x код на макбуке English language"
+        #expect(filter.filter(sentenceWithEnglishTail, isFinal: true) == "Если пользователь захочет собирать аппликейшн, то ему нужен установленный x код на макбуке")
+
+        let withPeriod = "x код на макбуке English language."
+        #expect(filter.filter(withPeriod, isFinal: true) == "x код на макбуке")
+
+        let leadingRussian = "Русский язык Посмотри на текущее состояние"
+        #expect(filter.filter(leadingRussian, isFinal: true) == "Посмотри на текущее состояние")
+
+        let leadingRussianWithDot = "Русский язык. Оставь все как есть."
+        #expect(filter.filter(leadingRussianWithDot, isFinal: true) == "Оставь все как есть")
+    }
+
+    @Test("Legitimate occurrences with prepositions are preserved")
+    func legitimateLanguagePhrasesPreserved() {
+        #expect(filter.filter("Переведи на русский язык", isFinal: true) == "Переведи на русский язык")
+        #expect(filter.filter("Переведи финальную версию на русский язык.", isFinal: true) == "Переведи финальную версию на русский язык")
+    }
 }
 
 @Suite("AudioGuards")
@@ -67,6 +99,12 @@ struct AudioGuardsTests {
         // Above the threshold is fine.
         let bigger = [Float](repeating: 0.1, count: 8001)
         #expect(AudioGuards.skipReason(sampleCount: 8001, samples: bigger, isFinal: true) == nil)
+    }
+
+    @Test("Silent short final chunk is skipped")
+    func silentShortFinal() {
+        let quiet = [Float](repeating: 0.001, count: 10115) // ~0.63s silence
+        #expect(AudioGuards.skipReason(sampleCount: 10115, samples: quiet, isFinal: true) == .silentShortChunk)
     }
 
     @Test("Silent short non-final chunk is skipped")

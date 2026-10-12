@@ -36,7 +36,7 @@ public enum AudioGuards {
         if isFinal && sampleCount <= minFinalChunkSamples {
             return .tinyFinalChunk
         }
-        if !isFinal && sampleCount < shortChunkSamples && isSilent(samples) {
+        if sampleCount < shortChunkSamples && isSilent(samples) {
             return .silentShortChunk
         }
         return nil

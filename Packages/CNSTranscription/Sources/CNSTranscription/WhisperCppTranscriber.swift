@@ -212,7 +212,7 @@ public actor WhisperCppTranscriber: Transcribing {
                 ))
                 switch result.outcome {
                 case .success:
-                    let cleaned = HallucinationFilter().filter(result.text, isFinal: next == nil)
+                    let cleaned = HallucinationFilter().filter(result.text, isFinal: next == nil, promptContext: request.initialPrompt)
                     transcript.append(text: cleaned, detectedLanguage: result.detectedLanguage)
                 case .noSpeech, .guarded:
                     break

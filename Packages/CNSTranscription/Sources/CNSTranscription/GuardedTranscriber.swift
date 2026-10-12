@@ -37,7 +37,7 @@ public struct GuardedTranscriber: Transcribing {
         }
         guard !result.text.isEmpty else { return result }
 
-        let cleaned = filter.filter(result.text, isFinal: request.isFinalChunk)
+        let cleaned = filter.filter(result.text, isFinal: request.isFinalChunk, promptContext: request.initialPrompt)
         guard !cleaned.isEmpty else {
             var guarded = result
             guarded.text = ""
