@@ -2,6 +2,7 @@
 import CNSCore
 import Foundation
 import Testing
+import CNSObjCExceptionCatcher
 @testable import CNSAudio
 
 @Suite("AudioRecorder lifecycle validation")
@@ -13,11 +14,14 @@ struct AudioRecorderLifecycleTests {
         var converterAvailable = true
         var configurationChangeDuringConverter = false
         var startError: Error?
+        var installTapError: Error?
+        var failInstallTapTimes = 0
         var removeTapDelay: TimeInterval = 0
         private(set) var installTapCount = 0
         private(set) var removeTapCount = 0
         private(set) var startCount = 0
         private(set) var stopCount = 0
+        private(set) var resetEngineCount = 0
         private var tapHandlers: [@Sendable (AVAudioPCMBuffer) -> Void] = []
         private var configurationChangeHandler: (@Sendable () -> Void)?
 
@@ -54,9 +58,16 @@ struct AudioRecorderLifecycleTests {
             bufferSize: AVAudioFrameCount,
             inputFormat: AudioInputFormatSnapshot,
             handler: @escaping @Sendable (AVAudioPCMBuffer) -> Void
-        ) {
-            lock.withLock {
+        ) throws {
+            try lock.withLock {
                 installTapCount += 1
+                if failInstallTapTimes > 0 {
+                    failInstallTapTimes -= 1
+                    throw installTapError ?? AudioRecorderError.tapInstallFailed("Simulated tap failure")
+                }
+                if let installTapError {
+                    throw installTapError
+                }
                 tapHandlers.append(handler)
             }
         }
@@ -71,6 +82,7 @@ struct AudioRecorderLifecycleTests {
             if let startError { throw startError }
         }
         func stop() { lock.withLock { stopCount += 1 } }
+        func resetEngine() { lock.withLock { resetEngineCount += 1 } }
 
         func setConfigurationChangeHandler(_ handler: @escaping @Sendable () -> Void) {
             lock.withLock { configurationChangeHandler = handler }
@@ -236,6 +248,55 @@ struct AudioRecorderLifecycleTests {
 
         #expect(finals.snapshot.count == 2)
         #expect(finals.snapshot.allSatisfy { $0 == nil })
+    }
+
+    @Test("An installTap failure triggers engine reset and succeeds on retry")
+    func installTapFailureRetriesAfterReset() async throws {
+        let adapter = FakeAudioEngineAdapter()
+        adapter.failInstallTapTimes = 1
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+
+        try await recorder.start(callbacks: .init())
+        #expect(recorder.isRecording)
+        #expect(adapter.installTapCount == 2)
+        #expect(adapter.resetEngineCount == 1)
+        await recorder.stop()
+    }
+
+    @Test("A permanent installTap failure throws tapInstallFailed error")
+    func installTapPermanentFailureThrows() async {
+        let adapter = FakeAudioEngineAdapter()
+        adapter.installTapError = AudioRecorderError.tapInstallFailed("Simulated persistent crash")
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+
+        await #expect(throws: AudioRecorderError.tapInstallFailed("Simulated persistent crash")) {
+            try await recorder.start(callbacks: .init())
+        }
+        #expect(recorder.isRecording == false)
+        #expect(adapter.installTapCount == 2)
+        #expect(adapter.resetEngineCount == 1)
+    }
+
+    @Test("Configuration change in idle triggers resetEngine on next start")
+    func configurationChangeInIdleTriggersResetEngine() async throws {
+        let adapter = FakeAudioEngineAdapter()
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+
+        adapter.emitConfigurationChange()
+        #expect(adapter.resetEngineCount == 0)
+
+        try await recorder.start(callbacks: .init())
+        #expect(adapter.resetEngineCount == 1)
+        await recorder.stop()
+    }
+
+    @Test("CNSObjCExceptionCatcher catches NSException and throws Error")
+    func objcExceptionCatcher() {
+        #expect(throws: (any Error).self) {
+            try CNSObjCExceptionCatcher.perform {
+                NSException(name: NSExceptionName("TestAudioException"), reason: "TestAudioReason", userInfo: nil).raise()
+            }
+        }
     }
 
     private func settle() async {

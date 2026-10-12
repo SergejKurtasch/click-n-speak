@@ -16,6 +16,7 @@ public enum AudioRecorderError: LocalizedError, Sendable, Equatable {
     case invalidInputFormat(sampleRate: Double, channels: Int)
     case converterUnavailable
     case engineStartFailed(String)
+    case tapInstallFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -25,7 +26,14 @@ public enum AudioRecorderError: LocalizedError, Sendable, Equatable {
             "The microphone format could not be converted"
         case let .engineStartFailed(message):
             "The audio engine could not start: \(message)"
+        case let .tapInstallFailed(message):
+            "The audio capture tap could not be installed: \(message)"
         }
+    }
+
+    var isTapInstallFailure: Bool {
+        if case .tapInstallFailed = self { return true }
+        return false
     }
 }
 
@@ -63,6 +71,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         var pendingFrame: [Float] = []    // leftover < one VAD frame
         var overflowSamples = 0
         var maximumTapDurationMs = 0.0
+        var engineNeedsReset = false
     }
     private var consumerTask: Task<Void, Never>?
 
@@ -171,42 +180,36 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         let inputSampleRate: Double
         do {
             inputSampleRate = try engineLock.withLock {
-                try ensureStartIsActive(generation: generation)
-                stateLock.withLock { state in
-                    if state.generation == generation { state.graphSetupInProgress = true }
+                let needsReset = stateLock.withLock { state -> Bool in
+                    let r = state.engineNeedsReset
+                    state.engineNeedsReset = false
+                    return r
                 }
-                let inputFormat = engineAdapter.inputFormatSnapshot()
-                try Self.validateInputFormat(
-                    sampleRate: inputFormat.sampleRate,
-                    channels: inputFormat.channelCount
-                )
-                guard let newConverter = engineAdapter.makeConverter(
-                    from: inputFormat,
-                    to: targetFormat
-                ) else {
-                    throw AudioRecorderError.converterUnavailable
+                if needsReset {
+                    log("Resetting audio engine before capture start due to configuration change")
+                    engineAdapter.resetEngine()
                 }
-                try ensureStartIsActive(generation: generation)
-                converter = newConverter
-                engineAdapter.installTap(bufferSize: 1024, inputFormat: inputFormat) { [weak self] buffer in
-                    self?.handleTap(buffer, generation: generation)
-                }
-                stateLock.withLock { state in
-                    if state.generation == generation { state.tapInstalled = true }
-                }
-                try ensureStartIsActive(generation: generation)
-                engineAdapter.prepare()
-                try ensureStartIsActive(generation: generation)
+                return try setupAndStartEngine(generation: generation)
+            }
+        } catch let error as AudioRecorderError where error.isTapInstallFailure {
+            let retryResult: Result<Double, Error> = engineLock.withLock {
+                log("Audio tap installation failed (\(error.localizedDescription)), attempting engine reset and retry...")
+                teardownEngineSetup()
+                engineAdapter.resetEngine()
                 do {
-                    try engineAdapter.start()
-                } catch {
-                    throw AudioRecorderError.engineStartFailed(error.localizedDescription)
+                    let rate = try setupAndStartEngine(generation: generation)
+                    return .success(rate)
+                } catch let retryError {
+                    return .failure(retryError)
                 }
-                try ensureStartIsActive(generation: generation)
-                stateLock.withLock { state in
-                    if state.generation == generation { state.graphSetupInProgress = false }
-                }
-                return inputFormat.sampleRate
+            }
+            switch retryResult {
+            case let .success(rate):
+                inputSampleRate = rate
+            case let .failure(finalError):
+                scheduleGraphTeardownIfNeeded(generation: generation)
+                resetFailedStart(generation: generation)
+                throw finalError
             }
         } catch {
             scheduleGraphTeardownIfNeeded(generation: generation)
@@ -316,6 +319,9 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     }
 
     private func handleConfigurationChange() {
+        stateLock.withLock { state in
+            state.engineNeedsReset = true
+        }
         let callback = stateLock.withLock { state -> Callbacks? in
             guard state.recording,
                   !state.stopping,
@@ -386,6 +392,56 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         if !active { throw CancellationError() }
     }
 
+    private func setupAndStartEngine(generation: Int) throws -> Double {
+        try ensureStartIsActive(generation: generation)
+        stateLock.withLock { state in
+            if state.generation == generation { state.graphSetupInProgress = true }
+        }
+        let inputFormat = engineAdapter.inputFormatSnapshot()
+        log("Input format snapshot: \(inputFormat.sampleRate) Hz, \(inputFormat.channelCount) channels")
+        try Self.validateInputFormat(
+            sampleRate: inputFormat.sampleRate,
+            channels: inputFormat.channelCount
+        )
+        guard let newConverter = engineAdapter.makeConverter(
+            from: inputFormat,
+            to: targetFormat
+        ) else {
+            throw AudioRecorderError.converterUnavailable
+        }
+        try ensureStartIsActive(generation: generation)
+        converter = newConverter
+        try engineAdapter.installTap(bufferSize: 1024, inputFormat: inputFormat) { [weak self] buffer in
+            self?.handleTap(buffer, generation: generation)
+        }
+        stateLock.withLock { state in
+            if state.generation == generation { state.tapInstalled = true }
+        }
+        try ensureStartIsActive(generation: generation)
+        engineAdapter.prepare()
+        try ensureStartIsActive(generation: generation)
+        do {
+            try engineAdapter.start()
+        } catch {
+            throw AudioRecorderError.engineStartFailed(error.localizedDescription)
+        }
+        try ensureStartIsActive(generation: generation)
+        stateLock.withLock { state in
+            if state.generation == generation { state.graphSetupInProgress = false }
+        }
+        return inputFormat.sampleRate
+    }
+
+    private func teardownEngineSetup() {
+        engineAdapter.removeTap()
+        engineAdapter.stop()
+        converter = nil
+        stateLock.withLock { state in
+            state.tapInstalled = false
+            state.graphSetupInProgress = false
+        }
+    }
+
     private func resetFailedStart(generation: Int) {
         stateLock.withLock { state in
             guard state.generation == generation else { return }
@@ -395,6 +451,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             state.tapInstalled = false
             state.graphSetupInProgress = false
             state.interruptionReported = false
+            state.engineNeedsReset = true
             state.callbacks = Callbacks()
         }
         converter = nil

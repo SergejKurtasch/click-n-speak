@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Foundation
+import CNSObjCExceptionCatcher
 
 public struct AudioInputFormatSnapshot: @unchecked Sendable {
     public let sampleRate: Double
@@ -35,16 +36,21 @@ public protocol AudioEngineAdapting: AnyObject, Sendable {
         bufferSize: AVAudioFrameCount,
         inputFormat: AudioInputFormatSnapshot,
         handler: @escaping @Sendable (AVAudioPCMBuffer) -> Void
-    )
+    ) throws
     func removeTap()
     func prepare()
     func start() throws
     func stop()
+    func resetEngine()
     func setConfigurationChangeHandler(_ handler: @escaping @Sendable () -> Void)
 }
 
+public extension AudioEngineAdapting {
+    func resetEngine() {}
+}
+
 final class AVAudioEngineAdapter: AudioEngineAdapting, @unchecked Sendable {
-    private let engine = AVAudioEngine()
+    private var engine: AVAudioEngine
     private let notificationCenter: NotificationCenter
     private let handlerLock = NSLock()
     private var configurationChangeHandler: (@Sendable () -> Void)?
@@ -52,9 +58,11 @@ final class AVAudioEngineAdapter: AudioEngineAdapting, @unchecked Sendable {
 
     init(notificationCenter: NotificationCenter = .default) {
         self.notificationCenter = notificationCenter
-        observer = notificationCenter.addObserver(
+        let initialEngine = AVAudioEngine()
+        self.engine = initialEngine
+        self.observer = notificationCenter.addObserver(
             forName: .AVAudioEngineConfigurationChange,
-            object: engine,
+            object: initialEngine,
             queue: nil
         ) { [weak self] _ in
             let handler = self?.handlerLock.withLock { self?.configurationChangeHandler }
@@ -68,8 +76,29 @@ final class AVAudioEngineAdapter: AudioEngineAdapting, @unchecked Sendable {
         }
     }
 
+    func resetEngine() {
+        handlerLock.withLock {
+            if let observer {
+                notificationCenter.removeObserver(observer)
+                self.observer = nil
+            }
+            engine.stop()
+            let newEngine = AVAudioEngine()
+            self.engine = newEngine
+            self.observer = notificationCenter.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: newEngine,
+                queue: nil
+            ) { [weak self] _ in
+                let handler = self?.handlerLock.withLock { self?.configurationChangeHandler }
+                handler?()
+            }
+        }
+    }
+
     func inputFormatSnapshot() -> AudioInputFormatSnapshot {
-        AudioInputFormatSnapshot(engine.inputNode.outputFormat(forBus: 0))
+        let input = handlerLock.withLock { engine.inputNode }
+        return AudioInputFormatSnapshot(input.outputFormat(forBus: 0))
     }
 
     func makeConverter(
@@ -84,22 +113,49 @@ final class AVAudioEngineAdapter: AudioEngineAdapting, @unchecked Sendable {
         bufferSize: AVAudioFrameCount,
         inputFormat: AudioInputFormatSnapshot,
         handler: @escaping @Sendable (AVAudioPCMBuffer) -> Void
-    ) {
+    ) throws {
         guard let nativeFormat = inputFormat.nativeFormat else { return }
-        let input = engine.inputNode
-        input.installTap(
-            onBus: 0,
-            bufferSize: bufferSize,
-            format: nativeFormat
-        ) { buffer, _ in
-            handler(buffer)
+        let input = handlerLock.withLock { engine.inputNode }
+
+        // Defensively remove any lingering tap on bus 0 before installing
+        _ = try? CNSObjCExceptionCatcher.perform {
+            input.removeTap(onBus: 0)
+        }
+
+        do {
+            try CNSObjCExceptionCatcher.perform {
+                input.installTap(
+                    onBus: 0,
+                    bufferSize: bufferSize,
+                    format: nativeFormat
+                ) { buffer, _ in
+                    handler(buffer)
+                }
+            }
+        } catch {
+            throw AudioRecorderError.tapInstallFailed(error.localizedDescription)
         }
     }
 
-    func removeTap() { engine.inputNode.removeTap(onBus: 0) }
-    func prepare() { engine.prepare() }
-    func start() throws { try engine.start() }
-    func stop() { engine.stop() }
+    func removeTap() {
+        let input = handlerLock.withLock { engine.inputNode }
+        _ = try? CNSObjCExceptionCatcher.perform {
+            input.removeTap(onBus: 0)
+        }
+    }
+
+    func prepare() {
+        handlerLock.withLock { engine.prepare() }
+    }
+
+    func start() throws {
+        let currentEngine = handlerLock.withLock { engine }
+        try currentEngine.start()
+    }
+
+    func stop() {
+        handlerLock.withLock { engine.stop() }
+    }
 
     func setConfigurationChangeHandler(_ handler: @escaping @Sendable () -> Void) {
         handlerLock.withLock { configurationChangeHandler = handler }

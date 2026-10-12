@@ -15,14 +15,15 @@ let package = Package(
         // Python app uses via webrtcvad, so the chunking thresholds carry over
         // without recalibration. Pure C, compiled from source — no prebuilt binary.
         .target(name: "Cfvad"),
+        .target(name: "CNSObjCExceptionCatcher"),
         .target(
             name: "CNSAudio",
-            dependencies: ["CNSCore", "Cfvad"],
+            dependencies: ["CNSCore", "Cfvad", "CNSObjCExceptionCatcher"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "CNSAudioTests",
-            dependencies: ["CNSAudio"],
+            dependencies: ["CNSAudio", "CNSObjCExceptionCatcher"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]
