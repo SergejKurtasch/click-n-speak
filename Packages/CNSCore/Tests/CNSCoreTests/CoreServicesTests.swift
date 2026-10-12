@@ -167,7 +167,7 @@ struct ValidatedConfigTests {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let config = try Config.loadValidated(from: url)
         #expect(config.schemaVersion == 10)
-        #expect(config.primaryLanguage == "ru")
+        #expect(config.primaryLanguage == "en")
         #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 

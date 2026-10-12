@@ -146,7 +146,7 @@ public enum VocabProvider {
         if let langs = languages {
             targetLangs = Array(NSOrderedSet(array: langs)) as! [String]
         } else {
-            let primary = config.objectValue?["primary_language"]?.stringValue ?? "ru"
+            let primary = config.objectValue?["primary_language"]?.stringValue ?? "en"
             targetLangs.append(primary)
             if let arr = config.objectValue?["additional_languages"]?.arrayValue {
                 for v in arr {

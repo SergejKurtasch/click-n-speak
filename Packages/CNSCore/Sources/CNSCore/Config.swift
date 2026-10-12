@@ -106,7 +106,7 @@ public struct Config: Sendable, Equatable {
         if let list = obj["languages"]?.arrayValue, let first = list.first?.stringValue {
             return LanguageCode.normalize(first)
         }
-        return "ru"
+        return "en"
     }
 
     public var primaryLanguage: String { Config.primaryLanguage(raw) }
@@ -161,18 +161,18 @@ public struct Config: Sendable, Equatable {
             let target = try readDouble("target_speech_duration", legacy: "target_chunk_duration") ?? 4.0
             let minC = try readDouble("min_speech_duration", legacy: "min_chunk_duration") ?? 1.0
             let maxC = try readDouble("max_speech_duration", legacy: "max_chunk_duration") ?? 8.0
-            
+
             guard silence.isFinite else { throw RecordingSettingsError.nonFinite(field: "silence_duration") }
             guard target.isFinite else { throw RecordingSettingsError.nonFinite(field: "target_speech_duration") }
             guard minC.isFinite else { throw RecordingSettingsError.nonFinite(field: "min_speech_duration") }
             guard maxC.isFinite else { throw RecordingSettingsError.nonFinite(field: "max_speech_duration") }
             guard silence > 0 else { throw RecordingSettingsError.nonPositive(field: "silence_duration") }
             guard target > 0 else { throw RecordingSettingsError.nonPositive(field: "target_speech_duration") }
-            
+
             guard minC >= 0, minC <= target, target <= maxC else {
                 throw RecordingSettingsError.invalidOrdering
             }
-            
+
             return RecordingSettings(
                 silenceDurationLimit: silence,
                 targetChunkDuration: target,
@@ -181,7 +181,7 @@ public struct Config: Sendable, Equatable {
             )
         }
     }
-    
+
     private func readDouble(_ key: String, legacy: String) throws -> Double? {
         let selectedKey = raw[key] == nil ? legacy : key
         guard let value = raw[selectedKey] else { return nil }
