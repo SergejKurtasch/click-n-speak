@@ -496,6 +496,63 @@ struct RuntimeTelemetryTests {
         try await operation(controller, recorder, panel, logURL)
     }
 
+    @Test("chunk_processed includes detected language and editor_refine includes error reason")
+    func telemetryCapturesLanguageAndEditorReason() async throws {
+        let sink = TestScopedMemorySink(owner: try #require(Test.current?.id))
+        RuntimeTelemetry.configure(sink: sink)
+        defer { RuntimeTelemetry.configure(sink: InMemoryRuntimeTelemetrySink()) }
+
+        var raw = JSONObject()
+        raw["schema_version"] = .int(10)
+        raw["primary_language"] = .string("ru")
+        raw["ai_editor_enabled"] = .bool(true)
+        raw["ai_editor_backend"] = .string("local")
+
+        final class FailingEditor: AiEditing, @unchecked Sendable {
+            let descriptor = AiEditorDescriptor(backend: "local", modelID: "qwen", kind: .local)
+            var isReady: Bool { true }
+            func refine(text: String, languages: [String]?, knownTerms: [String]?, misrecognitions: [(String, String)]?) async -> RefineResult {
+                RefineResult(text: text, status: .error, reason: "words_changed")
+            }
+            func refineFileText(text: String, languages: [String]?, knownTerms: [String]?, misrecognitions: [(String, String)]?) async -> RefineResult {
+                RefineResult(text: text, status: .error, reason: "words_changed")
+            }
+        }
+
+        let panel = FakePanel()
+        let recorder = FakeRecorder()
+        let transcriber = FakeTranscriber(
+            results: [TranscriptionResult(text: "тестовый текст", detectedLanguage: "ru")]
+        )
+        let controller = SessionController(
+            config: Config(raw: raw),
+            transcriber: transcriber,
+            aiEditor: FailingEditor(),
+            recorder: recorder,
+            panel: panel,
+            delivery: FakeDelivery(),
+            frontmost: FakeFrontmost()
+        )
+
+        controller.toggle(now: Date())
+        await settle()
+        recorder.finalChunk = [Float](repeating: 0.2, count: 16_000)
+        controller.toggle(now: Date().addingTimeInterval(1))
+        await settle(40)
+        panel.userCancels()
+        await settle()
+        await RuntimeTelemetry.drain()
+
+        let chunkEvents = sink.events.filter { $0["event"] as? String == "chunk_processed" }
+        #expect(!chunkEvents.isEmpty)
+        #expect(chunkEvents.first?["detected_language"] as? String == "ru")
+
+        let editorEvents = sink.events.filter { $0["event"] as? String == "editor_refine" }
+        #expect(!editorEvents.isEmpty)
+        #expect(editorEvents.first?["reason"] as? String == "words_changed")
+        #expect(editorEvents.first?["outcome"] as? String == "error")
+    }
+
     private func readEvents(_ url: URL) throws -> [[String: Any]] {
         try String(contentsOf: url, encoding: .utf8).split(separator: "\n").compactMap { line in
             guard let marker = line.range(of: "runtime_event ") else { return nil }

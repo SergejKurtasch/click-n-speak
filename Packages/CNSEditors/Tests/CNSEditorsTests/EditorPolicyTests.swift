@@ -58,6 +58,16 @@ struct EditorPolicyTests {
             multiplier: 2.5
         )
 
-        #expect(result == RefineResult(text: source, status: .error))
+        #expect(result == RefineResult(text: source, status: .error, reason: "words_changed"))
+        #expect(result.reason == "words_changed")
+    }
+
+    @Test("Validation rejects output exceeding length multiplier")
+    func validationRejectsExcessiveLength() {
+        let source = "Short phrase"
+        let longOutput = String(repeating: "Very long output text! ", count: 20)
+        let result = EditorPolicy.validatedOutput(longOutput, original: source, multiplier: 2.0)
+        #expect(result.status == .error)
+        #expect(result.reason == "length_exceeded")
     }
 }

@@ -39,10 +39,20 @@ public extension AiEditing {
 public struct RefineResult: Sendable, Equatable {
     public let text: String
     public let status: RefineStatus
+    public let reason: String?
 
-    public init(text: String, status: RefineStatus) {
+    public init(text: String, status: RefineStatus, reason: String? = nil) {
         self.text = text
         self.status = status
+        self.reason = reason
+    }
+
+    public static func == (lhs: RefineResult, rhs: RefineResult) -> Bool {
+        guard lhs.text == rhs.text && lhs.status == rhs.status else { return false }
+        if let lr = lhs.reason, let rr = rhs.reason {
+            return lr == rr
+        }
+        return true
     }
 }
 

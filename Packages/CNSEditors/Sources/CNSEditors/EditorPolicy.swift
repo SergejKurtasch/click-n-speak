@@ -68,8 +68,11 @@ public enum EditorPolicy {
             return RefineResult(text: original, status: .unchanged)
         }
         let cleaned = normalizeSentenceEnding(trimmed)
-        guard !cleaned.isEmpty, cleaned.count <= max(original.count + 32, Int(Double(original.count) * multiplier)) else {
-            return RefineResult(text: original, status: .error)
+        guard !cleaned.isEmpty else {
+            return RefineResult(text: original, status: .error, reason: "empty_output")
+        }
+        guard cleaned.count <= max(original.count + 32, Int(Double(original.count) * multiplier)) else {
+            return RefineResult(text: original, status: .error, reason: "length_exceeded")
         }
         return RefineResult(text: cleaned, status: .ok)
     }
@@ -90,7 +93,7 @@ public enum EditorPolicy {
             candidate: result.text,
             languages: languages
         ) else {
-            return RefineResult(text: original, status: .error)
+            return RefineResult(text: original, status: .error, reason: "words_changed")
         }
         return result
     }

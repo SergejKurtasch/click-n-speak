@@ -974,13 +974,17 @@ public final class SessionController {
                 0,
                 Int((ProcessInfo.processInfo.systemUptime - editorStartedAt) * 1000)
             )
-            RuntimeTelemetry.emitRuntimeEvent("editor_refine", fields: [
+            var telemetryFields: [String: Any] = [
                 "session_id": id,
                 "editor_latency_ms": refineLatencyMs!,
                 "outcome": result.status.rawValue,
                 "editor_backend": activeSessionRuntimeDescriptor.aiEditor.backend,
                 "editor_model": activeSessionRuntimeDescriptor.aiEditor.modelID ?? "none"
-            ])
+            ]
+            if let reason = result.reason {
+                telemetryFields["reason"] = reason
+            }
+            RuntimeTelemetry.emitRuntimeEvent("editor_refine", fields: telemetryFields)
             if result.status == .ok {
                 fullText = result.text
             }
@@ -1519,6 +1523,9 @@ public final class SessionController {
             "stt_model": result.modelID ?? activeSessionRuntimeDescriptor.transcriber.modelID,
             "retry_count": result.retryCount,
         ]
+        if !result.detectedLanguage.isEmpty {
+            fields["detected_language"] = result.detectedLanguage
+        }
         if let stages = result.stageDurations {
             if let langDetect = stages.languageDetectionSeconds {
                 fields["language_detection_ms"] = langDetect * 1000

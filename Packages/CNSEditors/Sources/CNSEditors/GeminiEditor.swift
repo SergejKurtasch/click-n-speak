@@ -185,7 +185,7 @@ public actor GeminiEditor: AiEditing {
                 let response = try await client.send(request)
                 guard (200..<300).contains(response.statusCode) else {
                     _ = response.data.prefix(8_192)
-                    return RefineResult(text: text, status: .error)
+                    return RefineResult(text: text, status: .error, reason: "http_\(response.statusCode)")
                 }
                 guard response.data.count <= 2_000_000,
                       let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any],
@@ -193,21 +193,21 @@ public actor GeminiEditor: AiEditing {
                       let content = candidates.first?["content"] as? [String: Any],
                       let parts = content["parts"] as? [[String: Any]],
                       let output = parts.first?["text"] as? String else {
-                    return RefineResult(text: text, status: .error)
+                    return RefineResult(text: text, status: .error, reason: "malformed_response")
                 }
                 return EditorPolicy.validatedOutput(output, original: text, multiplier: 3)
             } catch is CancellationError {
-                return RefineResult(text: text, status: .skipped)
+                return RefineResult(text: text, status: .skipped, reason: "task_cancelled")
             } catch let error as URLError where error.code == .timedOut {
-                return RefineResult(text: text, status: .timeout)
+                return RefineResult(text: text, status: .timeout, reason: "network_timeout")
             } catch {
-                return RefineResult(text: text, status: .error)
+                return RefineResult(text: text, status: .error, reason: "network_error")
             }
         }
         return await AsyncDeadline.race(
             operation: operation,
             timeout: timeout,
-            timeoutValue: RefineResult(text: text, status: .timeout)
+            timeoutValue: RefineResult(text: text, status: .timeout, reason: "timeout")
         )
     }
 

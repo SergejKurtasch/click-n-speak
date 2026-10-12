@@ -243,9 +243,9 @@ public actor LocalAiEditor: AiEditing {
                     multiplier: 2.5
                 )
             } catch is CancellationError {
-                return RefineResult(text: text, status: .timeout)
+                return RefineResult(text: text, status: .timeout, reason: "task_cancelled")
             } catch {
-                return RefineResult(text: text, status: .error)
+                return RefineResult(text: text, status: .error, reason: "generator_error")
             }
         }
 
@@ -255,7 +255,7 @@ public actor LocalAiEditor: AiEditing {
         let result = await AsyncDeadline.race(
             operation: operation,
             timeout: timeout,
-            timeoutValue: RefineResult(text: text, status: .timeout)
+            timeoutValue: RefineResult(text: text, status: .timeout, reason: "timeout")
         )
         if result.status == .ok || result.status == .unchanged {
             lastWarmedAt = now()
