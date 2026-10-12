@@ -1,19 +1,39 @@
 # Verification
 
-Use the repository virtual environment for root tooling and contract tests:
-`venv/bin/python -m pytest <test-path> -q`. Set up the local command-line
-toolchain with `brew bundle`, then use `venv/bin/python
-scripts/check_dev_environment.py` as the first diagnostic command. The doctor
-is read-only and reports missing dependencies without installing them.
-For Swift package work, run `swift test --disable-index-store --package-path
-Packages/<Package>`; for app-wide Swift checks, use `swift test
---disable-index-store --package-path ClickNSpeak` and `bash
-scripts/swift_verify.sh` as appropriate.
+## Swift Testing and Verification
 
-Create the release application with `bash scripts/swift_build_app.sh release`.
-Model suites are opt-in: use `CNS_RUN_MODEL_TESTS=1` or
-`CNS_RUN_EDITOR_MODEL_TESTS=1` only with explicit local model paths.
+Click-n-speak is tested via native Swift Testing across modular packages:
 
-On a failure, first run the smallest owning test target, inspect the failing
-contract and fixture, then expand to the relevant package or full verifier.
-Do not treat real-model failures as ordinary unit-test evidence.
+- **Package-level unit tests:**
+  ```bash
+  swift test --disable-index-store --package-path Packages/<Package>
+  ```
+  (e.g., `Packages/CNSCore`, `Packages/CNSAudio`, `Packages/CNSUI`, etc.)
+
+- **Application-level tests:**
+  ```bash
+  swift test --disable-index-store --package-path ClickNSpeak
+  ```
+
+- **Full verification suite (all packages):**
+  ```bash
+  bash scripts/swift_verify.sh
+  ```
+
+## Building the App
+
+- **Release application bundle:**
+  ```bash
+  bash scripts/swift_build_app.sh release
+  ```
+
+- **Package into DMG:**
+  ```bash
+  bash scripts/make_swift_dmg.sh
+  ```
+
+## Optional Model-Backed Parity Suites
+
+Real-model integration tests are opt-in and require local model weights:
+- Whisper STT parity: set `CNS_RUN_MODEL_TESTS=1` and `CNS_WHISPER_MODEL`
+- Local Qwen AI Editor parity: set `CNS_RUN_EDITOR_MODEL_TESTS=1` and `CNS_QWEN_MODEL_DIR`

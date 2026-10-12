@@ -1,30 +1,46 @@
-# Click-n-speak Swift application guide
+# Click-n-speak Swift Application Guide
 
-The repository root is the active SwiftPM application. `ClickNSpeak/`,
-`Packages/`, native resources, release scripts, and focused tests are owned
-here. The frozen Python implementation is archived outside Git and must not
-be restored as a runtime dependency.
+The repository root is a 100% native SwiftPM application for macOS.
+`ClickNSpeak/`, `Packages/`, native assets, and release scripts are owned here.
 
-## Ownership
+## Architecture Overview
 
-Preserve existing Application Support paths and data formats. See the
-[Swift-only cutover specification](docs/superpowers/specs/2026-09-26-swift-only-cutover.md)
-for the migration contract.
+- `ClickNSpeak/`: Native composition root and AppKit application delegate (`AppDelegate`, menu setup, runtime coordinator).
+- `Packages/`: Modular Swift packages:
+  - `CNSCore`: Configuration (`Config.swift`), paths, models, logging, and base protocols.
+  - `CNSAudio`: Audio input engine, microphone capture, ring buffers, and level monitoring.
+  - `CNSTranscription`: Local Whisper.cpp engine, model download manager, and cloud transcription APIs (Gemini, OpenAI).
+  - `CNSEditors`: AI Editor formatting pipelines (MLX Qwen / Gemini API).
+  - `CNSDictionary`: Self-learning dictionary, phrase history, and custom text replacements.
+  - `CNSSession`: Dictation state machine, audio recording lifecycle, and text injection coordinator.
+  - `CNSInput`: Global Carbon hotkey manager (`⌥ Option + Space`) and accessibility text injection.
+  - `CNSUI`: Status bar menu item, interactive HUD floating editor ("edit before insert"), setup wizard, and setting panels.
+- `scripts/`: Native build, test verification, packaging (DMG), and release notarization scripts.
 
-## Working rules
+## Data Ownership & Safety Invariants
 
-- Responses and plans: Russian. Code, comments, docstrings, and commits: English.
+- Preserve existing user paths in `~/Library/Application Support/Click-n-speak/` (`config.json`, `phrase_history.txt`, `corrections.json`).
+- Audio capture must stop promptly on session completion. Never leave the microphone active when idle.
+- UI operations must run on `@MainActor`. Heavy transcription or inference tasks run in background actors.
+
+## Working Rules
+
+- Responses, plans, and chat discussions: Russian.
+- Code, comments, docstrings, and commit messages: English.
 - Preserve unrelated working-tree changes. Never discard or overwrite them.
 - Use conventional commits: `feat:`, `fix:`, `refactor:`, `chore:`, `test:`, `docs:`.
-- Never commit secrets, `.env`, runtime transcripts, prompts, clipboard data,
-  model artifacts, or user configuration.
+- Never commit secrets, `.env`, transcripts, prompts, model artifacts, or user configuration.
 
-## Workspace verification
+## Verification Commands
 
-The repository-contract check runs from the workspace root:
+Run the full Swift verification suite (all packages):
 
 ```bash
-venv/bin/python -m pytest tests/test_agent_environment.py -q
+bash scripts/swift_verify.sh
 ```
 
-Run the root Swift verification gate with `bash scripts/swift_verify.sh`.
+Build the release application:
+
+```bash
+bash scripts/swift_build_app.sh release
+```

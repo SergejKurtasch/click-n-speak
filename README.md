@@ -159,9 +159,8 @@ If you want to build and compile the application yourself from the repository, *
 swift test --disable-index-store --package-path Packages/CNSCore
 swift test --disable-index-store --package-path ClickNSpeak
 
-# Run workspace verification gates
+# Run workspace verification gates (all packages)
 bash scripts/swift_verify.sh
-venv/bin/python -m pytest tests/test_agent_environment.py -q
 ```
 
 ---
