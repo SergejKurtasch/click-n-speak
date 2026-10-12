@@ -323,6 +323,7 @@ public actor AppUpdater {
         progress: @escaping @Sendable (AppUpdateProgress) -> Void
     ) async throws -> StagedUpdateHandle {
         try Task.checkCancellation()
+        guard !update.requiresManualInstall else { throw AppUpdaterError.candidateIdentityMissing }
         guard activeDownloadOperationID == nil else { throw AppUpdaterError.downloadInProgress }
         activeDownloadOperationID = operationID
         defer {

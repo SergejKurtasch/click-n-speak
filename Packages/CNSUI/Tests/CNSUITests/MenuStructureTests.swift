@@ -404,4 +404,44 @@ struct MenuStructureTests {
         #expect(first?.title != "menu.permissions")
         #expect(first?.title.isEmpty == false)
     }
+
+    @Test("An unsigned update presents an alert with Open GitHub")
+    func manualInstallUpdatePresentsOpenGitHubAlert() throws {
+        let resources = repoResources()
+        let i18n = I18n.load("en", localesDirectory: resources.localesDirectory)
+        let config = Config.migrated(JSONObject())
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("cns-menu-update-\(UUID().uuidString)")
+        let paths = Paths(mode: .dev, environment: ["CNS_DATA_DIR": directory.path])
+        let controller = MenuBarController(
+            config: config,
+            i18n: i18n,
+            resources: resources,
+            paths: paths,
+            installStatusItem: false
+        )
+        var presentedAlert: NSAlert?
+        controller.alertRunner = { alert in
+            presentedAlert = alert
+            return .alertSecondButtonReturn
+        }
+        let update = AppUpdate(
+            version: "2.0.0",
+            downloadURL: URL(string: "https://example.invalid/Click-n-speak.dmg")!,
+            releaseNotes: "",
+            publishedAt: Date(),
+            sha256: String(repeating: "a", count: 64),
+            archiveSize: 1234,
+            architecture: .arm64,
+            minimumMacOS: "14.0",
+            channel: .stable,
+            bundleIdentifier: "com.sergej.clicknspeak",
+            teamIdentifier: "",
+            releasePageURL: URL(string: "https://github.com/SergejKurtasch/click-n-speak/releases/tag/v2.0.0")
+        )
+        controller.presentUpdateCheckResult(update)
+        #expect(presentedAlert != nil)
+        #expect(presentedAlert?.buttons.first?.title == i18n.t("btn.open_github"))
+        #expect(presentedAlert?.buttons.last?.title == i18n.t("btn.cancel"))
+    }
 }

@@ -1416,9 +1416,23 @@ public final class MenuBarController: NSObject {
         appUpdateViewModel.checkForUpdates(currentVersion: currentVersion)
     }
 
-    private func presentUpdateCheckResult(_ update: AppUpdate?) {
+    func presentUpdateCheckResult(_ update: AppUpdate?) {
         let alert = NSAlert()
         if let update {
+            if update.requiresManualInstall {
+                alert.messageText = t("notify.update_available_title")
+                let body = t("dialog.update_available_manual_body", ["version": update.version])
+                alert.informativeText = body != "dialog.update_available_manual_body"
+                    ? body
+                    : t("dialog.update_available_body", ["version": update.version])
+                alert.addButton(withTitle: t("btn.open_github"))
+                alert.addButton(withTitle: t("btn.cancel"))
+                if (alertRunner?(alert) ?? alert.runModal()) == .alertFirstButtonReturn {
+                    let targetURL = update.releasePageURL ?? URL(string: "https://github.com/SergejKurtasch/click-n-speak/releases")!
+                    NSWorkspace.shared.open(targetURL)
+                }
+                return
+            }
             alert.messageText = t("notify.update_available_title")
             alert.informativeText = t("dialog.update_available_body", ["version": update.version])
             alert.addButton(withTitle: t("btn.download"))

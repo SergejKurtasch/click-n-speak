@@ -33,6 +33,11 @@ public struct AppUpdate: Sendable, Equatable {
     public let channel: UpdateChannel
     public let bundleIdentifier: String
     public let teamIdentifier: String
+    public let releasePageURL: URL?
+
+    public var requiresManualInstall: Bool {
+        teamIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     public init(
         version: String,
@@ -45,7 +50,8 @@ public struct AppUpdate: Sendable, Equatable {
         minimumMacOS: String,
         channel: UpdateChannel,
         bundleIdentifier: String,
-        teamIdentifier: String
+        teamIdentifier: String,
+        releasePageURL: URL? = nil
     ) {
         self.version = version
         self.downloadURL = downloadURL
@@ -58,6 +64,7 @@ public struct AppUpdate: Sendable, Equatable {
         self.channel = channel
         self.bundleIdentifier = bundleIdentifier
         self.teamIdentifier = teamIdentifier
+        self.releasePageURL = releasePageURL
     }
 }
 
@@ -142,6 +149,7 @@ private struct GitHubRelease: Decodable {
     }
 
     let tagName: String
+    let htmlURL: URL?
     let body: String
     let publishedAt: String
     let prerelease: Bool
@@ -149,6 +157,7 @@ private struct GitHubRelease: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
+        case htmlURL = "html_url"
         case body
         case publishedAt = "published_at"
         case prerelease
@@ -243,8 +252,7 @@ public struct UpdateCheckingService: Sendable {
             throw UpdateMetadataError.invalidResponse(manifestResponse.statusCode)
         }
         guard let manifest = try? decoder.decode(ReleaseArtifactManifest.self, from: manifestResponse.data),
-              manifest.schemaVersion == 1,
-              !manifest.teamIdentifier.isEmpty else {
+              manifest.schemaVersion == 1 else {
             throw UpdateMetadataError.malformedManifest
         }
         guard normalizedVersion(manifest.version) == normalizedVersion(release.tagName) else {
@@ -284,7 +292,8 @@ public struct UpdateCheckingService: Sendable {
             minimumMacOS: manifest.minimumMacOS,
             channel: manifest.channel,
             bundleIdentifier: manifest.bundleIdentifier,
-            teamIdentifier: manifest.teamIdentifier
+            teamIdentifier: manifest.teamIdentifier,
+            releasePageURL: release.htmlURL ?? URL(string: "https://github.com/SergejKurtasch/click-n-speak/releases/tag/\(release.tagName)")
         )
     }
 

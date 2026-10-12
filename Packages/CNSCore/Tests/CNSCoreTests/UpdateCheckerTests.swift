@@ -92,6 +92,20 @@ final class UpdateCheckerTests: XCTestCase {
         }
     }
 
+    func testManifestWithEmptyTeamIdentifierRequiresManualInstall() async throws {
+        var manifest = validManifest()
+        manifest["team_id"] = ""
+        let service = makeService(manifest: manifest)
+        let update = try await service.check(currentVersion: "1.0.0", architecture: .arm64)
+        XCTAssertNotNil(update)
+        XCTAssertEqual(update?.teamIdentifier, "")
+        XCTAssertTrue(update?.requiresManualInstall == true)
+        XCTAssertEqual(
+            update?.releasePageURL,
+            URL(string: "https://github.com/SergejKurtasch/click-n-speak/releases/tag/v2.0.0")
+        )
+    }
+
     private func makeService(manifest: [String: Any]) -> UpdateCheckingService {
         let manifestData = try! JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
         let client = FixtureUpdateHTTPClient(responses: [

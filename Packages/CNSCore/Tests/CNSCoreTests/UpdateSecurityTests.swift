@@ -567,6 +567,43 @@ final class AppUpdaterStagingTests: XCTestCase {
         XCTAssertEqual(handle.operationID, currentOperationID)
     }
 
+    func testDownloadAndStageRejectsManualInstallUpdate() async throws {
+        let paths = temporaryPaths()
+        defer { try? FileManager.default.removeItem(at: paths.dataDirectory) }
+        try paths.ensureDataDirectory()
+        let updater = AppUpdater(
+            paths: paths,
+            archiveDownloader: FixtureArchiveDownloader(data: Data("fixture-dmg".utf8)),
+            mounter: FixtureMounter(),
+            verifier: AcceptingCandidateVerifier(),
+            diskCapacity: { _ in 10_000_000_000 },
+            currentVersion: { "1.0.0" }
+        )
+        let manualUpdate = AppUpdate(
+            version: "2.0.0",
+            downloadURL: URL(string: "https://example.invalid/update.dmg")!,
+            releaseNotes: "",
+            publishedAt: Date(),
+            sha256: String(repeating: "a", count: 64),
+            archiveSize: 100,
+            architecture: .arm64,
+            minimumMacOS: "14.0",
+            channel: .stable,
+            bundleIdentifier: "com.sergej.clicknspeak",
+            teamIdentifier: ""
+        )
+        do {
+            _ = try await updater.downloadAndStage(
+                update: manualUpdate,
+                operationID: UUID(),
+                progress: { _ in }
+            )
+            XCTFail("Expected candidateIdentityMissing error for manual install update")
+        } catch let error as AppUpdaterError {
+            XCTAssertEqual(error, .candidateIdentityMissing)
+        }
+    }
+
     func testMissingInstallHelperKeepsValidatedStagingForRetry() async throws {
         let data = Data("fixture-dmg".utf8)
         let paths = temporaryPaths()
