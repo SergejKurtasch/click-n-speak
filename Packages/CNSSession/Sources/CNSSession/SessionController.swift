@@ -34,10 +34,12 @@ public struct SessionStrings: Sendable {
     public var appendRefining: String
     public var transcriptionInstruction: String
     public var noSpeech: String
+    public var audioInterruptedRetry: String
     public var recordError: String
     public var transcriptionError: String
     public var transcriptionTimeout: String
     public var incompleteWarning: String
+    public var incompleteWarningAudio: String
     public var deliveryRecovery: String
     public var toasts: DictionaryToasts
 
@@ -51,10 +53,12 @@ public struct SessionStrings: Sendable {
         appendRefining: String = "New recording · Refining…",
         transcriptionInstruction: String = "",
         noSpeech: String = "No speech detected",
+        audioInterruptedRetry: String = "Microphone switched · Press ⌥ Space again",
         recordError: String = "Recording error",
         transcriptionError: String = "Speech recognition failed",
         transcriptionTimeout: String = "Speech recognition timed out",
         incompleteWarning: String = "Incomplete transcription",
+        incompleteWarningAudio: String = "Recording interrupted due to microphone switch",
         deliveryRecovery: String = "Text was not inserted — copy it or press Enter to retry",
         toasts: DictionaryToasts = DictionaryToasts()
     ) {
@@ -67,10 +71,12 @@ public struct SessionStrings: Sendable {
         self.appendRefining = appendRefining
         self.transcriptionInstruction = transcriptionInstruction
         self.noSpeech = noSpeech
+        self.audioInterruptedRetry = audioInterruptedRetry
         self.recordError = recordError
         self.transcriptionError = transcriptionError
         self.transcriptionTimeout = transcriptionTimeout
         self.incompleteWarning = incompleteWarning
+        self.incompleteWarningAudio = incompleteWarningAudio
         self.deliveryRecovery = deliveryRecovery
         self.toasts = toasts
     }
@@ -175,6 +181,7 @@ public final class SessionController {
     private var activeSessionRuntimeDescriptor: RuntimeDescriptor = .unavailable
     private var activeSessionPromptHash = ""
     private var lastTranscriptionError: String?
+    private var lastCaptureInterruption: AudioCaptureInterruption?
     private var emittedFirstPreview = false
     private var fileJobID: UUID?
     private var fileJobActive: Bool { fileJobID != nil }
@@ -446,6 +453,7 @@ public final class SessionController {
         sawFinalChunk = false
         sawFirstDecode = false
         lastTranscriptionError = nil
+        lastCaptureInterruption = nil
         emittedFirstPreview = false
         completedOutcomeSessionId = nil
         activeSessionConfig = config
@@ -611,6 +619,7 @@ public final class SessionController {
         chunkIndex: Int
     ) {
         guard !isShuttingDown, sessionId == id else { return }
+        lastCaptureInterruption = interruption
         switch state {
         case .starting, .recording:
             markIncompleteChunk(index: chunkIndex, reason: interruption.rawValue)
@@ -925,14 +934,23 @@ public final class SessionController {
                 log("Nothing recognised while appending to draft in session \(id).")
                 return
             }
-            let status = lastTranscriptionError ?? strings.noSpeech
-            log(lastTranscriptionError == nil
-                ? "Nothing recognised in session \(id)."
-                : "Transcription failed in session \(id).")
+            let status: String
+            let delay: TimeInterval
+            if lastCaptureInterruption != nil {
+                status = strings.audioInterruptedRetry
+                delay = 3.0
+                log("Audio capture interrupted in session \(id); prompting user to retry.")
+            } else {
+                status = lastTranscriptionError ?? strings.noSpeech
+                delay = 2.0
+                log(lastTranscriptionError == nil
+                    ? "Nothing recognised in session \(id)."
+                    : "Transcription failed in session \(id).")
+            }
             appendToPopup = false
             popupDraft = nil
             panel.updateStatus(status)
-            panel.hide(delay: 2.0)
+            panel.hide(delay: delay)
             return
         }
 
@@ -1076,11 +1094,16 @@ public final class SessionController {
         }
         transition(to: nextState, reason: reason)
         if !panel.isShowingInteractive {
-            let terminalReason = reason == "worker_finished"
-                && transcribedParts.isEmpty
-                && lastTranscriptionError == nil
-                ? "no_speech"
-                : reason
+            let terminalReason: String
+            if reason == "worker_finished" && transcribedParts.isEmpty && lastTranscriptionError == nil {
+                if let interruption = lastCaptureInterruption {
+                    terminalReason = "audio_\(interruption.rawValue)"
+                } else {
+                    terminalReason = "no_speech"
+                }
+            } else {
+                terminalReason = reason
+            }
             emitSessionEndIfNeeded(sessionID: id, reason: terminalReason)
         }
         RuntimeTelemetry.emitRuntimeEvent("session_worker_complete", fields: [
@@ -1330,7 +1353,10 @@ public final class SessionController {
 
     private func showIncompleteWarningIfNeeded() {
         guard popupDraft?.failedChunkIndices.isEmpty == false else { return }
-        panel.showIncompleteWarning(strings.incompleteWarning)
+        let warning = lastCaptureInterruption != nil
+            ? strings.incompleteWarningAudio
+            : strings.incompleteWarning
+        panel.showIncompleteWarning(warning)
     }
 
     /// ⌘D in the popup: route the term to the language matching its script, then

@@ -11,8 +11,10 @@ struct AudioRecorderLifecycleTests {
         private let lock = NSLock()
         var inputSampleRate: Double
         var inputChannelCount: Int
+        var formatSequence: [AudioInputFormatSnapshot] = []
         var converterAvailable = true
         var configurationChangeDuringConverter = false
+        var configurationChangeDuringConverterTimes = 0
         var startError: Error?
         var installTapError: Error?
         var failInstallTapTimes = 0
@@ -31,10 +33,15 @@ struct AudioRecorderLifecycleTests {
         }
 
         func inputFormatSnapshot() -> AudioInputFormatSnapshot {
-            AudioInputFormatSnapshot(
-                sampleRate: inputSampleRate,
-                channelCount: inputChannelCount
-            )
+            lock.withLock {
+                if !formatSequence.isEmpty {
+                    return formatSequence.removeFirst()
+                }
+                return AudioInputFormatSnapshot(
+                    sampleRate: inputSampleRate,
+                    channelCount: inputChannelCount
+                )
+            }
         }
 
         func makeConverter(
@@ -47,7 +54,11 @@ struct AudioRecorderLifecycleTests {
                     channels: AVAudioChannelCount(max(inputFormat.channelCount, 1))
                   ) else { return nil }
             let converter = AVAudioConverter(from: source, to: targetFormat)
-            if configurationChangeDuringConverter {
+            if configurationChangeDuringConverterTimes > 0 {
+                configurationChangeDuringConverterTimes -= 1
+                inputSampleRate = 44_100
+                emitConfigurationChange()
+            } else if configurationChangeDuringConverter {
                 inputSampleRate = 44_100
                 emitConfigurationChange()
             }
@@ -104,6 +115,18 @@ struct AudioRecorderLifecycleTests {
             if let samples = buffer.floatChannelData?[0] {
                 for offset in 0..<Int(buffer.frameLength) { samples[offset] = 0.25 }
             }
+            handler(buffer)
+        }
+
+        func emitBufferWithFormat(sampleRate: Double, channels: Int) {
+            let handler = lock.withLock { tapHandlers.last }
+            guard let handler,
+                  let format = AVAudioFormat(
+                    standardFormatWithSampleRate: sampleRate,
+                    channels: AVAudioChannelCount(channels)
+                  ),
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024) else { return }
+            buffer.frameLength = 512
             handler(buffer)
         }
     }
@@ -167,22 +190,37 @@ struct AudioRecorderLifecycleTests {
         #expect(missingConverter.installTapCount == 0)
     }
 
-    @Test("A configuration change during setup invalidates the format snapshot")
-    func configurationChangeDuringSetup() async {
+    @Test("A configuration change during setup retries and successfully starts")
+    func configurationChangeDuringSetupRetriesAndSucceeds() async throws {
         let adapter = FakeAudioEngineAdapter()
-        adapter.configurationChangeDuringConverter = true
+        adapter.configurationChangeDuringConverterTimes = 1
         let interruptions = InterruptionBox()
         let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
 
-        await #expect(throws: CancellationError.self) {
-            try await recorder.start(callbacks: .init(
-                onCaptureInterrupted: { interruptions.append($0) }
-            ))
+        try await recorder.start(callbacks: .init(
+            onCaptureInterrupted: { interruptions.append($0) }
+        ))
+
+        #expect(interruptions.snapshot.isEmpty)
+        #expect(recorder.isRecording)
+        #expect(adapter.installTapCount == 2)
+        #expect(adapter.startCount == 2)
+        #expect(adapter.resetEngineCount == 0)
+        await recorder.stop()
+    }
+
+    @Test("Persistent configuration change during setup throws after max attempts")
+    func persistentConfigurationChangeDuringSetupThrows() async {
+        let adapter = FakeAudioEngineAdapter()
+        adapter.configurationChangeDuringConverter = true
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+
+        await #expect(throws: AudioRecorderError.self) {
+            try await recorder.start(callbacks: .init())
         }
 
-        #expect(interruptions.snapshot == [.configurationChanged])
-        #expect(adapter.installTapCount == 0)
         #expect(recorder.isRecording == false)
+        #expect(adapter.installTapCount == 3)
     }
 
     @Test("A post-install start failure tears down under the watchdog")
@@ -210,8 +248,8 @@ struct AudioRecorderLifecycleTests {
         #expect(adapter.stopCount == 1)
     }
 
-    @Test("Configuration change drains once and the next start rebuilds the graph")
-    func configurationChangeRecovery() async throws {
+    @Test("Configuration change during recording restarts capture in place")
+    func configurationChangeRestartsCaptureInPlace() async throws {
         let adapter = FakeAudioEngineAdapter()
         let interruptions = InterruptionBox()
         let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
@@ -219,19 +257,85 @@ struct AudioRecorderLifecycleTests {
             onCaptureInterrupted: { interruptions.append($0) }
         ))
 
+        adapter.inputSampleRate = 16_000
         adapter.emitConfigurationChange()
         await settle()
-        await recorder.stop()
-        await recorder.stop()
 
-        #expect(interruptions.snapshot == [.configurationChanged])
-        try await recorder.start(callbacks: .init())
+        #expect(interruptions.snapshot.isEmpty)
+        #expect(recorder.isRecording)
+        #expect(adapter.installTapCount == 2)
+        #expect(adapter.startCount == 2)
+        #expect(adapter.resetEngineCount == 0)
+
         await recorder.stop()
         await settle()
-        #expect(adapter.installTapCount == 2)
         #expect(adapter.removeTapCount == 2)
-        #expect(adapter.startCount == 2)
         #expect(adapter.stopCount == 2)
+
+        try await recorder.start(callbacks: .init())
+        await recorder.stop()
+        #expect(adapter.installTapCount == 3)
+        #expect(adapter.resetEngineCount == 0)
+    }
+
+    @Test("A failed in-place restart reports one configuration interruption")
+    func failedRestartReportsInterruption() async throws {
+        let adapter = FakeAudioEngineAdapter()
+        let interruptions = InterruptionBox()
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+        try await recorder.start(callbacks: .init(
+            onCaptureInterrupted: { interruptions.append($0) }
+        ))
+
+        adapter.startError = StartFailure.failed
+        adapter.emitConfigurationChange()
+        await settle()
+
+        #expect(interruptions.snapshot == [.configurationChanged])
+        await recorder.stop()
+        await recorder.stop()
+        #expect(recorder.isRecording == false)
+    }
+
+    @Test("Repeated configuration changes stop restarting after the per-session cap")
+    func restartCapReportsInterruption() async throws {
+        let adapter = FakeAudioEngineAdapter()
+        let interruptions = InterruptionBox()
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+        try await recorder.start(callbacks: .init(
+            onCaptureInterrupted: { interruptions.append($0) }
+        ))
+
+        for _ in 0...AudioRecorder.maxConfigurationRestarts {
+            adapter.emitConfigurationChange()
+            await settle()
+        }
+
+        #expect(interruptions.snapshot == [.configurationChanged])
+        #expect(adapter.installTapCount == 1 + AudioRecorder.maxConfigurationRestarts)
+        await recorder.stop()
+    }
+
+    @Test("Bluetooth route switch on every start never rebuilds the engine")
+    func routeSwitchOnEveryStartDoesNotLoop() async throws {
+        let adapter = FakeAudioEngineAdapter(sampleRate: 16_000)
+        let interruptions = InterruptionBox()
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+
+        for _ in 0..<3 {
+            try await recorder.start(callbacks: .init(
+                onCaptureInterrupted: { interruptions.append($0) }
+            ))
+            adapter.emitConfigurationChange()
+            await settle()
+            #expect(recorder.isRecording)
+            await recorder.stop()
+            await settle()
+        }
+
+        #expect(interruptions.snapshot.isEmpty)
+        #expect(adapter.resetEngineCount == 0)
+        #expect(adapter.installTapCount == 6)
     }
 
     @Test("A late tap from an old generation cannot enter the next recording")
@@ -277,16 +381,84 @@ struct AudioRecorderLifecycleTests {
         #expect(adapter.resetEngineCount == 1)
     }
 
-    @Test("Configuration change in idle triggers resetEngine on next start")
-    func configurationChangeInIdleTriggersResetEngine() async throws {
+    @Test("Configuration change in idle does not rebuild the engine on next start")
+    func configurationChangeInIdleDoesNotResetEngine() async throws {
         let adapter = FakeAudioEngineAdapter()
         let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
 
         adapter.emitConfigurationChange()
+        try await recorder.start(callbacks: .init())
         #expect(adapter.resetEngineCount == 0)
+        #expect(recorder.isRecording)
+        await recorder.stop()
+    }
+
+    @Test("Transient zero format during setup is awaited and succeeds")
+    func transientZeroFormatIsAwaited() async throws {
+        let adapter = FakeAudioEngineAdapter()
+        adapter.formatSequence = [
+            AudioInputFormatSnapshot(sampleRate: 0, channelCount: 0),
+            AudioInputFormatSnapshot(sampleRate: 16_000, channelCount: 1)
+        ]
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+        try await recorder.start(callbacks: .init())
+        #expect(recorder.isRecording)
+        await recorder.stop()
+    }
+
+    @Test("Engine reset is rate limited to once per 10 seconds")
+    func engineResetIsRateLimited() async throws {
+        let adapter = FakeAudioEngineAdapter()
+        adapter.failInstallTapTimes = 1
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
 
         try await recorder.start(callbacks: .init())
         #expect(adapter.resetEngineCount == 1)
+        await recorder.stop()
+
+        adapter.failInstallTapTimes = 1
+        try await recorder.start(callbacks: .init())
+        #expect(adapter.resetEngineCount == 1)
+        await recorder.stop()
+    }
+
+    @Test("Teardown hang during restart triggers onFatalError")
+    func teardownHangDuringRestartTriggersFatalError() async throws {
+        let adapter = FakeAudioEngineAdapter()
+        let fatal = Flag()
+        let recorder = AudioRecorder(
+            engineAdapter: adapter,
+            playsSounds: false,
+            streamCloseTimeout: 0.05,
+            onFatalError: { fatal.set() }
+        )
+        try await recorder.start(callbacks: .init())
+
+        adapter.removeTapDelay = 0.2
+        adapter.emitConfigurationChange()
+        for _ in 0..<20 {
+            if fatal.isSet { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(fatal.isSet)
+        await recorder.stop()
+    }
+
+    @Test("Tap format mismatch triggers in-place restart")
+    func tapFormatDriftTriggersRestart() async throws {
+        let adapter = FakeAudioEngineAdapter(sampleRate: 48_000, channels: 1)
+        let recorder = AudioRecorder(engineAdapter: adapter, playsSounds: false)
+        try await recorder.start(callbacks: .init())
+
+        #expect(adapter.installTapCount == 1)
+        for _ in 0..<3 {
+            adapter.emitBufferWithFormat(sampleRate: 16_000, channels: 1)
+        }
+        for _ in 0..<20 {
+            if adapter.installTapCount >= 2 { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(adapter.installTapCount >= 2)
         await recorder.stop()
     }
 

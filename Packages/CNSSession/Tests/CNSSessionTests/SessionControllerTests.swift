@@ -181,7 +181,23 @@ struct SessionControllerTests {
         #expect(rig.controller.isRecording == false)
         #expect(rig.controller.isProcessing == false)
         #expect(rig.panel.interactiveTexts == ["partial capture"])
-        #expect(rig.panel.incompleteWarnings.count == 1)
+        #expect(rig.panel.incompleteWarnings == ["Recording interrupted due to microphone switch"])
+    }
+
+    @Test("Audio capture interruption with empty text shows retry status")
+    func audioInterruptionWithEmptyTextShowsRetryStatus() async {
+        let rig = makeRig(texts: [])
+        rig.controller.toggle(now: Date())
+        await settle()
+
+        rig.recorder.emitConfigurationChange()
+        rig.controller.toggle(now: Date().addingTimeInterval(1))
+        await settle(80)
+
+        #expect(rig.controller.isRecording == false)
+        #expect(rig.controller.isProcessing == false)
+        #expect(rig.panel.interactiveTexts.isEmpty)
+        #expect(rig.panel.statuses.contains("Microphone switched · Press ⌥ Space again"))
     }
 
     @Test("Confirming injects into the app that was frontmost at start")

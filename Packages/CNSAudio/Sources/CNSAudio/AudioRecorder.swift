@@ -37,6 +37,12 @@ public enum AudioRecorderError: LocalizedError, Sendable, Equatable {
     }
 }
 
+public enum EngineResetReason: Sendable, Equatable {
+    case none
+    case tapInstallFailure
+    case engineStartFailure
+}
+
 public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
     public typealias Callbacks = AudioCallbacks
 
@@ -71,9 +77,31 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         var pendingFrame: [Float] = []    // leftover < one VAD frame
         var overflowSamples = 0
         var maximumTapDurationMs = 0.0
-        var engineNeedsReset = false
+        var engineResetReason: EngineResetReason = .none
+        var lastEngineResetUptime: TimeInterval = 0
+        var configurationRestarts = 0
+        var setupInvalidated = false
+        var formatMismatchCount = 0
     }
     private var consumerTask: Task<Void, Never>?
+
+    /// Route switches (e.g. a Bluetooth headset entering HFP when its mic opens)
+    /// post `AVAudioEngineConfigurationChange` right after start. Capture is
+    /// restarted in place up to this many times per session before giving up.
+    static let maxConfigurationRestarts = 3
+
+    /// The notification may be posted synchronously from inside engine calls
+    /// that already hold `engineLock`, so restarts hop to this serial queue.
+    private let configurationQueue = DispatchQueue(
+        label: "com.sergej.clicknspeak.audio-configuration",
+        qos: .userInitiated
+    )
+
+    private enum ConfigurationChangeAction {
+        case ignore
+        case interrupt(Callbacks)
+        case restart(generation: Int)
+    }
 
     private let frameSamples: Int  // VAD frame size (30 ms)
 
@@ -152,6 +180,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             state.graphSetupInProgress = false
             state.teardownStarted = false
             state.interruptionReported = false
+            state.configurationRestarts = 0
             state.callbacks = callbacks
             state.chunker = AudioChunker(config: chunkingConfig)
             state.accumulation.removeAll(keepingCapacity: true)
@@ -177,43 +206,22 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         }
         try ensureStartIsActive(generation: generation)
 
+        resetEngineIfNeeded()
+
         let inputSampleRate: Double
         do {
-            inputSampleRate = try engineLock.withLock {
-                let needsReset = stateLock.withLock { state -> Bool in
-                    let r = state.engineNeedsReset
-                    state.engineNeedsReset = false
-                    return r
-                }
-                if needsReset {
-                    log("Resetting audio engine before capture start due to configuration change")
-                    engineAdapter.resetEngine()
-                }
-                return try setupAndStartEngine(generation: generation)
-            }
-        } catch let error as AudioRecorderError where error.isTapInstallFailure {
-            let retryResult: Result<Double, Error> = engineLock.withLock {
-                log("Audio tap installation failed (\(error.localizedDescription)), attempting engine reset and retry...")
-                teardownEngineSetup()
-                engineAdapter.resetEngine()
-                do {
-                    let rate = try setupAndStartEngine(generation: generation)
-                    return .success(rate)
-                } catch let retryError {
-                    return .failure(retryError)
-                }
-            }
-            switch retryResult {
-            case let .success(rate):
-                inputSampleRate = rate
-            case let .failure(finalError):
-                scheduleGraphTeardownIfNeeded(generation: generation)
-                resetFailedStart(generation: generation)
-                throw finalError
-            }
+            inputSampleRate = try performEngineStart(generation: generation)
         } catch {
             scheduleGraphTeardownIfNeeded(generation: generation)
-            resetFailedStart(generation: generation)
+            let reason: EngineResetReason
+            if case .engineStartFailed = error as? AudioRecorderError {
+                reason = .engineStartFailure
+            } else if case .tapInstallFailed = error as? AudioRecorderError {
+                reason = .tapInstallFailure
+            } else {
+                reason = .none
+            }
+            resetFailedStart(generation: generation, reason: reason)
             throw error
         }
         let startStillActive = stateLock.withLock { state -> Bool in
@@ -306,7 +314,13 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         let status = converter.convert(to: out, error: &error) { _, inputStatus in
             feeder.next(inputStatus)
         }
-        guard status != .error, let channel = out.floatChannelData?[0] else { return }
+        guard status != .error, let channel = out.floatChannelData?[0] else {
+            handleTapFormatMismatch(buffer: buffer, converter: converter, generation: generation)
+            return
+        }
+        stateLock.withLock { state in
+            if state.generation == generation { state.formatMismatchCount = 0 }
+        }
         let count = Int(out.frameLength)
         if count > 0 {
             let dropped = ringBuffer.write(Array(UnsafeBufferPointer(start: channel, count: count)))
@@ -318,20 +332,124 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         }
     }
 
-    private func handleConfigurationChange() {
-        stateLock.withLock { state in
-            state.engineNeedsReset = true
+    private func handleTapFormatMismatch(
+        buffer: AVAudioPCMBuffer,
+        converter: AVAudioConverter,
+        generation: Int
+    ) {
+        let shouldTriggerRestart = stateLock.withLock { state -> Bool in
+            guard state.generation == generation, state.recording, !state.stopping else { return false }
+            state.formatMismatchCount += 1
+            if state.formatMismatchCount >= 3 {
+                state.formatMismatchCount = 0
+                return true
+            }
+            return false
         }
-        let callback = stateLock.withLock { state -> Callbacks? in
+        guard shouldTriggerRestart else { return }
+        RuntimeTelemetry.emitRuntimeEvent("audio_format_mismatch", fields: [
+            "expected_hz": converter.inputFormat.sampleRate,
+            "actual_hz": buffer.format.sampleRate,
+            "generation": generation
+        ])
+        configurationQueue.async { [weak self] in
+            self?.handleConfigurationChange()
+        }
+    }
+
+    private func handleConfigurationChange() {
+        // Do not schedule an engine rebuild here: a fresh AVAudioEngine on a
+        // Bluetooth input triggers another route change, which would abort
+        // every following session.
+        let action = stateLock.withLock { state -> ConfigurationChangeAction in
             guard state.recording,
                   !state.stopping,
-                  (state.graphSetupInProgress || state.tapInstalled),
-                  !state.interruptionReported else { return nil }
+                  !state.interruptionReported else { return .ignore }
+
+            if state.graphSetupInProgress {
+                state.setupInvalidated = true
+                return .ignore
+            }
+
+            guard state.tapInstalled else { return .ignore }
+            state.acceptingSamples = false
+            let canRestart = state.configurationRestarts < Self.maxConfigurationRestarts
+            guard canRestart else {
+                state.interruptionReported = true
+                return .interrupt(state.callbacks)
+            }
+            state.configurationRestarts += 1
+            return .restart(generation: state.generation)
+        }
+        switch action {
+        case .ignore:
+            return
+        case let .interrupt(callbacks):
+            callbacks.onCaptureInterrupted(.configurationChanged)
+        case let .restart(generation):
+            configurationQueue.async { [weak self] in
+                self?.restartCaptureAfterConfigurationChange(generation: generation)
+            }
+        }
+    }
+
+    /// Rebuilds the tap and converter on the existing engine for the new input
+    /// format. Reports an interruption only if the restart itself fails.
+    private func restartCaptureAfterConfigurationChange(generation: Int) {
+        let outcome: Result<Double, Error> = engineLock.withLock {
+            guard isActiveRecording(generation: generation) else {
+                return .failure(CancellationError())
+            }
+            stateLock.withLock { $0.acceptingSamples = false }
+            tapWorkLock.withLock {}
+            guard teardownEngineSetup() else {
+                return .failure(AudioRecorderError.engineStartFailed("Teardown timed out"))
+            }
+            return Result { try setupAndStartEngine(generation: generation) }
+        }
+        switch outcome {
+        case let .success(rate):
+            let resumed = stateLock.withLock { state -> Bool in
+                guard state.generation == generation, state.recording,
+                      !state.stopping, !state.interruptionReported else { return false }
+                state.acceptingSamples = true
+                return true
+            }
+            log("Audio capture restarted after configuration change (input \(Int(rate)) Hz, resumed: \(resumed))")
+            emitRestartTelemetry(generation: generation, outcome: "restarted")
+        case let .failure(error):
+            if error is CancellationError { return }
+            log("Audio capture restart after configuration change failed: \(error.localizedDescription)")
+            emitRestartTelemetry(generation: generation, outcome: "failed")
+            reportConfigurationInterruption(generation: generation)
+        }
+    }
+
+    private func isActiveRecording(generation: Int) -> Bool {
+        stateLock.withLock {
+            $0.generation == generation && $0.recording
+                && !$0.stopping && !$0.interruptionReported
+        }
+    }
+
+    private func reportConfigurationInterruption(generation: Int) {
+        let callbacks = stateLock.withLock { state -> Callbacks? in
+            guard state.generation == generation, state.recording,
+                  !state.stopping, !state.interruptionReported else { return nil }
             state.acceptingSamples = false
             state.interruptionReported = true
             return state.callbacks
         }
-        callback?.onCaptureInterrupted(.configurationChanged)
+        callbacks?.onCaptureInterrupted(.configurationChanged)
+    }
+
+    private func emitRestartTelemetry(generation: Int, outcome: String) {
+        let attempt = stateLock.withLock { $0.configurationRestarts }
+        RuntimeTelemetry.emitRuntimeEvent("audio_capture_restart", fields: [
+            "generation": generation,
+            "attempt": attempt,
+            "outcome": outcome
+        ])
     }
 
     // MARK: - Consumer task: VAD + chunking, off the audio thread
@@ -392,17 +510,108 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         if !active { throw CancellationError() }
     }
 
+    @discardableResult
+    private func resetEngineIfAllowed() -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let lastReset = stateLock.withLock { $0.lastEngineResetUptime }
+        if now - lastReset < 10.0 {
+            log("Throttling audio engine reset (last reset was \(String(format: "%.1f", now - lastReset))s ago)")
+            return false
+        }
+        stateLock.withLock { $0.lastEngineResetUptime = now }
+        log("Resetting audio engine due to hardware setup failure")
+        engineAdapter.resetEngine()
+        return true
+    }
+
+    private func resetEngineIfNeeded() {
+        let reason = stateLock.withLock { state -> EngineResetReason in
+            let r = state.engineResetReason
+            state.engineResetReason = .none
+            return r
+        }
+        guard reason != .none else { return }
+        engineLock.withLock {
+            _ = resetEngineIfAllowed()
+        }
+    }
+
+    private func performEngineStart(generation: Int) throws -> Double {
+        var attempts = 0
+        while attempts < 3 {
+            attempts += 1
+            stateLock.withLock { state in
+                if state.generation == generation { state.setupInvalidated = false }
+            }
+            do {
+                let rate = try engineLock.withLock {
+                    try setupAndStartEngine(generation: generation)
+                }
+                let invalidated = stateLock.withLock {
+                    $0.generation == generation && $0.setupInvalidated
+                }
+                if invalidated {
+                    log("Audio configuration changed during setup, retrying (attempt \(attempts))...")
+                    _ = engineLock.withLock { teardownEngineSetup() }
+                    continue
+                }
+                return rate
+            } catch let error as AudioRecorderError where error.isTapInstallFailure {
+                return try retryAfterTapInstallFailure(generation: generation, originalError: error)
+            }
+        }
+        throw AudioRecorderError.engineStartFailed("Configuration changed repeatedly during setup")
+    }
+
+    private func retryAfterTapInstallFailure(
+        generation: Int,
+        originalError: AudioRecorderError
+    ) throws -> Double {
+        let retryResult: Result<Double, Error> = engineLock.withLock {
+            log("Audio tap installation failed (\(originalError.localizedDescription)), attempting engine reset and retry...")
+            guard teardownEngineSetup() else {
+                return .failure(AudioRecorderError.tapInstallFailed("Teardown timed out"))
+            }
+            _ = resetEngineIfAllowed()
+            return Result { try setupAndStartEngine(generation: generation) }
+        }
+        switch retryResult {
+        case let .success(rate):
+            return rate
+        case let .failure(finalError):
+            scheduleGraphTeardownIfNeeded(generation: generation)
+            resetFailedStart(generation: generation, reason: .tapInstallFailure)
+            throw finalError
+        }
+    }
+
+    private func awaitValidInputFormat(
+        timeout: TimeInterval = 0.5,
+        pollInterval: TimeInterval = 0.05
+    ) throws -> AudioInputFormatSnapshot {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while true {
+            let snapshot = engineAdapter.inputFormatSnapshot()
+            if snapshot.sampleRate > 0 && snapshot.channelCount > 0 {
+                return snapshot
+            }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                throw AudioRecorderError.invalidInputFormat(
+                    sampleRate: snapshot.sampleRate,
+                    channels: snapshot.channelCount
+                )
+            }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+    }
+
     private func setupAndStartEngine(generation: Int) throws -> Double {
         try ensureStartIsActive(generation: generation)
         stateLock.withLock { state in
             if state.generation == generation { state.graphSetupInProgress = true }
         }
-        let inputFormat = engineAdapter.inputFormatSnapshot()
+        let inputFormat = try awaitValidInputFormat()
         log("Input format snapshot: \(inputFormat.sampleRate) Hz, \(inputFormat.channelCount) channels")
-        try Self.validateInputFormat(
-            sampleRate: inputFormat.sampleRate,
-            channels: inputFormat.channelCount
-        )
         guard let newConverter = engineAdapter.makeConverter(
             from: inputFormat,
             to: targetFormat
@@ -432,17 +641,21 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
         return inputFormat.sampleRate
     }
 
-    private func teardownEngineSetup() {
-        engineAdapter.removeTap()
-        engineAdapter.stop()
+    @discardableResult
+    private func teardownEngineSetup() -> Bool {
+        let completed = closeWatchdog.closeAndWait { [engineAdapter] in
+            engineAdapter.removeTap()
+            engineAdapter.stop()
+        }
         converter = nil
         stateLock.withLock { state in
             state.tapInstalled = false
             state.graphSetupInProgress = false
         }
+        return completed
     }
 
-    private func resetFailedStart(generation: Int) {
+    private func resetFailedStart(generation: Int, reason: EngineResetReason = .none) {
         stateLock.withLock { state in
             guard state.generation == generation else { return }
             state.recording = false
@@ -451,7 +664,7 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             state.tapInstalled = false
             state.graphSetupInProgress = false
             state.interruptionReported = false
-            state.engineNeedsReset = true
+            state.engineResetReason = reason
             state.callbacks = Callbacks()
         }
         converter = nil

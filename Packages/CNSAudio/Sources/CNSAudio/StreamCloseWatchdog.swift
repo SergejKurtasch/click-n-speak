@@ -66,6 +66,36 @@ public final class StreamCloseWatchdog: @unchecked Sendable {
         }
     }
 
+    /// Run `stop` on a private queue and wait for completion up to `timeout`.
+    /// - Returns: `true` if teardown completed in time; `false` if it timed out (and fired `onHang`).
+    @discardableResult
+    public func closeAndWait(timeout overrideTimeout: TimeInterval? = nil, _ stop: @escaping @Sendable () -> Void) -> Bool {
+        let waitTimeout = overrideTimeout ?? self.timeout
+        let group = DispatchGroup()
+        group.enter()
+        lock.lock()
+        pending = group
+        lock.unlock()
+
+        closeQueue.async {
+            stop()
+            group.leave()
+        }
+
+        let timedOut = group.wait(timeout: .now() + waitTimeout) == .timedOut
+        if timedOut {
+            log("Audio stream teardown hung >\(Int(waitTimeout))s — triggering proactive restart.")
+            onHang()
+            group.notify(queue: watchQueue) { [weak self] in
+                self?.clear(group)
+            }
+            return false
+        }
+        clear(group)
+        return true
+    }
+
+
     /// Wait for an in-flight teardown before opening a new stream.
     /// - Returns: `false` when the teardown is still stuck after `timeout` — the
     ///   caller must not start a new stream in that case.

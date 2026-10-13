@@ -1076,10 +1076,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appendRefining: i18n.t("preview.refining_append"),
             transcriptionInstruction: i18n.t("hud.transcription_instruction"),
             noSpeech: i18n.t("notify.no_speech_title"),
+            audioInterruptedRetry: i18n.t("notify.audio_interrupted_retry"),
             recordError: i18n.t("notify.record_error_title"),
             transcriptionError: i18n.t("notify.transcription_error_title"),
             transcriptionTimeout: i18n.t("notify.transcription_timeout_title"),
             incompleteWarning: i18n.t("preview.incomplete_warning"),
+            incompleteWarningAudio: i18n.t("preview.incomplete_warning_audio"),
             deliveryRecovery: i18n.t("preview.delivery_recovery"),
             toasts: DictionaryToasts(
                 addedTemplate: i18n.t("toast.added"),
