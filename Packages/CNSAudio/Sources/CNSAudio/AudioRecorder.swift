@@ -305,6 +305,11 @@ public final class AudioRecorder: AudioCapturing, @unchecked Sendable {
             $0.generation == generation && $0.acceptingSamples
         }) else { return }
         guard let converter else { return }
+        if buffer.format.sampleRate != converter.inputFormat.sampleRate
+            || buffer.format.channelCount != converter.inputFormat.channelCount {
+            handleTapFormatMismatch(buffer: buffer, converter: converter, generation: generation)
+            return
+        }
         let ratio = targetFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
         guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
