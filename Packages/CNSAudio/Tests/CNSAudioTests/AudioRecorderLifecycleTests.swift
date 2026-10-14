@@ -5,7 +5,7 @@ import Testing
 import CNSObjCExceptionCatcher
 @testable import CNSAudio
 
-@Suite("AudioRecorder lifecycle validation")
+@Suite("AudioRecorder lifecycle validation", .serialized)
 struct AudioRecorderLifecycleTests {
     private final class FakeAudioEngineAdapter: AudioEngineAdapting, @unchecked Sendable {
         private let lock = NSLock()
@@ -441,6 +441,8 @@ struct AudioRecorderLifecycleTests {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         #expect(fatal.isSet)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        adapter.removeTapDelay = 0
         await recorder.stop()
     }
 
@@ -460,6 +462,7 @@ struct AudioRecorderLifecycleTests {
         }
         #expect(adapter.installTapCount >= 2)
         await recorder.stop()
+        await settle()
     }
 
     @Test("CNSObjCExceptionCatcher catches NSException and throws Error")

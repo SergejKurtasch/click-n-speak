@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import CNSAudio
 
-@Suite("StreamCloseWatchdog")
+@Suite("StreamCloseWatchdog", .serialized)
 struct StreamCloseWatchdogTests {
     /// Thread-safe flag: the watchdog fires from its own queue.
     private final class Flag: @unchecked Sendable {
