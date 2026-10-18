@@ -31,8 +31,11 @@ public struct TextDeliveryStrings: Sendable, Equatable {
 
 @MainActor
 public struct SystemTextDelivery: TextDelivering {
+    public static let postFocusSettleDelay: TimeInterval = 0.035
+
     private let restorer: FocusRestorer
     private let injector: TextInjector
+    private let preInjectionDelay: TimeInterval
     private let copyToClipboard: @Sendable (String) -> Void
     private let notify: @Sendable (String, String, String) -> Void
     private let log: @Sendable (String) -> Void
@@ -41,6 +44,7 @@ public struct SystemTextDelivery: TextDelivering {
     public init(
         restorer: FocusRestorer? = nil,
         injector: TextInjector? = nil,
+        preInjectionDelay: TimeInterval = SystemTextDelivery.postFocusSettleDelay,
         copyToClipboard: (@Sendable (String) -> Void)? = nil,
         notify: @escaping @Sendable (String, String, String) -> Void = { _, _, _ in },
         log: @escaping @Sendable (String) -> Void = { _ in },
@@ -48,6 +52,7 @@ public struct SystemTextDelivery: TextDelivering {
     ) {
         self.restorer = restorer ?? FocusRestorer(log: log)
         self.injector = injector ?? TextInjector(strings: strings.injection, log: log, notify: notify)
+        self.preInjectionDelay = preInjectionDelay
         self.copyToClipboard = copyToClipboard ?? { text in
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
@@ -62,7 +67,7 @@ public struct SystemTextDelivery: TextDelivering {
         switch await restorer.restore(to: pid) {
         case .confirmed:
             guard !Task.isCancelled else { return .cancelled }
-            let result = await injector.inject(text)
+            let result = await injector.inject(text, preDelay: preInjectionDelay)
             if !result.success {
                 log("Injection failed: method=\(result.method) error=\(result.error ?? "-")")
             }

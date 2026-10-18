@@ -559,7 +559,7 @@ public final class MenuBarController: NSObject {
         sub.autoenablesItems = false
         let activeBackend = factualActiveEditorBackend
         let desiredBackend = config.aiEditorEnabled ? config.aiEditorBackend : nil
-        
+
         let disabled = choiceItem(
             t("menu.ai_disabled"),
             value: "disabled",
@@ -942,23 +942,23 @@ public final class MenuBarController: NSObject {
     private func presentCredentialDialog(provider: String) {
         let isGemini = provider == "gemini"
         let account = isGemini ? KeychainHelper.geminiAccount : KeychainHelper.openAIAccount
-        
+
         let tk = self.testKeychain
         let env = testEnvironment ?? ProcessInfo.processInfo.environment
         let lookup: @Sendable (String, String) -> String? = { s, a in
             if let testKc = tk { return testKc["\(s)-\(a)"] }
             return KeychainHelper.getRawKeychainPassword(service: s, account: a)
         }
-        
+
         let metadata = KeychainHelper.getMetadata(
             account: account,
             environment: env,
             keychainLookup: lookup
         )
-        
+
         let alert = NSAlert()
         alert.messageText = isGemini ? t("dialog.gemini_key_title") : t("dialog.openai_key_title")
-        
+
         var isEnv = false
         var envVarName = ""
         switch metadata.source {
@@ -968,7 +968,7 @@ public final class MenuBarController: NSObject {
         case .keychain, .none:
             break
         }
-        
+
         if isEnv {
             alert.informativeText = t("dialog.credential_env_override").replacingOccurrences(of: "%@", with: envVarName)
         } else {
@@ -981,17 +981,17 @@ public final class MenuBarController: NSObject {
         input.placeholderString = metadata.isConfigured ? "••••••••••••" : nil
         input.setAccessibilityLabel(alert.messageText)
         alert.accessoryView = input
-        
+
         alert.addButton(withTitle: t("btn.save"))
         alert.addButton(withTitle: t("btn.cancel"))
         alert.addButton(withTitle: t("btn.clear"))
-        
+
         if isEnv {
             input.isEnabled = false
             alert.buttons[0].isEnabled = false
             alert.buttons[2].isEnabled = false
         }
-        
+
         var retry = true
         while retry {
             retry = false
@@ -1012,12 +1012,12 @@ public final class MenuBarController: NSObject {
                             try KeychainHelper.setPassword(account: account, password: key)
                         }
                         log("\(provider.capitalized) API Key saved to Keychain.")
-                        
+
                         let successAlert = NSAlert()
                         successAlert.messageText = t("dialog.credential_saved")
                         successAlert.addButton(withTitle: t("btn.ok"))
                         _ = alertRunner?(successAlert) ?? successAlert.runModal()
-                        
+
                         onCredentialsChanged?(provider)
                     } catch {
                         log("Failed to save \(provider.capitalized) API Key: \(error)")
@@ -1163,27 +1163,27 @@ public final class MenuBarController: NSObject {
         alert.messageText = t("dialog.delete_local_model_title")
         alert.informativeText = t("dialog.delete_local_model_body")
         let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 340, height: 26))
-        
+
         var anyEnabled = false
         for model in installed {
             let size = ModelManager.diskUsageForModel(model, paths: paths)
             let reasons = ModelArtifactAccessRegistry.shared.snapshotReasons(for: model.id)
             let isDeleting = ModelArtifactAccessRegistry.shared.isDeletionInProgress(for: model.id)
-            
+
             let title: String
             let isEnabled: Bool
-            
+
             if isDeleting {
                 title = "\(model.displayName) · " + t("state.deleting")
                 isEnabled = false
             } else if !reasons.isEmpty {
                 let reasonText: String
-                if reasons.contains(where: { 
-                    if case .downloading = $0 { return true }; return false 
+                if reasons.contains(where: {
+                    if case .downloading = $0 { return true }; return false
                 }) {
                     reasonText = t("state.downloading")
-                } else if reasons.contains(where: { 
-                    if case .preparation = $0 { return true }; return false 
+                } else if reasons.contains(where: {
+                    if case .preparation = $0 { return true }; return false
                 }) {
                     reasonText = t("state.preparing")
                 } else {
@@ -1196,7 +1196,7 @@ public final class MenuBarController: NSObject {
                 isEnabled = true
                 anyEnabled = true
             }
-            
+
             picker.addItem(withTitle: title)
             picker.lastItem?.representedObject = model.id
             if !isEnabled {
@@ -1206,11 +1206,11 @@ public final class MenuBarController: NSObject {
         picker.autoenablesItems = false
         picker.setAccessibilityLabel(t("dialog.delete_local_model_picker"))
         alert.accessoryView = picker
-        
+
         if let firstEnabled = picker.itemArray.first(where: { $0.isEnabled }) {
             picker.select(firstEnabled)
         }
-        
+
         let deleteBtn = alert.addButton(withTitle: t("btn.delete"))
         deleteBtn.isEnabled = anyEnabled
         alert.addButton(withTitle: t("btn.cancel"))
@@ -1257,25 +1257,25 @@ public final class MenuBarController: NSObject {
 
         let alert = NSAlert()
         alert.messageText = t("terms.undo_prompt")
-        
+
         let popupButton = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
         for lang in availableLanguages {
             popupButton.addItem(withTitle: lang.uppercased())
             popupButton.lastItem?.representedObject = lang
         }
-        
+
         let primary = config.raw["primary_language"]?.stringValue ?? "en"
         if let primaryItem = popupButton.itemArray.first(where: { ($0.representedObject as? String) == primary }) {
             popupButton.select(primaryItem)
         }
-        
+
         alert.accessoryView = popupButton
         alert.addButton(withTitle: t("menu.revert_terms"))
         alert.addButton(withTitle: t("btn.cancel"))
-        
+
         NSApp.activate(ignoringOtherApps: true)
         let response = alert.runModal()
-        
+
         if response == .alertFirstButtonReturn,
            let selected = popupButton.selectedItem?.representedObject as? String {
             do { try dictionaryCoordinator.revert(language: selected) }
@@ -1745,9 +1745,13 @@ extension MenuBarController: NSMenuDelegate {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
-        showCopiedFeedback()
         lastPhrasesMenu?.cancelTracking()
-        log("Copied phrase to pasteboard")
+        menu.cancelTracking()
+        showCopiedFeedback()
+        NSApp?.deactivate()
+        let frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier.description ?? "nil"
+        let selfActive = NSApp?.isActive ?? false
+        log("Copied phrase to pasteboard: chars=\(text.count) change_count=\(pb.changeCount) frontmost_pid=\(frontmostPid) self_active=\(selfActive)")
     }
 
     @objc private func onLoadMorePhrases() {

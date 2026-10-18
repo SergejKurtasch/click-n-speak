@@ -19,16 +19,23 @@ public struct QuartzKeyboardAdapter: KeyboardAdapting {
     /// short gap so the receiving app's event queue keeps up.
     private let chunkSize: Int
     private let chunkDelay: TimeInterval
+    private let keyPressDelay: TimeInterval
 
-    public init(chunkSize: Int = 20, chunkDelay: TimeInterval = 0.005) {
+    public init(
+        chunkSize: Int = 20,
+        chunkDelay: TimeInterval = 0.005,
+        keyPressDelay: TimeInterval = 0.01
+    ) {
         self.chunkSize = chunkSize
         self.chunkDelay = chunkDelay
+        self.keyPressDelay = keyPressDelay
     }
 
     public func paste() throws {
+        let source = CGEventSource(stateID: .privateState)
         for isKeyDown in [true, false] {
             guard let event = CGEvent(
-                keyboardEventSource: nil,
+                keyboardEventSource: source,
                 virtualKey: Self.virtualKeyV,
                 keyDown: isKeyDown
             ) else {
@@ -36,6 +43,9 @@ public struct QuartzKeyboardAdapter: KeyboardAdapting {
             }
             event.flags = .maskCommand
             event.post(tap: .cghidEventTap)
+            if isKeyDown, keyPressDelay > 0 {
+                Thread.sleep(forTimeInterval: keyPressDelay)
+            }
         }
     }
 
@@ -54,9 +64,10 @@ public struct QuartzKeyboardAdapter: KeyboardAdapting {
     }
 
     private func post(_ utf16Units: [UInt16]) throws {
+        let source = CGEventSource(stateID: .privateState)
         for isKeyDown in [true, false] {
             guard let event = CGEvent(
-                keyboardEventSource: nil,
+                keyboardEventSource: source,
                 virtualKey: Self.virtualKeyA,
                 keyDown: isKeyDown
             ) else {

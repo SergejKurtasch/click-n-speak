@@ -75,6 +75,7 @@ struct TextInjectorTests {
         clipboard: any ClipboardAdapting,
         keyboard: any KeyboardAdapting,
         trusted: Bool = true,
+        log: @escaping @Sendable (String) -> Void = { _ in },
         notify: (@Sendable (String, String, String) -> Void)? = nil
     ) -> TextInjector {
         TextInjector(
@@ -82,6 +83,7 @@ struct TextInjectorTests {
             keyboard: keyboard,
             isAccessibilityTrusted: { trusted },
             restoreDelay: 0,
+            log: log,
             notify: notify ?? { _, _, _ in }
         )
     }
@@ -139,8 +141,13 @@ struct TextInjectorTests {
     func pasteAndRestore() async {
         let clipboard = MockClipboard()
         let keyboard = MockKeyboard()
+        let logs = InjectorLogRecorder()
 
-        let result = await injector(clipboard: clipboard, keyboard: keyboard).inject("hello world")
+        let result = await injector(
+            clipboard: clipboard,
+            keyboard: keyboard,
+            log: { logs.record($0) }
+        ).inject("hello world")
 
         #expect(result.success == true)
         #expect(result.method == .paste)
@@ -148,6 +155,8 @@ struct TextInjectorTests {
         #expect(clipboard.writtenText == "hello world")
         #expect(keyboard.pasteCount == 1)
         #expect(clipboard.restoresPerformed == 1)
+        #expect(logs.entries.contains { $0.contains("pasteboard_change_count=42") })
+        #expect(logs.entries.contains { $0.contains("clipboard_restored=true") })
     }
 
     @Test("A clipboard the user changed during the delay is never overwritten")
@@ -257,5 +266,18 @@ private final class NotificationRecorder: @unchecked Sendable {
     var count: Int {
         lock.lock(); defer { lock.unlock() }
         return entries.count
+    }
+}
+
+private final class InjectorLogRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func record(_ message: String) {
+        lock.withLock { storage.append(message) }
+    }
+
+    var entries: [String] {
+        lock.withLock { storage }
     }
 }

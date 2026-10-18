@@ -25,13 +25,27 @@ struct FocusRestorerTests {
     private func restorer(
         _ frontmost: Frontmost,
         activates: Bool = true,
-        timeout: TimeInterval = 0.5
+        timeout: TimeInterval = 0.5,
+        isTargetReady: @escaping @MainActor (pid_t) -> Bool = { _ in true },
+        log: @escaping @Sendable (String) -> Void = { _ in }
     ) -> FocusRestorer {
         FocusRestorer(
             timeout: timeout,
             poll: 0.005,
             activate: { _ in activates },
-            frontmostPid: { frontmost.next() }
+            frontmostPid: { frontmost.next() },
+            isTargetReady: isTargetReady,
+            diagnosticsProvider: { targetPid, currentPid in
+                FocusDiagnostics(
+                    frontmostPid: currentPid,
+                    targetIsActive: currentPid == targetPid,
+                    selfIsActive: false,
+                    axFocusedWindowPresent: true,
+                    axFocusedElementRole: "AXTextArea",
+                    axError: 0
+                )
+            },
+            log: log
         )
     }
 
@@ -52,6 +66,43 @@ struct FocusRestorerTests {
 
         #expect(outcome == .confirmed)
         #expect(frontmost.reads == 4)  // the flicker cost us the streak
+    }
+
+    @Test("Frontmost match while target app is not yet active waits until target is ready")
+    func waitsUntilTargetIsActive() async {
+        let frontmost = Frontmost([501, 501, 501])
+        var readyChecks = 0
+        let outcome = await restorer(
+            frontmost,
+            isTargetReady: { _ in
+                readyChecks += 1
+                return readyChecks >= 2
+            }
+        ).restore(to: 501)
+
+        #expect(outcome == .confirmed)
+        #expect(frontmost.reads == 3)
+        #expect(readyChecks == 3)
+    }
+
+    @Test("Focus confirmation logs diagnostic fields")
+    func logsDiagnosticsOnConfirm() async {
+        let frontmost = Frontmost([501, 501])
+        let recorder = LogRecorder()
+        let outcome = await restorer(
+            frontmost,
+            log: { recorder.record($0) }
+        ).restore(to: 501)
+
+        #expect(outcome == .confirmed)
+        let messages = recorder.entries
+        #expect(messages.contains { $0.contains("Focus activation requested: target_pid=501") })
+        #expect(messages.contains {
+            $0.contains("Focus confirmed: target_pid=501")
+                && $0.contains("ax_window=true")
+                && $0.contains("ax_role=AXTextArea")
+                && $0.contains("ax_err=0")
+        })
     }
 
     @Test("A target that never returns times out with the actual frontmost pid")
@@ -86,5 +137,18 @@ struct FocusRestorerTests {
 
         #expect(outcome == .targetUnavailable)
         #expect(frontmost.reads == 0)
+    }
+}
+
+private final class LogRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func record(_ message: String) {
+        lock.withLock { storage.append(message) }
+    }
+
+    var entries: [String] {
+        lock.withLock { storage }
     }
 }

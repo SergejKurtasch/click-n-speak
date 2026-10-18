@@ -105,111 +105,89 @@ public struct TextInjector: Sendable {
     /// focus checks in `FocusRestorer` have passed.
     public func inject(_ text: String, preDelay: TimeInterval = 0) async -> InjectionResult {
         let startedAt = Date()
-        func elapsed() -> TimeInterval { Date().timeIntervalSince(startedAt) }
-
         guard !Task.isCancelled else {
-            return InjectionResult(
-                success: false,
-                method: .none,
-                charCount: text.count,
-                duration: elapsed(),
-                error: "Injection cancelled",
-                failure: .cancelled
-            )
+            return cancelledResult(charCount: text.count, startedAt: startedAt)
         }
         if text.isEmpty {
             return InjectionResult(success: true, method: .none, charCount: 0, duration: 0)
         }
-
         guard isAccessibilityTrusted() else {
             let error = "Accessibility permissions are not granted"
             log("\(error). Cannot inject text.")
-            notify(
-                strings.appTitle,
-                strings.accessibilityTitle,
-                strings.accessibilityBody
-            )
+            notify(strings.appTitle, strings.accessibilityTitle, strings.accessibilityBody)
             return InjectionResult(
                 success: false,
                 method: .none,
                 charCount: text.count,
-                duration: elapsed(),
+                duration: elapsed(since: startedAt),
                 error: error,
                 failure: .accessibilityDenied
             )
         }
-
         if preDelay > 0 {
             do {
                 try await Task.sleep(nanoseconds: UInt64(preDelay * 1_000_000_000))
             } catch {
+                return cancelledResult(charCount: text.count, startedAt: startedAt)
+            }
+        }
+        if clipboard.isAvailable(),
+           let pasteResult = await attemptPasteInjection(text, startedAt: startedAt) {
+            return pasteResult
+        }
+        guard !Task.isCancelled else {
+            return cancelledResult(charCount: text.count, startedAt: startedAt)
+        }
+        return attemptTypingInjection(text, startedAt: startedAt)
+    }
+
+    private func attemptPasteInjection(_ text: String, startedAt: Date) async -> InjectionResult? {
+        var pasteSent = false
+        var snapshot: PasteboardSnapshot?
+        var changeCount: Int?
+        do {
+            let taken = try clipboard.snapshot()
+            snapshot = taken
+            let written = try clipboard.setText(text)
+            changeCount = written
+            log("Attempting atomic text injection: chars=\(text.count) pasteboard_change_count=\(written)")
+            try keyboard.paste()
+            pasteSent = true
+            if restoreDelay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(restoreDelay * 1_000_000_000))
+            }
+            let restored = try clipboard.restoreIfUnchanged(taken, expectedChangeCount: written)
+            let duration = elapsed(since: startedAt)
+            log("Text injection successful: method=paste chars=\(text.count) duration=\(fmt(duration))s clipboard_restored=\(restored)")
+            return InjectionResult(success: true, method: .paste, charCount: text.count, duration: duration)
+        } catch {
+            if pasteSent {
+                log("Paste was sent but clipboard restoration failed: \(error)")
                 return InjectionResult(
-                    success: false,
-                    method: .none,
+                    success: true,
+                    method: .paste,
                     charCount: text.count,
-                    duration: elapsed(),
-                    error: "Injection cancelled",
-                    failure: .cancelled
+                    duration: elapsed(since: startedAt),
+                    error: "\(error)"
                 )
             }
-        }
-
-        if clipboard.isAvailable() {
-            var pasteSent = false
-            var snapshot: PasteboardSnapshot?
-            var changeCount: Int?
-            do {
-                let taken = try clipboard.snapshot()
-                snapshot = taken
-                let written = try clipboard.setText(text)
-                changeCount = written
-                log("Attempting atomic text injection: chars=\(text.count)")
-                try keyboard.paste()
-                pasteSent = true
-                if restoreDelay > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(restoreDelay * 1_000_000_000))
+            if let snapshot, let changeCount {
+                do {
+                    _ = try clipboard.restoreIfUnchanged(snapshot, expectedChangeCount: changeCount)
+                } catch {
+                    log("Failed to restore clipboard before typing fallback: \(error)")
                 }
-                _ = try clipboard.restoreIfUnchanged(taken, expectedChangeCount: written)
-                let duration = elapsed()
-                log("Text injection successful: method=paste chars=\(text.count) duration=\(fmt(duration))s")
-                return InjectionResult(success: true, method: .paste, charCount: text.count, duration: duration)
-            } catch {
-                if pasteSent {
-                    // The text is already in the target app; only the restore failed.
-                    log("Paste was sent but clipboard restoration failed: \(error)")
-                    return InjectionResult(
-                        success: true,
-                        method: .paste,
-                        charCount: text.count,
-                        duration: elapsed(),
-                        error: "\(error)"
-                    )
-                }
-                if let snapshot, let changeCount {
-                    do {
-                        _ = try clipboard.restoreIfUnchanged(snapshot, expectedChangeCount: changeCount)
-                    } catch {
-                        log("Failed to restore clipboard before typing fallback: \(error)")
-                    }
-                }
-                log("Atomic paste unavailable, falling back to typing: \(error)")
             }
+            log("Atomic paste unavailable, falling back to typing: \(error)")
+            return nil
         }
+    }
 
-        guard !Task.isCancelled else {
-            return InjectionResult(
-                success: false,
-                method: .none,
-                charCount: text.count,
-                duration: elapsed(),
-                error: "Injection cancelled",
-                failure: .cancelled
-            )
-        }
+    private func attemptTypingInjection(_ text: String, startedAt: Date) -> InjectionResult {
         do {
             log("Attempting typed text injection: chars=\(text.count)")
             try keyboard.typeText(text)
-            let duration = elapsed()
+            let duration = elapsed(since: startedAt)
             log("Text injection successful: method=typing chars=\(text.count) duration=\(fmt(duration))s")
             return InjectionResult(success: true, method: .typing, charCount: text.count, duration: duration)
         } catch {
@@ -219,11 +197,26 @@ public struct TextInjector: Sendable {
                 success: false,
                 method: .typing,
                 charCount: text.count,
-                duration: elapsed(),
+                duration: elapsed(since: startedAt),
                 error: "\(error)",
                 failure: .keyboardUnavailable
             )
         }
+    }
+
+    private func cancelledResult(charCount: Int, startedAt: Date) -> InjectionResult {
+        InjectionResult(
+            success: false,
+            method: .none,
+            charCount: charCount,
+            duration: elapsed(since: startedAt),
+            error: "Injection cancelled",
+            failure: .cancelled
+        )
+    }
+
+    private func elapsed(since startedAt: Date) -> TimeInterval {
+        Date().timeIntervalSince(startedAt)
     }
 
     private func fmt(_ seconds: TimeInterval) -> String {
