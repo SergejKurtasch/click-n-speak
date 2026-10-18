@@ -66,12 +66,18 @@ public final class PreviewPanel: PopupPresenting {
     public var isShowingInteractive: Bool { panel != nil && isInteractive }
     public var currentText: String { textView?.string ?? "" }
 
-    private var initialMouseLocation: NSPoint?
-    private var initialWindowFrame: NSRect?
+    private enum PointerInteraction {
+        case moving(startMouse: NSPoint, startFrame: NSRect)
+        case resizing(edges: PreviewResizeEdges, startMouse: NSPoint, startFrame: NSRect)
+    }
+
+    private var pointerInteraction: PointerInteraction?
+    private weak var resizeGripView: NSView?
 
     /// Test seams: the editor and title are otherwise private to the panel.
     var titleForTesting: String? { titleField?.stringValue }
     var isVisibleForTesting: Bool { panel?.isVisible ?? false }
+    var windowFrameForTesting: NSRect? { panel?.frame }
     var editorAccessibilityIdentifierForTesting: String? {
         textView?.accessibilityIdentifier()
     }
@@ -149,6 +155,7 @@ public final class PreviewPanel: PopupPresenting {
         self.awaitingDecision = true
         self.decisionEnabled = true
         self.incompleteWarning = nil
+        self.pointerInteraction = nil
 
         canonicalTitle = title
         titleField?.stringValue = title
@@ -313,10 +320,12 @@ public final class PreviewPanel: PopupPresenting {
         fadeTask?.cancel()
         toastTask?.cancel()
         removeKeyMonitor()
+        pointerInteraction = nil
         panel?.close()
         panel = nil
         iconView = nil
         titleField = nil
+        resizeGripView = nil
         pendingScrollView?.removeFromSuperview()
         pendingScrollView = nil
         pendingTextView = nil
@@ -355,12 +364,14 @@ public final class PreviewPanel: PopupPresenting {
     private func teardownInteractive() {
         removeKeyMonitor()
         toastTask?.cancel()
+        pointerInteraction = nil
         // Close and drop the panel so the next non-interactive show() builds a
         // fresh one in the right layout.
         panel?.close()
         panel = nil
         iconView = nil
         titleField = nil
+        resizeGripView = nil
         pendingScrollView?.removeFromSuperview()
         pendingScrollView = nil
         pendingTextView = nil
@@ -381,12 +392,22 @@ public final class PreviewPanel: PopupPresenting {
     private func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let keyCode = Int(event.keyCode)
+            let hasCommand = flags.contains(.command)
+            let hasControl = flags.contains(.control)
+            let hasShift = flags.contains(.shift)
+            let characters = event.charactersIgnoringModifiers
             // The monitor always fires on the main thread; NSEvent is not Sendable,
             // so only the Bool verdict crosses the isolation boundary.
             let consumed = MainActor.assumeIsolated {
-                self.handleKey(keyCode: Int(event.keyCode),
-                               hasCommand: event.modifierFlags.contains(.command),
-                               characters: event.charactersIgnoringModifiers)
+                self.handleKey(
+                    keyCode: keyCode,
+                    hasCommand: hasCommand,
+                    hasControl: hasControl,
+                    hasShift: hasShift,
+                    characters: characters
+                )
             }
             return consumed ? nil : event
         }
@@ -394,7 +415,13 @@ public final class PreviewPanel: PopupPresenting {
 
     /// Returns true when the event was handled and must not travel further —
     /// Enter reaching the app behind the popup would fire whatever it focuses.
-    func handleKey(keyCode: Int, hasCommand: Bool, characters: String?) -> Bool {
+    func handleKey(
+        keyCode: Int,
+        hasCommand: Bool,
+        hasControl: Bool = false,
+        hasShift: Bool = false,
+        characters: String?
+    ) -> Bool {
         guard awaitingDecision else { return false }
         switch keyCode {
         case Self.keyReturn, Self.keyEnter:
@@ -406,8 +433,48 @@ public final class PreviewPanel: PopupPresenting {
         default:
             break
         }
-        if hasCommand, characters?.lowercased() == "d" {
+        let lowerChar = characters?.lowercased()
+        if hasCommand, keyCode == Self.keyD || lowerChar == "d" {
             addSelectionToDictionary()
+            return true
+        }
+        if hasCommand || hasControl {
+            return handleEditorShortcut(keyCode: keyCode, hasShift: hasShift, lowerChar: lowerChar)
+        }
+        return false
+    }
+
+    private func handleEditorShortcut(keyCode: Int, hasShift: Bool, lowerChar: String?) -> Bool {
+        guard let textView else { return false }
+        if panel?.firstResponder !== textView {
+            panel?.makeFirstResponder(textView)
+        }
+        if keyCode == Self.keyC || lowerChar == "c" {
+            textView.copy(nil)
+            return true
+        }
+        if keyCode == Self.keyV || lowerChar == "v" {
+            textView.pasteAsPlainText(nil)
+            return true
+        }
+        if keyCode == Self.keyX || lowerChar == "x" {
+            textView.cut(nil)
+            return true
+        }
+        if keyCode == Self.keyA || lowerChar == "a" {
+            textView.selectAll(nil)
+            return true
+        }
+        if keyCode == Self.keyZ || lowerChar == "z" {
+            if hasShift {
+                textView.undoManager?.redo()
+            } else {
+                textView.undoManager?.undo()
+            }
+            return true
+        }
+        if keyCode == Self.keyY || lowerChar == "y" {
+            textView.undoManager?.redo()
             return true
         }
         return false
@@ -420,9 +487,132 @@ public final class PreviewPanel: PopupPresenting {
         }
     }
 
+    private static let keyA = 0
+    private static let keyD = 2
+    private static let keyZ = 6
+    private static let keyX = 7
+    private static let keyC = 8
+    private static let keyV = 9
+    private static let keyY = 16
     private static let keyReturn = 36
     private static let keyEnter = 76  // numpad
     private static let keyEscape = 53
+
+    // MARK: - Pointer move & resize
+
+    private func handleMouseEvent(_ event: NSEvent) -> Bool {
+        guard isInteractive else { return false }
+        switch event.type {
+        case .leftMouseDown:
+            return beginPointerInteraction(
+                at: event.locationInWindow,
+                screenPoint: NSEvent.mouseLocation
+            )
+        case .leftMouseDragged:
+            return updatePointerInteraction(screenPoint: NSEvent.mouseLocation)
+        case .leftMouseUp:
+            return endPointerInteraction(at: event.locationInWindow)
+        case .mouseMoved:
+            updateHoverCursor(at: event.locationInWindow)
+            return false
+        default:
+            return false
+        }
+    }
+
+    func beginPointerInteraction(at windowPoint: NSPoint, screenPoint: NSPoint) -> Bool {
+        guard isInteractive, let panel else { return false }
+        let edges = PreviewPanelSizing.resizeEdges(at: windowPoint, in: panel.frame.size)
+        if !edges.isEmpty {
+            panel.makeKey()
+            pointerInteraction = .resizing(
+                edges: edges,
+                startMouse: screenPoint,
+                startFrame: panel.frame
+            )
+            updateCursor(for: edges)
+            return true
+        }
+        if shouldDragWindow(at: windowPoint, in: panel.frame.size) {
+            panel.makeKey()
+            pointerInteraction = .moving(startMouse: screenPoint, startFrame: panel.frame)
+            return true
+        }
+        return false
+    }
+
+    func updatePointerInteraction(screenPoint: NSPoint) -> Bool {
+        guard isInteractive, let panel, let interaction = pointerInteraction else { return false }
+        switch interaction {
+        case .moving(let startMouse, let startFrame):
+            let delta = NSPoint(x: screenPoint.x - startMouse.x, y: screenPoint.y - startMouse.y)
+            panel.setFrameOrigin(NSPoint(
+                x: startFrame.origin.x + delta.x,
+                y: startFrame.origin.y + delta.y
+            ))
+            return true
+        case .resizing(let edges, let startMouse, let startFrame):
+            let delta = NSPoint(x: screenPoint.x - startMouse.x, y: screenPoint.y - startMouse.y)
+            let newFrame = PreviewPanelSizing.resizedFrame(
+                initialFrame: startFrame,
+                edges: edges,
+                delta: delta
+            )
+            setInteractiveFrame(newFrame)
+            return true
+        }
+    }
+
+    func endPointerInteraction(at windowPoint: NSPoint? = nil) -> Bool {
+        guard pointerInteraction != nil else { return false }
+        pointerInteraction = nil
+        if let windowPoint {
+            updateHoverCursor(at: windowPoint)
+        }
+        return true
+    }
+
+    func setInteractiveFrame(_ newFrame: NSRect) {
+        guard isInteractive, let panel else { return }
+        let clampedSize = NSSize(
+            width: max(PreviewPanelSizing.minimumInteractiveSize.width, newFrame.width),
+            height: max(PreviewPanelSizing.minimumInteractiveSize.height, newFrame.height)
+        )
+        let adjusted = NSRect(origin: newFrame.origin, size: clampedSize)
+        panel.setFrame(adjusted, display: true)
+        panel.contentView?.frame = NSRect(origin: .zero, size: clampedSize)
+        layoutContent(for: clampedSize)
+    }
+
+    private func shouldDragWindow(at point: NSPoint, in size: NSSize) -> Bool {
+        let bounds = NSRect(origin: .zero, size: size)
+        guard bounds.contains(point) else { return false }
+        if let scrollView, scrollView.frame.contains(point) { return false }
+        if let pendingScrollView, pendingScrollView.frame.contains(point) { return false }
+        return true
+    }
+
+    private func updateHoverCursor(at windowPoint: NSPoint) {
+        guard isInteractive, let panel else { return }
+        let edges = PreviewPanelSizing.resizeEdges(at: windowPoint, in: panel.frame.size)
+        if !edges.isEmpty {
+            updateCursor(for: edges)
+        } else if shouldDragWindow(at: windowPoint, in: panel.frame.size) {
+            NSCursor.arrow.set()
+        }
+    }
+
+    private func updateCursor(for edges: PreviewResizeEdges) {
+        let isHorizontal = edges.contains(.left) || edges.contains(.right)
+        let isVertical = edges.contains(.top) || edges.contains(.bottom)
+        if isHorizontal && isVertical {
+            NSCursor.crosshair.set()
+        } else if isHorizontal {
+            NSCursor.resizeLeftRight.set()
+        } else if isVertical {
+            NSCursor.resizeUpDown.set()
+        }
+    }
 
     // MARK: - Toast
 
@@ -456,6 +646,7 @@ public final class PreviewPanel: PopupPresenting {
             self.panel = nil
             iconView = nil
             titleField = nil
+            resizeGripView = nil
             textField = nil
             textView = nil
             scrollView = nil
@@ -474,6 +665,11 @@ public final class PreviewPanel: PopupPresenting {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.ignoresMouseEvents = !interactive
+        panel.acceptsMouseMovedEvents = interactive
+        panel.minSize = PreviewPanelSizing.minimumInteractiveSize
+        panel.onSendEvent = { [weak self] event in
+            self?.handleMouseEvent(event) ?? false
+        }
         panel.setAccessibilityLabel(interactive
             ? i18n.t("preview.editor_accessibility")
             : canonicalTitle)
@@ -484,6 +680,7 @@ public final class PreviewPanel: PopupPresenting {
         effect.state = .active
         effect.wantsLayer = true
         effect.layer?.cornerRadius = 12
+        effect.autoresizingMask = [.width, .height]
 
         let iconSize: CGFloat = 20
         let iconX: CGFloat = 15
@@ -502,58 +699,13 @@ public final class PreviewPanel: PopupPresenting {
         effect.addSubview(title)
         self.titleField = title
 
-        let textBottomPad: CGFloat = 10
-        let titleGap: CGFloat = 10
-        let textH = titleY - textBottomPad - titleGap
-        let textW = width - 30
-
         if interactive {
-            let scroll = NSScrollView(frame: NSRect(x: 15, y: textBottomPad, width: textW, height: textH))
-            scroll.hasVerticalScroller = true
-            scroll.hasHorizontalScroller = false
-            scroll.autohidesScrollers = false
-            scroll.borderType = .noBorder
-            scroll.drawsBackground = true
-            scroll.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08)
-            scroll.wantsLayer = true
-            scroll.layer?.cornerRadius = 6
-
-            let contentSize = scroll.contentSize
-            let editor = DictionaryAwareTextView(
-                frame: NSRect(origin: .zero, size: contentSize)
-            )
-            editor.minSize = contentSize
-            editor.maxSize = NSSize(width: contentSize.width, height: .greatestFiniteMagnitude)
-            editor.isVerticallyResizable = true
-            editor.isHorizontallyResizable = false
-            editor.textContainer?.containerSize = NSSize(
-                width: contentSize.width,
-                height: .greatestFiniteMagnitude
-            )
-            editor.textContainer?.widthTracksTextView = true
-            editor.textContainer?.lineFragmentPadding = 4
-            editor.textColor = .labelColor
-            editor.font = .systemFont(ofSize: 14)
-            editor.isEditable = true
-            editor.isSelectable = true
-            editor.drawsBackground = false
-            editor.insertionPointColor = .labelColor
-            editor.isRichText = false
-            editor.isAutomaticSpellingCorrectionEnabled = false
-            editor.isAutomaticQuoteSubstitutionEnabled = false
-            editor.isAutomaticDashSubstitutionEnabled = false
-            editor.addToDictionaryTitle = i18n.t("preview.add_dictionary")
-            editor.onAddToDictionary = { [weak self] in self?.addSelectionToDictionary() }
-            editor.setAccessibilityLabel(i18n.t("preview.editor_accessibility"))
-            editor.setAccessibilityHelp(i18n.t("preview.editor_help"))
-            editor.setAccessibilityIdentifier("preview.editor")
-
-            scroll.documentView = editor
-            effect.addSubview(scroll)
-            self.scrollView = scroll
-            self.textView = editor
-            self.textField = nil
+            configureInteractiveEditor(in: effect, size: rect.size, titleY: titleY)
         } else {
+            let textBottomPad: CGFloat = 10
+            let titleGap: CGFloat = 10
+            let textH = titleY - textBottomPad - titleGap
+            let textW = width - 30
             let text = NSTextField(frame: NSRect(x: 15, y: textBottomPad, width: textW, height: textH))
             configureLabel(text, color: .secondaryLabelColor, font: .systemFont(ofSize: 14))
             text.setAccessibilityIdentifier("preview.live-text")
@@ -563,12 +715,76 @@ public final class PreviewPanel: PopupPresenting {
             self.textField = text
             self.textView = nil
             self.scrollView = nil
+            self.resizeGripView = nil
         }
 
         panel.contentView = effect
         panel.alphaValue = 0
         self.panel = panel
         return panel
+    }
+
+    private func configureInteractiveEditor(in effect: NSView, size: NSSize, titleY: CGFloat) {
+        let textBottomPad: CGFloat = 10
+        let titleGap: CGFloat = 10
+        let textH = titleY - textBottomPad - titleGap
+        let textW = size.width - 30
+
+        let scroll = NSScrollView(frame: NSRect(x: 15, y: textBottomPad, width: textW, height: textH))
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = false
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = true
+        scroll.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08)
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 6
+
+        let contentSize = scroll.contentSize
+        let editor = DictionaryAwareTextView(
+            frame: NSRect(origin: .zero, size: contentSize)
+        )
+        editor.minSize = contentSize
+        editor.maxSize = NSSize(width: contentSize.width, height: .greatestFiniteMagnitude)
+        editor.isVerticallyResizable = true
+        editor.isHorizontallyResizable = false
+        editor.textContainer?.containerSize = NSSize(
+            width: contentSize.width,
+            height: .greatestFiniteMagnitude
+        )
+        editor.textContainer?.widthTracksTextView = true
+        editor.textContainer?.lineFragmentPadding = 4
+        editor.textColor = .labelColor
+        editor.font = .systemFont(ofSize: 14)
+        editor.typingAttributes = [
+            .foregroundColor: NSColor.labelColor,
+            .font: NSFont.systemFont(ofSize: 14),
+        ]
+        editor.isEditable = true
+        editor.isSelectable = true
+        editor.allowsUndo = true
+        editor.drawsBackground = false
+        editor.insertionPointColor = .labelColor
+        editor.isRichText = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.addToDictionaryTitle = i18n.t("preview.add_dictionary")
+        editor.onAddToDictionary = { [weak self] in self?.addSelectionToDictionary() }
+        editor.setAccessibilityLabel(i18n.t("preview.editor_accessibility"))
+        editor.setAccessibilityHelp(i18n.t("preview.editor_help"))
+        editor.setAccessibilityIdentifier("preview.editor")
+
+        scroll.documentView = editor
+        effect.addSubview(scroll)
+
+        let grip = ResizeGripView(frame: NSRect(x: size.width - 14, y: 2, width: 12, height: 12))
+        effect.addSubview(grip)
+
+        self.scrollView = scroll
+        self.textView = editor
+        self.textField = nil
+        self.resizeGripView = grip
     }
 
     private func makePendingScrollView() -> NSScrollView {
@@ -604,14 +820,14 @@ public final class PreviewPanel: PopupPresenting {
     /// Set the editor's text with semantic foreground attributes.
     private func setEditorText(_ text: String) {
         guard let textView else { return }
-        let attributed = NSAttributedString(
-            string: text,
-            attributes: [
-                .foregroundColor: NSColor.labelColor,
-                .font: NSFont.systemFont(ofSize: 14),
-            ]
-        )
+        let attributes: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.labelColor,
+            .font: NSFont.systemFont(ofSize: 14),
+        ]
+        let attributed = NSAttributedString(string: text, attributes: attributes)
         textView.textStorage?.setAttributedString(attributed)
+        textView.typingAttributes = attributes
+        textView.undoManager?.removeAllActions()
     }
 
     private func resizeInteractive(for text: String, preservingPosition: Bool) {
@@ -658,6 +874,7 @@ public final class PreviewPanel: PopupPresenting {
         let titleX = iconX + iconSize + 10
         let titleY = size.height - 15 - 18
         titleField?.frame = NSRect(x: titleX, y: titleY, width: size.width - titleX - 15, height: 20)
+        resizeGripView?.frame = NSRect(x: size.width - 14, y: 2, width: 12, height: 12)
 
         let textBottomPad: CGFloat = 10
         var textHeight = titleY - textBottomPad - 10
@@ -690,7 +907,19 @@ public final class PreviewPanel: PopupPresenting {
                 width: contentSize.width,
                 height: .greatestFiniteMagnitude
             )
-            textView.setFrameSize(NSSize(width: contentSize.width, height: max(textView.frame.height, contentSize.height)))
+            if let container = textView.textContainer, let layoutManager = textView.layoutManager {
+                layoutManager.ensureLayout(for: container)
+                let usedHeight = ceil(layoutManager.usedRect(for: container).height)
+                textView.setFrameSize(NSSize(
+                    width: contentSize.width,
+                    height: max(contentSize.height, usedHeight)
+                ))
+            } else {
+                textView.setFrameSize(NSSize(
+                    width: contentSize.width,
+                    height: max(textView.frame.height, contentSize.height)
+                ))
+            }
         }
     }
 
@@ -735,6 +964,42 @@ public final class PreviewPanel: PopupPresenting {
 /// A borderless non-activating panel refuses key status by default, which would
 /// leave the editor unable to receive typing.
 final class KeyablePanel: NSPanel {
+    var onSendEvent: ((NSEvent) -> Bool)?
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        if onSendEvent?(event) == true { return }
+        super.sendEvent(event)
+    }
+}
+
+/// Subtle visual resize grip drawn in the bottom-right corner of the interactive popup.
+private final class ResizeGripView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath()
+        path.lineWidth = 1.2
+        path.lineCapStyle = .round
+        for offset: CGFloat in [3, 6, 9] {
+            path.move(to: NSPoint(x: bounds.maxX - offset, y: bounds.minY + 1))
+            path.line(to: NSPoint(x: bounds.maxX - 1, y: bounds.minY + offset))
+        }
+        NSColor.tertiaryLabelColor.setStroke()
+        path.stroke()
+    }
 }

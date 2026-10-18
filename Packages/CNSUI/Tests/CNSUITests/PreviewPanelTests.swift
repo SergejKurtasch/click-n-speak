@@ -563,4 +563,109 @@ struct PreviewPanelTests {
         #expect(!panel.isVisibleForTesting)
         panel.close()
     }
+
+    @Test("Command and Control editing shortcuts support copy, cut, paste, select all, undo, and redo")
+    func editingShortcutsWithCommandAndControl() {
+        let panel = makePanel()
+        panel.showInteractive(text: "первое второе", title: "Edit", onConfirm: { _ in })
+
+        // Select "первое" and copy with Ctrl+C (Russian layout character "с", keyCode 8)
+        panel.setSelectionForTesting(NSRange(location: 0, length: 6))
+        #expect(panel.handleKey(keyCode: 8, hasCommand: false, hasControl: true, characters: "с") == true)
+        #expect(NSPasteboard.general.string(forType: .string) == "первое")
+
+        // Select "второе" and cut with Cmd+X (keyCode 7)
+        panel.setSelectionForTesting(NSRange(location: 7, length: 6))
+        #expect(panel.handleKey(keyCode: 7, hasCommand: true, characters: "x") == true)
+        #expect(panel.currentText == "первое ")
+        #expect(NSPasteboard.general.string(forType: .string) == "второе")
+
+        // Undo the cut with Ctrl+Z (keyCode 6)
+        #expect(panel.handleKey(keyCode: 6, hasCommand: false, hasControl: true, characters: "я") == true)
+        #expect(panel.currentText == "первое второе")
+
+        // Redo the cut with Shift+Cmd+Z (keyCode 6)
+        #expect(panel.handleKey(keyCode: 6, hasCommand: true, hasShift: true, characters: "z") == true)
+        #expect(panel.currentText == "первое ")
+
+        // Select all with Ctrl+A (keyCode 0) and paste "второе" with Ctrl+V (keyCode 9)
+        #expect(panel.handleKey(keyCode: 0, hasCommand: false, hasControl: true, characters: "ф") == true)
+        #expect(panel.selectionForTesting == NSRange(location: 0, length: 7))
+        #expect(panel.handleKey(keyCode: 9, hasCommand: false, hasControl: true, characters: "м") == true)
+        #expect(panel.currentText == "второе")
+
+        panel.close()
+    }
+
+    @Test("Dragging the header moves the interactive popup without intercepting editor clicks")
+    func dragsInteractivePopupByHeader() throws {
+        let panel = makePanel()
+        let marker = "Draggable popup text"
+        panel.showInteractive(text: marker, title: "Edit", onConfirm: { _ in })
+        let initialFrame = try #require(panel.windowFrameForTesting)
+
+        // Clicking inside the text editor area should NOT start a window drag.
+        let editorPoint = NSPoint(x: initialFrame.width / 2, y: initialFrame.height / 2)
+        #expect(panel.beginPointerInteraction(
+            at: editorPoint,
+            screenPoint: NSPoint(x: 200, y: 200)
+        ) == false)
+
+        // Clicking on the header bar starts a window move.
+        let headerPoint = NSPoint(x: initialFrame.width / 2, y: initialFrame.height - 22)
+        #expect(panel.beginPointerInteraction(
+            at: headerPoint,
+            screenPoint: NSPoint(x: 200, y: 200)
+        ) == true)
+        #expect(panel.updatePointerInteraction(screenPoint: NSPoint(x: 320, y: 150)) == true)
+        #expect(panel.endPointerInteraction(at: headerPoint) == true)
+
+        let movedFrame = try #require(panel.windowFrameForTesting)
+        #expect(movedFrame.origin.x == initialFrame.origin.x + 120)
+        #expect(movedFrame.origin.y == initialFrame.origin.y - 50)
+        #expect(movedFrame.size == initialFrame.size)
+        panel.close()
+    }
+
+    @Test("Dragging edges and corners resizes the interactive popup and updates editor layout")
+    func resizesInteractivePopupFromEdgesAndCorners() throws {
+        let panel = makePanel()
+        let marker = "Resizable popup text"
+        panel.showInteractive(text: marker, title: "Edit", onConfirm: { _ in })
+        let initialFrame = try #require(panel.windowFrameForTesting)
+
+        // Grab bottom-right corner and drag right by +140, down by -80 (growing width & height).
+        let bottomRightPoint = NSPoint(x: initialFrame.width - 4, y: 4)
+        #expect(panel.beginPointerInteraction(
+            at: bottomRightPoint,
+            screenPoint: NSPoint(x: 400, y: 400)
+        ) == true)
+        #expect(panel.updatePointerInteraction(screenPoint: NSPoint(x: 540, y: 320)) == true)
+        #expect(panel.endPointerInteraction(at: bottomRightPoint) == true)
+
+        let enlargedFrame = try #require(panel.windowFrameForTesting)
+        #expect(enlargedFrame.width == initialFrame.width + 140)
+        #expect(enlargedFrame.height == initialFrame.height + 80)
+        #expect(enlargedFrame.minX == initialFrame.minX)
+        #expect(enlargedFrame.maxY == initialFrame.maxY)
+
+        let window = try #require(editorWindow(containing: marker))
+        let scroll = try #require(window.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first)
+        #expect(scroll.frame.width == enlargedFrame.width - 30)
+
+        // Shrinking beyond minimum size clamps to minimumInteractiveSize.
+        let leftEdgePoint = NSPoint(x: 3, y: enlargedFrame.height / 2)
+        #expect(panel.beginPointerInteraction(
+            at: leftEdgePoint,
+            screenPoint: NSPoint(x: 400, y: 400)
+        ) == true)
+        #expect(panel.updatePointerInteraction(screenPoint: NSPoint(x: 1_200, y: 400)) == true)
+        #expect(panel.endPointerInteraction(at: leftEdgePoint) == true)
+
+        let clampedFrame = try #require(panel.windowFrameForTesting)
+        #expect(clampedFrame.width == PreviewPanelSizing.minimumInteractiveSize.width)
+        #expect(clampedFrame.maxX == enlargedFrame.maxX)
+
+        panel.close()
+    }
 }
